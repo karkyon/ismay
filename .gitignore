@@ -25,3 +25,9 @@ Thumbs.db
 
 # Docker
 docker-data/
+
+# Prisma CLI agent skills (unused)
+app/.claude/
+app/.windsurf/
+app/.agents/
+app/skills-lock.json
