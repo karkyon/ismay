@@ -1,4 +1,32 @@
-// ISMAY schema.prisma
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ISMAY schema.prisma 反映パッチ（一度きり実行・プロジェクトルート直下）
+====================================================================
+DB設計書v1.1 TBL-001〜026 + 認証拡張(UserSession/UserTotpSecret) +
+pgvector Embedding(responsibility_embeddings) を反映した schema.prisma を
+サーバーへ適用し、検証・マイグレーション・コンパイルチェックを行い、
+すべて成功した場合のみ GitHub へ自動push する。
+
+実行方法:
+    cd ~/projects/ismay
+    python3 apply_ismay_schema_v2.py
+
+失敗した場合は該当ステップで停止し、pushは一切行わない。
+成功した場合、バックアップと本スクリプト自身を自動削除する。
+"""
+import subprocess
+import sys
+import os
+import shutil
+import datetime
+
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.join(REPO_ROOT, "app")
+SCHEMA_PATH = os.path.join(APP_DIR, "prisma", "schema.prisma")
+BACKUP_PATH = SCHEMA_PATH + ".bak_" + datetime.date.today().strftime("%Y%m%d")
+
+NEW_SCHEMA = r'''// ISMAY schema.prisma
 // DB設計書v1.1 3章「テーブル一覧」の TBL-001〜026 を反映。
 // 列定義が正式資料に明記されていない部分は [推論] とコメントし、次回レビュー対象とする。
 // 認証方式は「OIDC準拠（システム基本設計書v1.2 7章）」の決定に基づき、
@@ -613,3 +641,65 @@ model AuditLog {
   @@index([targetType, targetId])
   @@map("audit_logs")
 }
+'''
+
+
+def run(cmd, cwd):
+    print("\n$ " + " ".join(cmd))
+    result = subprocess.run(cmd, cwd=cwd)
+    return result.returncode
+
+
+def fail(message):
+    print("\n[FAIL] " + message)
+    print("       pushは行いません。schema.prismaは新しい内容のまま残ります。")
+    print("       ロールバックする場合: cp '" + BACKUP_PATH + "' '" + SCHEMA_PATH + "'")
+    sys.exit(1)
+
+
+def main():
+    if not os.path.isfile(SCHEMA_PATH):
+        fail("schema.prismaが見つかりません: " + SCHEMA_PATH)
+
+    print("[1/6] 現行schema.prismaをバックアップ: " + BACKUP_PATH)
+    shutil.copy2(SCHEMA_PATH, BACKUP_PATH)
+
+    print("[2/6] 新schema.prisma(TBL-001〜026 + 認証拡張 + pgvector)を書き込み")
+    with open(SCHEMA_PATH, "w", encoding="utf-8") as f:
+        f.write(NEW_SCHEMA)
+
+    print("[3/6] npx prisma validate")
+    if run(["npx", "prisma", "validate"], cwd=APP_DIR) != 0:
+        fail("prisma validateでエラーが検出されました。")
+
+    print("[4/6] npx prisma generate")
+    if run(["npx", "prisma", "generate"], cwd=APP_DIR) != 0:
+        fail("prisma generateでエラーが検出されました。")
+
+    print("[5/6] npx prisma migrate dev --name init_core_schema_v2")
+    if run(["npx", "prisma", "migrate", "dev", "--name", "init_core_schema_v2"], cwd=APP_DIR) != 0:
+        fail("マイグレーション適用でエラーが検出されました。pgvector拡張(CREATE EXTENSION vector)が有効か確認してください。")
+
+    print("[6/6] npx tsc --noEmit (コンパイルエラー0件ゲート)")
+    if run(["npx", "tsc", "--noEmit"], cwd=APP_DIR) != 0:
+        fail("TypeScriptコンパイルエラーが検出されました。")
+
+    print("\n[OK] 全ステップ成功（コンパイルエラー0件）。GitHubへpushします。")
+    run(["git", "add", "-A"], cwd=REPO_ROOT)
+    commit_msg = "feat(db): schema.prisma に TBL-001-026 全反映 + 認証拡張(session/TOTP) + pgvector embedding を追加"
+    if run(["git", "commit", "-m", commit_msg], cwd=REPO_ROOT) != 0:
+        print("[WARN] コミットする変更がないか、コミットに失敗しました。git statusを確認してください。")
+        sys.exit(1)
+    if run(["git", "push", "origin", "main"], cwd=REPO_ROOT) != 0:
+        fail("git pushに失敗しました。手動で `git push origin main` を実行してください。")
+
+    print("\n[CLEANUP] バックアップと本スクリプト自身を削除します")
+    if os.path.exists(BACKUP_PATH):
+        os.remove(BACKUP_PATH)
+    os.remove(os.path.abspath(__file__))
+
+    print("\n完了しました。次: npx prisma studio --port 15555 で26+3テーブルを目視確認してください。")
+
+
+if __name__ == "__main__":
+    main()
