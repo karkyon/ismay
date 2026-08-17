@@ -1,0 +1,64 @@
+name: ismay
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: ismay-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ismay
+      POSTGRES_PASSWORD: ismay_dev_password
+      POSTGRES_DB: ismay_dev
+    ports:
+      - "15432:5432"
+    volumes:
+      - ./docker-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ismay -d ismay_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ismay-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: ismay-redis
+    restart: unless-stopped
+    ports:
+      - "16379:6379"
+    volumes:
+      - ./docker-data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ismay-net
+
+  minio:
+    image: minio/minio:latest
+    container_name: ismay-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ismay_minio
+      MINIO_ROOT_PASSWORD: ismay_minio_password
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    volumes:
+      - ./docker-data/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ismay-net
+
+networks:
+  ismay-net:
+    name: ismay-net
+    driver: bridge
