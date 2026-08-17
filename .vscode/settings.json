@@ -1,0 +1,11 @@
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "typescript.tsdk": "app/node_modules/typescript/lib",
+  "eslint.workingDirectories": ["app"],
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/.next": true,
+    "**/docker-data": true
+  }
+}
