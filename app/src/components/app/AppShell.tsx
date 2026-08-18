@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { debugFetch } from "@/lib/auth/client";
+import { debugFetch, AUTH_EXPIRED_EVENT } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { isTypingTarget } from "@/lib/keyboard";
 import { TodayIcon, InboxIcon, CalendarIcon, SettingsIcon, MicIcon } from "@/components/icons";
@@ -43,6 +43,18 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
+  }, [router]);
+
+  // 画面滞在中にAccess Tokenが失効し、かつRefresh Tokenでの自動延長(client.ts側)も
+  // 失敗した場合、apiFetch/debugFetchがAUTH_EXPIRED_EVENTを発火する。
+  // ここはページのどこに居ても捕捉できるよう、常にマウントされているAppShellで購読する。
+  useEffect(() => {
+    function onAuthExpired() {
+      debugLog.event("AppShell", "auth expired event received, redirecting to /login");
+      router.replace("/login");
+    }
+    window.addEventListener(AUTH_EXPIRED_EVENT, onAuthExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onAuthExpired);
   }, [router]);
 
   // Linearの"C"仕様(公式チートシート記載: 「アプリ内どこからでも効く」)を踏襲。

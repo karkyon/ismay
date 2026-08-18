@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { apiFetch } from "@/lib/auth/client";
+import { apiFetch, debugFetch } from "@/lib/auth/client";
 
 interface MeResponse {
   data: { user: { id: string; email: string; displayName: string | null }; mfaEnabled: boolean };
@@ -35,7 +35,10 @@ export function DashboardClient() {
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
-    const meRes = await fetch("/api/v1/auth/me");
+    // debugFetchは401時に自動でRefresh Tokenによるサイレント延長を1回試みる(src/lib/auth/client.ts)。
+    // それでも失敗した場合はAUTH_EXPIRED_EVENTが発火するが、この画面はAppShell配下ではないため
+    // 従来通りここでも明示的に/loginへ遷移させる(二重ガード)。
+    const meRes = await debugFetch("/api/v1/auth/me");
     if (!meRes.ok) {
       router.replace("/login");
       return;
@@ -43,7 +46,7 @@ export function DashboardClient() {
     const meBody: MeResponse = await meRes.json();
     setMe(meBody.data);
 
-    const sessionsRes = await fetch("/api/v1/auth/sessions");
+    const sessionsRes = await debugFetch("/api/v1/auth/sessions");
     if (sessionsRes.ok) {
       const body = await sessionsRes.json();
       setSessions(body.data.sessions);
