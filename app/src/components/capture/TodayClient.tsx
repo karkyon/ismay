@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { debugFetch } from "@/lib/auth/client";
+import { debugLog } from "@/lib/debug";
 import { QuickCaptureForm } from "@/components/capture/QuickCaptureForm";
 
 interface CaptureListItem {
@@ -21,9 +23,10 @@ export function TodayClient() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const res = await fetch("/api/v1/captures?limit=100");
+    const res = await debugFetch("/api/v1/captures?limit=100");
     if (res.ok) {
       const body = await res.json();
+      debugLog.state("TodayClient", "captures", { count: body.data.captures.length });
       setCaptures(body.data.captures);
     }
     setLoading(false);

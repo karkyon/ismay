@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch } from "@/lib/auth/client";
+import { apiFetch, debugFetch } from "@/lib/auth/client";
+import { debugLog } from "@/lib/debug";
+import { formatRelativeTime } from "@/lib/format";
 import { QuickCaptureForm } from "@/components/capture/QuickCaptureForm";
 
 interface CaptureListItem {
@@ -37,12 +39,20 @@ const STATUS_LABEL: Record<string, string> = {
   FAILED: "解析失敗",
 };
 
-const STATUS_STYLE: Record<string, string> = {
+const STATUS_BADGE_STYLE: Record<string, string> = {
   SAVED: "bg-canvas text-muted",
   QUEUED: "bg-decide-50 text-decide",
   PROCESSING: "bg-ai-50 text-ai",
   READY: "bg-safe-50 text-safe",
   FAILED: "bg-warn-50 text-warn",
+};
+
+const STATUS_DOT_STYLE: Record<string, string> = {
+  SAVED: "bg-faint",
+  QUEUED: "bg-decide",
+  PROCESSING: "bg-ai",
+  READY: "bg-safe",
+  FAILED: "bg-warn",
 };
 
 const SOURCE_TYPE_LABEL: Record<string, string> = {
@@ -52,7 +62,16 @@ const SOURCE_TYPE_LABEL: Record<string, string> = {
   IMPORT: "取込",
 };
 
-/** UI-04 Inbox: 原文から責任候補を確認する画面(API-CAP-01〜04と接続)。 */
+/**
+ * UI-04 Inbox: 原文から責任候補を確認する画面(API-CAP-01〜04と接続)。
+ *
+ * デザイン方針(2026-08-18改訂): 一覧行と詳細パネルの見た目がほぼ同一で
+ * 「連関がわかりにくい」という指摘への対応として、
+ * - 一覧(左): 装飾を最小限にした「行」。選択時のみ左アクセントバー+淡色背景+ドットで示す。
+ * - 詳細(右): ヘッダー/本文/AI候補の3領域を持つ「開いている文書」。
+ * という明確に異なる表現に分離した。この一覧/詳細パターンは今後追加する
+ * 画面(Responsibility一覧等)にも踏襲する想定。
+ */
 export function InboxClient() {
   const [captures, setCaptures] = useState<CaptureListItem[]>([]);
   const [loadingList, setLoadingList] = useState(true);
@@ -65,10 +84,11 @@ export function InboxClient() {
 
   const loadList = useCallback(async () => {
     setLoadingList(true);
-    const res = await fetch("/api/v1/captures");
+    const res = await debugFetch("/api/v1/captures");
     if (res.ok) {
       const body = await res.json();
       const items: CaptureListItem[] = body.data.captures;
+      debugLog.state("InboxClient", "captures", { count: items.length });
       setCaptures(items);
       setSelectedId((current) => current ?? items[0]?.id ?? null);
     }
@@ -79,8 +99,8 @@ export function InboxClient() {
     setLoadingDetail(true);
     setError("");
     const [detailRes, inferRes] = await Promise.all([
-      fetch(`/api/v1/captures/${id}`),
-      fetch(`/api/v1/captures/${id}/inferences`),
+      debugFetch(`/api/v1/captures/${id}`),
+      debugFetch(`/api/v1/captures/${id}/inferences`),
     ]);
     if (detailRes.ok) {
       const body = await detailRes.json();
@@ -101,8 +121,14 @@ export function InboxClient() {
     if (selectedId) loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
+  function selectCapture(id: string) {
+    debugLog.event("InboxClient", "select capture", { id });
+    setSelectedId(id);
+  }
+
   async function requestAnalyze() {
     if (!selectedId) return;
+    debugLog.event("InboxClient", "request analyze", { id: selectedId });
     setAnalyzing(true);
     setError("");
     try {
@@ -129,93 +155,119 @@ export function InboxClient() {
         <QuickCaptureForm onCreated={loadList} />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
-        <div className="lg:col-span-2 space-y-2">
-          {loadingList && <p className="text-sm text-faint">読み込み中...</p>}
-          {!loadingList && captures.length === 0 && (
-            <div className="bg-surface border border-line rounded-xl p-4 text-sm text-muted">
-              まだ何も書き留めていません。上の入力欄から最初のメモを保存してみてください。
-            </div>
-          )}
-          {captures.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => setSelectedId(c.id)}
-              className={`w-full text-left bg-surface rounded-xl p-3.5 transition ${
-                selectedId === c.id ? "border-2 border-brand shadow-card" : "border border-line hover:border-ink/20"
-              }`}
-            >
-              <div className="flex items-center justify-between mb-1 gap-2">
-                <span className="text-[11px] font-mono text-faint truncate">
-                  {SOURCE_TYPE_LABEL[c.sourceType] ?? c.sourceType} ・ {new Date(c.createdAt).toLocaleString("ja-JP")}
-                </span>
-                <span
-                  className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-mono ${
-                    STATUS_STYLE[c.processingStatus] ?? "bg-canvas text-muted"
-                  }`}
-                >
-                  {STATUS_LABEL[c.processingStatus] ?? c.processingStatus}
-                </span>
-              </div>
-              <p className="text-sm line-clamp-2">{c.rawText || "(本文なし・音声のみ)"}</p>
-            </button>
-          ))}
+      {!loadingList && captures.length === 0 ? (
+        <div className="bg-surface border border-line rounded-2xl p-10 text-center">
+          <p className="text-sm text-muted">まだ何も書き留めていません。</p>
+          <p className="text-sm text-muted mt-1">上の入力欄から最初のメモを保存してみてください。</p>
         </div>
-
-        <div className="lg:col-span-3">
-          {!selectedId && <div className="text-sm text-faint">左の一覧から項目を選んでください</div>}
-          {selectedId && loadingDetail && <p className="text-sm text-faint">読み込み中...</p>}
-          {selectedId && !loadingDetail && detail && (
-            <div className="bg-surface border border-line rounded-2xl shadow-card p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <span
-                  className={`text-[11px] px-2 py-1 rounded font-mono ${
-                    STATUS_STYLE[detail.processingStatus] ?? "bg-canvas text-muted"
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 items-start">
+          <div className="lg:col-span-2 space-y-1">
+            {loadingList && <p className="text-sm text-faint px-1">読み込み中...</p>}
+            {captures.map((c) => {
+              const selected = selectedId === c.id;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => selectCapture(c.id)}
+                  className={`w-full text-left rounded-lg pl-3 pr-3 py-2.5 border-l-[3px] transition ${
+                    selected ? "bg-brand-50 border-l-brand" : "border-l-transparent hover:bg-canvas"
                   }`}
                 >
-                  {STATUS_LABEL[detail.processingStatus] ?? detail.processingStatus}
-                </span>
-                <span className="text-[11px] text-faint font-mono">
-                  {SOURCE_TYPE_LABEL[detail.sourceType] ?? detail.sourceType} ・ v{detail.version}
-                </span>
-              </div>
-              <p className="text-sm whitespace-pre-wrap">{detail.rawText || "(本文なし・音声のみ)"}</p>
+                  <div className="flex items-start gap-2">
+                    <span
+                      className={`shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full ${
+                        STATUS_DOT_STYLE[c.processingStatus] ?? "bg-faint"
+                      }`}
+                    />
+                    <div className="min-w-0">
+                      <p
+                        className={`text-sm leading-snug line-clamp-1 ${
+                          selected ? "font-semibold text-brand-700" : "text-ink"
+                        }`}
+                      >
+                        {c.rawText || "(本文なし・音声のみ)"}
+                      </p>
+                      <p className="text-[11px] text-faint mt-0.5">
+                        {SOURCE_TYPE_LABEL[c.sourceType] ?? c.sourceType} ・ {formatRelativeTime(c.createdAt)}
+                      </p>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
 
-              <div className="border-t border-line pt-4">
-                <div className="flex items-center justify-between mb-2 gap-3">
-                  <span className="text-xs font-mono tracking-wide text-faint">AI候補</span>
-                  <button
-                    onClick={requestAnalyze}
-                    disabled={
-                      analyzing ||
-                      detail.processingStatus === "QUEUED" ||
-                      detail.processingStatus === "PROCESSING"
-                    }
-                    className="text-xs border border-line rounded-lg px-3 py-1.5 hover:bg-canvas disabled:opacity-40 transition"
+          <div className="lg:col-span-3 lg:sticky lg:top-8">
+            {selectedId && loadingDetail && (
+              <div className="bg-surface border border-line rounded-2xl p-10 text-center text-sm text-faint">
+                読み込み中...
+              </div>
+            )}
+            {selectedId && !loadingDetail && detail && (
+              <div className="bg-surface border border-line rounded-2xl shadow-card overflow-hidden">
+                <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-line bg-canvas/60">
+                  <div>
+                    <p className="text-[10px] text-faint font-mono uppercase tracking-wider">選択中のメモ</p>
+                    <p className="text-xs text-muted mt-0.5">
+                      {SOURCE_TYPE_LABEL[detail.sourceType] ?? detail.sourceType} ・{" "}
+                      {new Date(detail.createdAt).toLocaleString("ja-JP")}
+                    </p>
+                  </div>
+                  <span
+                    className={`shrink-0 text-[11px] px-2.5 py-1 rounded-full font-medium ${
+                      STATUS_BADGE_STYLE[detail.processingStatus] ?? "bg-canvas text-muted"
+                    }`}
                   >
-                    {analyzing ? "要求中..." : "解析を要求する"}
-                  </button>
+                    {STATUS_LABEL[detail.processingStatus] ?? detail.processingStatus}
+                  </span>
                 </div>
-                {inferences.length === 0 ? (
-                  <p className="text-xs text-faint">
-                    候補はまだありません。AI Workerは未実装のため、解析要求後もこの一覧は空のままです(次回実装予定)。
+
+                <div className="px-5 py-5">
+                  <p className="text-base font-serif leading-relaxed whitespace-pre-wrap">
+                    {detail.rawText || "(本文なし・音声のみ)"}
                   </p>
-                ) : (
-                  <ul className="space-y-2">
-                    {inferences.map((inf) => (
-                      <li key={inf.id} className="bg-ai-50 rounded-lg p-3 text-xs">
-                        <span className="font-mono text-ai">{inf.inferenceType}</span>
-                        <span className="ml-2 text-muted">確度 {inf.confidence}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                </div>
+
+                <div className="border-t border-line bg-canvas/60 px-5 py-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold text-ink">AI候補</p>
+                      <p className="text-[11px] text-faint mt-0.5 max-w-md">
+                        {inferences.length === 0
+                          ? "AI Workerは未実装のため、解析要求後もこの一覧は空のままです(次回実装予定)"
+                          : `${inferences.length}件の候補があります`}
+                      </p>
+                    </div>
+                    <button
+                      onClick={requestAnalyze}
+                      disabled={
+                        analyzing ||
+                        detail.processingStatus === "QUEUED" ||
+                        detail.processingStatus === "PROCESSING"
+                      }
+                      className="shrink-0 text-xs bg-ink text-white rounded-lg px-3 py-2 disabled:opacity-40 hover:bg-black transition"
+                    >
+                      {analyzing ? "要求中..." : "解析を要求する"}
+                    </button>
+                  </div>
+                  {inferences.length > 0 && (
+                    <ul className="space-y-2 mt-3">
+                      {inferences.map((inf) => (
+                        <li key={inf.id} className="bg-ai-50 rounded-lg p-3 text-xs">
+                          <span className="font-mono text-ai">{inf.inferenceType}</span>
+                          <span className="ml-2 text-muted">確度 {inf.confidence}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
+                </div>
               </div>
-              {error && <p className="text-sm text-red-600">{error}</p>}
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

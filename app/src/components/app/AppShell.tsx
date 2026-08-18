@@ -2,6 +2,8 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
+import { debugFetch } from "@/lib/auth/client";
+import { debugLog } from "@/lib/debug";
 
 const NAV_ITEMS = [
   { href: "/today", label: "今日" },
@@ -19,12 +21,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/v1/auth/me").then((res) => {
+    debugFetch("/api/v1/auth/me").then((res) => {
       if (!active) return;
       if (!res.ok) {
+        debugLog.event("AppShell", "auth check failed, redirecting to /login", { status: res.status });
         router.replace("/login");
         return;
       }
+      debugLog.event("AppShell", "auth check ok");
       setReady(true);
     });
     return () => {
