@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { apiFetch } from "@/lib/auth/client";
 
 interface MeResponse {
@@ -107,9 +108,14 @@ export function DashboardClient() {
           <h1 className="text-xl font-bold text-slate-800">{me.user.displayName ?? me.user.email}</h1>
           <p className="text-sm text-slate-500">{me.user.email}</p>
         </div>
-        <button onClick={logout} className="text-sm text-slate-500 hover:text-slate-800 underline">
-          ログアウト
-        </button>
+        <div className="flex items-center gap-4">
+          <Link href="/today" className="text-sm text-slate-500 hover:text-slate-800 underline">
+            今日の画面へ
+          </Link>
+          <button onClick={logout} className="text-sm text-slate-500 hover:text-slate-800 underline">
+            ログアウト
+          </button>
+        </div>
       </div>
 
       <section className="bg-white border border-slate-200 rounded-xl p-5">

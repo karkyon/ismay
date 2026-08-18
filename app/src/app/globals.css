@@ -1,26 +1,52 @@
 @import "tailwindcss";
 
+/* ISMAY 画面UX設計書・ワイヤーフレームv2.1のデザイントークンを反映。
+   ダークモードは同設計書で定義されていないため単一(ライト)テーマとする。 */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #F5F6F3;
+  --foreground: #14181F;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-plex-mono);
+  --font-serif: var(--font-newsreader);
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-ink: #14181F;
+  --color-muted: #6B7280;
+  --color-faint: #9CA3AF;
+  --color-canvas: #F5F6F3;
+  --color-surface: #FFFFFF;
+  --color-line: #E5E5E0;
+
+  --color-brand: #2F5D62;
+  --color-brand-50: #EEF4F3;
+  --color-brand-100: #D9E7E5;
+  --color-brand-600: #2F5D62;
+  --color-brand-700: #234548;
+
+  --color-ai: #6D28D9;
+  --color-ai-50: #F3EEFC;
+  --color-ai-100: #E6DBF9;
+
+  --color-warn: #C2410C;
+  --color-warn-50: #FDF0E9;
+
+  --color-decide: #B45309;
+  --color-decide-50: #FDF3E6;
+
+  --color-safe: #15803D;
+  --color-safe-50: #EBF6EF;
+
+  --shadow-card: 0 1px 2px rgba(20,24,31,0.04), 0 1px 8px rgba(20,24,31,0.04);
+  --shadow-pop: 0 8px 24px rgba(20,24,31,0.10);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), sans-serif;
 }
