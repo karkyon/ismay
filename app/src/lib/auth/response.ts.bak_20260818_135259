@@ -40,12 +40,7 @@ export function apiOk<T>(data: T, init?: { status?: number; extraMeta?: Record<s
 export function apiError(
   code: ErrorCode,
   message: string,
-  opts?: {
-    fieldErrors?: Record<string, string>;
-    retryable?: boolean;
-    /** 409競合応答等でlatestVersion等の追加情報を返す場合に使う(機能別詳細設計書v1.1 18章) */
-    extra?: Record<string, unknown>;
-  },
+  opts?: { fieldErrors?: Record<string, string>; retryable?: boolean },
 ) {
   return NextResponse.json(
     {
@@ -55,7 +50,6 @@ export function apiError(
         fieldErrors: opts?.fieldErrors,
         retryable: opts?.retryable ?? false,
         requestId: randomUUID(),
-        ...(opts?.extra ?? {}),
       },
     },
     { status: STATUS_BY_CODE[code] },

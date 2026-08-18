@@ -168,8 +168,6 @@ model Capture {
   sourceCapturedAt   DateTime? @map("source_captured_at")
   consentId          String?   @map("consent_id")
   consent            Consent?  @relation(fields: [consentId], references: [id])
-  /// API-CAP-01冪等キー(API・イベント設計書v1.1 4.1節: 「clientDraftId+userで冪等」)。[新設]
-  clientDraftId      String?   @map("client_draft_id")
   version            Int       @default(0)
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
@@ -181,7 +179,6 @@ model Capture {
 
   @@index([workspaceId, createdAt(sort: Desc)])
   @@index([processingStatus, updatedAt])
-  @@unique([workspaceId, createdById, clientDraftId], name: "captures_idempotency_key")
   @@map("captures")
 }
 
