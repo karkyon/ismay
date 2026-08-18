@@ -31,3 +31,5 @@ app/.claude/
 app/.windsurf/
 app/.agents/
 app/skills-lock.json
+# 一度きりのパッチスクリプトが作るバックアップファイル(再発防止。2026-08-18事故対応)
+*.bak_*
