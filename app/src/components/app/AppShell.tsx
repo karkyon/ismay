@@ -5,11 +5,12 @@ import { useRouter, usePathname } from "next/navigation";
 import { debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { isTypingTarget } from "@/lib/keyboard";
-import { TodayIcon, InboxIcon, SettingsIcon, MicIcon } from "@/components/icons";
+import { TodayIcon, InboxIcon, CalendarIcon, SettingsIcon, MicIcon } from "@/components/icons";
 
 const NAV_ITEMS = [
   { href: "/today", label: "今日", icon: TodayIcon },
   { href: "/inbox", label: "Inbox", icon: InboxIcon },
+  { href: "/responsibilities", label: "今後", icon: CalendarIcon },
 ] as const;
 
 /** クイック入力欄へフォーカスを移すためのグローバルイベント名。
