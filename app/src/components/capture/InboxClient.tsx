@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { isTypingTarget } from "@/lib/keyboard";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { formatRelativeTime } from "@/lib/format";
@@ -126,6 +127,28 @@ export function InboxClient() {
     setSelectedId(id);
   }
 
+  // Superhumanの一覧移動(J/K・矢印キー)を踏襲。テキスト入力中は発火しない。
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (isTypingTarget(e.target)) return;
+      if (captures.length === 0) return;
+      const key = e.key.toLowerCase();
+      const isDown = key === "j" || e.key === "ArrowDown";
+      const isUp = key === "k" || e.key === "ArrowUp";
+      if (!isDown && !isUp) return;
+      e.preventDefault();
+      const idx = captures.findIndex((c) => c.id === selectedId);
+      const nextIdx = isDown
+        ? Math.min(idx < 0 ? 0 : idx + 1, captures.length - 1)
+        : Math.max(idx < 0 ? 0 : idx - 1, 0);
+      const next = captures[nextIdx];
+      if (next) selectCapture(next.id);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [captures, selectedId]);
+
   async function requestAnalyze() {
     if (!selectedId) return;
     debugLog.event("InboxClient", "request analyze", { id: selectedId });
@@ -163,7 +186,13 @@ export function InboxClient() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 items-start">
           <div className="lg:col-span-2 space-y-1">
-            {loadingList && <p className="text-sm text-faint px-1">読み込み中...</p>}
+            {loadingList &&
+              [0, 1, 2].map((i) => (
+                <div key={i} className="px-3 py-2.5 animate-pulse">
+                  <div className="h-3.5 bg-line rounded w-3/4 mb-2" />
+                  <div className="h-2.5 bg-line/70 rounded w-1/3" />
+                </div>
+              ))}
             {captures.map((c) => {
               const selected = selectedId === c.id;
               return (
@@ -200,8 +229,13 @@ export function InboxClient() {
 
           <div className="lg:col-span-3 lg:sticky lg:top-8">
             {selectedId && loadingDetail && (
-              <div className="bg-surface border border-line rounded-2xl p-10 text-center text-sm text-faint">
-                読み込み中...
+              <div className="bg-surface border border-line rounded-2xl overflow-hidden animate-pulse">
+                <div className="h-16 border-b border-line bg-canvas/60" />
+                <div className="p-5 space-y-2.5">
+                  <div className="h-4 bg-line rounded w-full" />
+                  <div className="h-4 bg-line rounded w-5/6" />
+                  <div className="h-4 bg-line rounded w-2/3" />
+                </div>
               </div>
             )}
             {selectedId && !loadingDetail && detail && (

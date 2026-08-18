@@ -4,12 +4,19 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
+import { isTypingTarget } from "@/lib/keyboard";
 import { TodayIcon, InboxIcon, SettingsIcon, MicIcon } from "@/components/icons";
 
 const NAV_ITEMS = [
   { href: "/today", label: "今日", icon: TodayIcon },
   { href: "/inbox", label: "Inbox", icon: InboxIcon },
 ] as const;
+
+/** クイック入力欄へフォーカスを移すためのグローバルイベント名。
+ * "C"キーはLinear同様、アプリ内どこからでも効くグローバルショートカットとし、
+ * AppShell(どこにでもある)とQuickCaptureForm(/today・/inboxにある)を
+ * DOM CustomEventで疎結合に繋ぐ。 */
+export const FOCUS_CAPTURE_EVENT = "ismay:focus-capture";
 
 /**
  * 認証必須画面の共通シェル。/api/v1/auth/me で認証確認し、
@@ -37,6 +44,19 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [router]);
 
+  // Linearの"C"仕様(公式チートシート記載: 「アプリ内どこからでも効く」)を踏襲。
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key.toLowerCase() !== "c") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (isTypingTarget(e.target)) return;
+      debugLog.event("AppShell", "shortcut C pressed");
+      window.dispatchEvent(new CustomEvent(FOCUS_CAPTURE_EVENT));
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   if (!ready) {
     return (
       <div className="min-h-screen flex items-center justify-center text-sm text-muted">
@@ -58,7 +78,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         <button
           onClick={() => {
             debugLog.event("AppShell", "quick capture button clicked");
-            router.push("/inbox");
+            if (pathname === "/today" || pathname === "/inbox") {
+              window.dispatchEvent(new CustomEvent(FOCUS_CAPTURE_EVENT));
+            } else {
+              router.push("/inbox");
+            }
           }}
           className="mx-4 mt-4 mb-2 px-3 py-2.5 rounded-xl bg-ink text-white text-sm font-medium flex items-center gap-2 hover:bg-black transition"
         >
