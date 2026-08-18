@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { isTypingTarget } from "@/lib/keyboard";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
@@ -63,15 +63,26 @@ const SOURCE_TYPE_LABEL: Record<string, string> = {
   IMPORT: "取込",
 };
 
+// TickTick/Craftのパステルカラーブロックを参考に、種類ごとに淡色を割り当てる。
+// 新しい色を増やさず既存デザイントークン(brand/ai/decide/safe)を再利用する。
+const SOURCE_TYPE_CHIP_STYLE: Record<string, string> = {
+  TEXT: "bg-brand-50 text-brand-700",
+  VOICE: "bg-ai-50 text-ai",
+  MEETING: "bg-decide-50 text-decide",
+  IMPORT: "bg-safe-50 text-safe",
+};
+
+const SOURCE_TYPE_ORDER = ["TEXT", "VOICE", "MEETING", "IMPORT"] as const;
+
 /**
  * UI-04 Inbox: 原文から責任候補を確認する画面(API-CAP-01〜04と接続)。
  *
- * デザイン方針(2026-08-18改訂): 一覧行と詳細パネルの見た目がほぼ同一で
- * 「連関がわかりにくい」という指摘への対応として、
- * - 一覧(左): 装飾を最小限にした「行」。選択時のみ左アクセントバー+淡色背景+ドットで示す。
- * - 詳細(右): ヘッダー/本文/AI候補の3領域を持つ「開いている文書」。
- * という明確に異なる表現に分離した。この一覧/詳細パターンは今後追加する
- * 画面(Responsibility一覧等)にも踏襲する想定。
+ * デザイン方針(2026-08-18改訂):
+ * - 一覧(左)と詳細(右)は明確に異なる表現に分離(行 vs 開いている文書)。
+ * - TickTickのピル型ビュー切替タブ・Craftのパステルカラーブロックを参考に、
+ *   種類フィルターのピルタブと種類別カラーチップを追加(2026-08-18再改訂)。
+ *   カレンダー/カンバン等のビュー自体は転用していない
+ *   (Responsibility/Planning API未実装のため、動かないタブになるのを避けた)。
  */
 export function InboxClient() {
   const [captures, setCaptures] = useState<CaptureListItem[]>([]);
@@ -82,6 +93,7 @@ export function InboxClient() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState("");
+  const [filterType, setFilterType] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
     setLoadingList(true);
@@ -127,27 +139,53 @@ export function InboxClient() {
     setSelectedId(id);
   }
 
+  // 存在する種類のみ動的にタブ表示する(TickTick風ピルタブのデザイン言語を
+  // 転用。件数はGmailのラベル数のような形で添える)。
+  const typeCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const c of captures) counts[c.sourceType] = (counts[c.sourceType] ?? 0) + 1;
+    return counts;
+  }, [captures]);
+
+  const availableTypes = SOURCE_TYPE_ORDER.filter((t) => (typeCounts[t] ?? 0) > 0);
+
+  const visibleCaptures = useMemo(
+    () => (filterType ? captures.filter((c) => c.sourceType === filterType) : captures),
+    [captures, filterType],
+  );
+
+  function selectFilter(type: string | null) {
+    debugLog.event("InboxClient", "filter type changed", { type });
+    setFilterType(type);
+    setSelectedId(visibleCapturesAfterFilter(type)[0]?.id ?? null);
+  }
+
+  function visibleCapturesAfterFilter(type: string | null) {
+    return type ? captures.filter((c) => c.sourceType === type) : captures;
+  }
+
   // Superhumanの一覧移動(J/K・矢印キー)を踏襲。テキスト入力中は発火しない。
+  // フィルター適用後の一覧(visibleCaptures)を対象に移動する。
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (isTypingTarget(e.target)) return;
-      if (captures.length === 0) return;
+      if (visibleCaptures.length === 0) return;
       const key = e.key.toLowerCase();
       const isDown = key === "j" || e.key === "ArrowDown";
       const isUp = key === "k" || e.key === "ArrowUp";
       if (!isDown && !isUp) return;
       e.preventDefault();
-      const idx = captures.findIndex((c) => c.id === selectedId);
+      const idx = visibleCaptures.findIndex((c) => c.id === selectedId);
       const nextIdx = isDown
-        ? Math.min(idx < 0 ? 0 : idx + 1, captures.length - 1)
+        ? Math.min(idx < 0 ? 0 : idx + 1, visibleCaptures.length - 1)
         : Math.max(idx < 0 ? 0 : idx - 1, 0);
-      const next = captures[nextIdx];
+      const next = visibleCaptures[nextIdx];
       if (next) selectCapture(next.id);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [captures, selectedId]);
+  }, [visibleCaptures, selectedId]);
 
   async function requestAnalyze() {
     if (!selectedId) return;
@@ -185,46 +223,86 @@ export function InboxClient() {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 items-start">
-          <div className="lg:col-span-2 space-y-1">
-            {loadingList &&
-              [0, 1, 2].map((i) => (
-                <div key={i} className="px-3 py-2.5 animate-pulse">
-                  <div className="h-3.5 bg-line rounded w-3/4 mb-2" />
-                  <div className="h-2.5 bg-line/70 rounded w-1/3" />
-                </div>
-              ))}
-            {captures.map((c) => {
-              const selected = selectedId === c.id;
-              return (
+          <div className="lg:col-span-2 space-y-3">
+            {availableTypes.length > 1 && (
+              <div className="flex flex-wrap gap-1.5">
                 <button
-                  key={c.id}
-                  onClick={() => selectCapture(c.id)}
-                  className={`w-full text-left rounded-lg pl-3 pr-3 py-2.5 border-l-[3px] transition ${
-                    selected ? "bg-brand-50 border-l-brand" : "border-l-transparent hover:bg-canvas"
+                  onClick={() => selectFilter(null)}
+                  className={`text-xs px-3 py-1.5 rounded-full font-medium transition ${
+                    filterType === null
+                      ? "bg-ink text-white"
+                      : "bg-surface border border-line text-muted hover:bg-canvas"
                   }`}
                 >
-                  <div className="flex items-start gap-2">
-                    <span
-                      className={`shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full ${
-                        STATUS_DOT_STYLE[c.processingStatus] ?? "bg-faint"
-                      }`}
-                    />
-                    <div className="min-w-0">
-                      <p
-                        className={`text-sm leading-snug line-clamp-1 ${
-                          selected ? "font-semibold text-brand-700" : "text-ink"
-                        }`}
-                      >
-                        {c.rawText || "(本文なし・音声のみ)"}
-                      </p>
-                      <p className="text-[11px] text-faint mt-0.5">
-                        {SOURCE_TYPE_LABEL[c.sourceType] ?? c.sourceType} ・ {formatRelativeTime(c.createdAt)}
-                      </p>
-                    </div>
-                  </div>
+                  すべて <span className="opacity-60">{captures.length}</span>
                 </button>
-              );
-            })}
+                {availableTypes.map((type) => (
+                  <button
+                    key={type}
+                    onClick={() => selectFilter(type)}
+                    className={`text-xs px-3 py-1.5 rounded-full font-medium transition ${
+                      filterType === type
+                        ? "bg-ink text-white"
+                        : `${SOURCE_TYPE_CHIP_STYLE[type] ?? "bg-canvas text-muted"} hover:opacity-80`
+                    }`}
+                  >
+                    {SOURCE_TYPE_LABEL[type] ?? type} <span className="opacity-60">{typeCounts[type]}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-1">
+              {loadingList &&
+                [0, 1, 2].map((i) => (
+                  <div key={i} className="px-3 py-2.5 animate-pulse">
+                    <div className="h-3.5 bg-line rounded w-3/4 mb-2" />
+                    <div className="h-2.5 bg-line/70 rounded w-1/3" />
+                  </div>
+                ))}
+              {visibleCaptures.map((c) => {
+                const selected = selectedId === c.id;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => selectCapture(c.id)}
+                    className={`w-full text-left rounded-lg pl-3 pr-3 py-2.5 border-l-[3px] transition ${
+                      selected ? "bg-brand-50 border-l-brand" : "border-l-transparent hover:bg-canvas"
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <span
+                        className={`shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full ${
+                          STATUS_DOT_STYLE[c.processingStatus] ?? "bg-faint"
+                        }`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className={`text-sm leading-snug line-clamp-1 ${
+                            selected ? "font-semibold text-brand-700" : "text-ink"
+                          }`}
+                        >
+                          {c.rawText || "(本文なし・音声のみ)"}
+                        </p>
+                        <div className="flex items-center gap-1.5 mt-1">
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                              SOURCE_TYPE_CHIP_STYLE[c.sourceType] ?? "bg-canvas text-muted"
+                            }`}
+                          >
+                            {SOURCE_TYPE_LABEL[c.sourceType] ?? c.sourceType}
+                          </span>
+                          <span className="text-[11px] text-faint">{formatRelativeTime(c.createdAt)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+              {!loadingList && visibleCaptures.length === 0 && (
+                <p className="text-xs text-faint px-1 py-2">この種類のメモはまだありません。</p>
+              )}
+            </div>
           </div>
 
           <div className="lg:col-span-3 lg:sticky lg:top-8">
@@ -243,10 +321,16 @@ export function InboxClient() {
                 <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-line bg-canvas/60">
                   <div>
                     <p className="text-[10px] text-faint font-mono uppercase tracking-wider">選択中のメモ</p>
-                    <p className="text-xs text-muted mt-0.5">
-                      {SOURCE_TYPE_LABEL[detail.sourceType] ?? detail.sourceType} ・{" "}
-                      {new Date(detail.createdAt).toLocaleString("ja-JP")}
-                    </p>
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                          SOURCE_TYPE_CHIP_STYLE[detail.sourceType] ?? "bg-canvas text-muted"
+                        }`}
+                      >
+                        {SOURCE_TYPE_LABEL[detail.sourceType] ?? detail.sourceType}
+                      </span>
+                      <span className="text-xs text-muted">{new Date(detail.createdAt).toLocaleString("ja-JP")}</span>
+                    </div>
                   </div>
                   <span
                     className={`shrink-0 text-[11px] px-2.5 py-1 rounded-full font-medium ${
