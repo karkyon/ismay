@@ -4,6 +4,7 @@ import { useState } from "react";
 import { apiFetch } from "@/lib/auth/client";
 import { generateClientId } from "@/lib/uuid";
 import { debugLog } from "@/lib/debug";
+import { MicIcon } from "@/components/icons";
 
 /**
  * UX原則「Capture First」: 分類・期限なしで10秒以内に保存できる入口。
@@ -53,13 +54,16 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
 
   return (
     <form onSubmit={submit} className="bg-surface border border-line rounded-2xl shadow-card p-4">
-      <textarea
-        value={text}
-        onChange={(e) => handleChange(e.target.value)}
-        placeholder="話す・メモする…（約束、気になっていること、判断が必要なことなど）"
-        rows={3}
-        className="w-full resize-none bg-transparent text-sm focus:outline-none placeholder:text-faint"
-      />
+      <div className="flex items-start gap-3">
+        <MicIcon width={16} height={16} className="text-faint mt-0.5 shrink-0" />
+        <textarea
+          value={text}
+          onChange={(e) => handleChange(e.target.value)}
+          placeholder="話す・メモする…（約束、気になっていること、判断が必要なことなど）"
+          rows={3}
+          className="flex-1 resize-none bg-transparent text-sm focus:outline-none placeholder:text-faint"
+        />
+      </div>
       <div className="flex items-center justify-between mt-2 gap-3">
         <p className="text-[11px] text-faint">分類や期限は不要です。あとからInboxで整理できます</p>
         <button

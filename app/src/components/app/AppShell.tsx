@@ -4,10 +4,11 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
+import { TodayIcon, InboxIcon, SettingsIcon, MicIcon } from "@/components/icons";
 
 const NAV_ITEMS = [
-  { href: "/today", label: "今日" },
-  { href: "/inbox", label: "Inbox" },
+  { href: "/today", label: "今日", icon: TodayIcon },
+  { href: "/inbox", label: "Inbox", icon: InboxIcon },
 ] as const;
 
 /**
@@ -46,34 +47,53 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex min-h-screen bg-canvas text-ink">
-      <aside className="w-[220px] shrink-0 bg-surface border-r border-line hidden md:flex md:flex-col">
+      <aside className="w-[240px] shrink-0 bg-surface border-r border-line hidden md:flex md:flex-col">
         <div className="h-16 flex items-center gap-2 px-5 border-b border-line">
           <div className="w-7 h-7 rounded-lg bg-brand flex items-center justify-center">
             <span className="text-white font-serif text-sm italic">i</span>
           </div>
           <span className="font-serif italic text-lg text-ink">Ismay</span>
         </div>
-        <nav className="flex-1 px-3 py-4 space-y-1 text-sm">
+
+        <button
+          onClick={() => {
+            debugLog.event("AppShell", "quick capture button clicked");
+            router.push("/inbox");
+          }}
+          className="mx-4 mt-4 mb-2 px-3 py-2.5 rounded-xl bg-ink text-white text-sm font-medium flex items-center gap-2 hover:bg-black transition"
+        >
+          <MicIcon width={15} height={15} />
+          話す・メモする
+          <span className="ml-auto text-[10px] font-mono border border-white/25 text-white/60 rounded px-1.5 py-0.5">
+            C
+          </span>
+        </button>
+
+        <nav className="flex-1 px-3 py-2 space-y-0.5 text-sm">
           {NAV_ITEMS.map((item) => {
             const active = pathname === item.href;
+            const Icon = item.icon;
             return (
               <button
                 key={item.href}
                 onClick={() => router.push(item.href)}
-                className={`w-full text-left px-3 py-2 rounded-lg transition ${
+                className={`w-full text-left px-3 py-2 rounded-lg transition flex items-center gap-2.5 ${
                   active ? "bg-brand-50 text-brand-700 font-semibold" : "text-ink hover:bg-canvas"
                 }`}
               >
+                <Icon width={16} height={16} className={active ? "text-brand-700" : "text-faint"} />
                 {item.label}
               </button>
             );
           })}
         </nav>
+
         <div className="px-3 py-4 border-t border-line">
           <button
             onClick={() => router.push("/dashboard")}
-            className="w-full text-left px-3 py-2 rounded-lg text-sm text-muted hover:bg-canvas"
+            className="w-full text-left px-3 py-2 rounded-lg text-sm text-muted hover:bg-canvas flex items-center gap-2.5"
           >
+            <SettingsIcon width={16} height={16} className="text-faint" />
             アカウント設定
           </button>
         </div>

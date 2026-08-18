@@ -13,7 +13,7 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-inter);
   --font-mono: var(--font-plex-mono);
-  --font-serif: var(--font-newsreader);
+  --font-serif: var(--font-noto-serif-jp), var(--font-newsreader), serif;
 
   --color-ink: #14181F;
   --color-muted: #6B7280;
