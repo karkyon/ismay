@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { apiFetch } from "@/lib/auth/client";
+import { generateClientId } from "@/lib/uuid";
 
 /**
  * UX原則「Capture First」: 分類・期限なしで10秒以内に保存できる入口。
@@ -23,16 +24,19 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
         body: JSON.stringify({
           sourceType: "TEXT",
           rawText: text.trim(),
-          clientDraftId: crypto.randomUUID(),
+          clientDraftId: generateClientId(),
         }),
       });
-      const body = await res.json();
+      const body = await res.json().catch(() => null);
       if (!res.ok) {
-        setError(body.error?.message ?? "保存に失敗しました");
+        setError(body?.error?.message ?? "保存に失敗しました");
         return;
       }
       setText("");
       onCreated?.();
+    } catch {
+      // ネットワーク断・応答不正等。ユーザーに見える形で伝える(以前は未処理例外のみだった)
+      setError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
     } finally {
       setSubmitting(false);
     }
