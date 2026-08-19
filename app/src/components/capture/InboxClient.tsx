@@ -353,7 +353,7 @@ export function InboxClient() {
                       <p className="text-xs font-semibold text-ink">AI候補</p>
                       <p className="text-[11px] text-faint mt-0.5 max-w-md">
                         {inferences.length === 0
-                          ? "AI Workerは未実装のため、解析要求後もこの一覧は空のままです(次回実装予定)"
+                          ? "「解析を要求する」を押すと、AIが約束・作業・判断・待ち等の候補を抽出します"
                           : `${inferences.length}件の候補があります`}
                       </p>
                     </div>
