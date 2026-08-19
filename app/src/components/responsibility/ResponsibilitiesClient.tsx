@@ -235,13 +235,28 @@ export function ResponsibilitiesClient() {
 
   async function runTransition(action: TransitionAction) {
     if (!detail) return;
+
+    // API・イベント設計書v1.1 4.3節: PARTIAL_COMPLETEはcompletedScope/remainingWorkの
+    // いずれかが必須。専用モーダルはまだ無いため、window.promptで残作業を確認する(MVP簡易対応)。
+    let remainingWork: string | undefined;
+    if (action === "PARTIAL_COMPLETE") {
+      const input = window.prompt("残っている作業を入力してください(空欄でキャンセル)");
+      if (!input || !input.trim()) return;
+      remainingWork = input.trim();
+    }
+
     debugLog.event("ResponsibilitiesClient", "transition", { id: detail.id, action });
     setTransitioning(true);
     setError("");
     try {
       const res = await apiFetch(`/api/v1/responsibilities/${detail.id}/transitions`, {
         method: "POST",
-        body: JSON.stringify({ action, occurredAt: new Date().toISOString(), version: detail.version }),
+        body: JSON.stringify({
+          action,
+          occurredAt: new Date().toISOString(),
+          version: detail.version,
+          ...(remainingWork ? { remainingWork } : {}),
+        }),
       });
       const body = await res.json();
       if (!res.ok) {
