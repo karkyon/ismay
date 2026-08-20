@@ -227,5 +227,33 @@ export async function GET(req: NextRequest) {
   const page = hasNext ? rows.slice(0, limit) : rows;
   const nextCursor = hasNext ? page[page.length - 1]?.id : undefined;
 
-  return apiOk({ responsibilities: page }, { extraMeta: nextCursor ? { nextCursor } : {} });
+  // [2026-08-20追加] 一覧画面で「この責任には前提が◯件ある」「◯件が後続で待っている」を
+  // クリックせずにバッジ表示できるようにする(カルキョンさんの指摘「一覧で相関関係が
+  // わからない」への対応)。N+1を避けるため一括集計する。
+  const ids = (page as { id: string }[]).map((r) => r.id);
+  const [blockingRows, blockedRows] = ids.length
+    ? await Promise.all([
+        db.responsibilityRelation.groupBy({
+          by: ["toId"],
+          where: { toId: { in: ids }, relationType: "BLOCKS", status: "CONFIRMED", deletedAt: null },
+          _count: { _all: true },
+        }),
+        db.responsibilityRelation.groupBy({
+          by: ["fromId"],
+          where: { fromId: { in: ids }, relationType: "BLOCKS", status: "CONFIRMED", deletedAt: null },
+          _count: { _all: true },
+        }),
+      ])
+    : [[], []];
+  type CountRow = { toId?: string; fromId?: string; _count: { _all: number } };
+  const blockedByCount = new Map((blockingRows as CountRow[]).map((r) => [r.toId, r._count._all]));
+  const childrenCount = new Map((blockedRows as CountRow[]).map((r) => [r.fromId, r._count._all]));
+
+  const enriched = (page as { id: string }[]).map((r) => ({
+    ...r,
+    blockedByCount: blockedByCount.get(r.id) ?? 0,
+    childrenCount: childrenCount.get(r.id) ?? 0,
+  }));
+
+  return apiOk({ responsibilities: enriched }, { extraMeta: nextCursor ? { nextCursor } : {} });
 }

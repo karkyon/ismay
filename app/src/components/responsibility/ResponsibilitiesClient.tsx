@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { formatRelativeTime } from "@/lib/format";
@@ -24,6 +25,15 @@ interface ResponsibilityListItem {
   version: number;
   createdAt: string;
   updatedAt: string;
+  blockedByCount: number;
+  childrenCount: number;
+}
+
+interface DependencyItem {
+  id: string;
+  title: string;
+  status: string;
+  type: string;
 }
 
 interface ResponsibilityDetail extends ResponsibilityListItem {
@@ -153,16 +163,25 @@ const STATUS_DOT_STYLE: Record<string, string> = {
  * 状態遷移ボタンは共通状態種別(TASK/EVENT/CONCERN/HABIT/IDEA)のみ表示する。
  */
 export function ResponsibilitiesClient() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [items, setItems] = useState<ResponsibilityListItem[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ResponsibilityDetail | null>(null);
   const [related, setRelated] = useState<RelatedItem[]>([]);
+  const [parents, setParents] = useState<DependencyItem[]>([]);
+  const [children, setChildren] = useState<DependencyItem[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
+  const [quickActingId, setQuickActingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [filterType, setFilterType] = useState<string | null>(null);
   const [hideDone, setHideDone] = useState(true);
+  const [minImportance, setMinImportance] = useState(0);
+  const [blockedOnly, setBlockedOnly] = useState(false);
+  const [sortBy, setSortBy] = useState<"targetAt" | "importance" | "related">("targetAt");
+  const [view, setView] = useState<"list" | "calendar">("list");
 
   const [showCreate, setShowCreate] = useState(false);
   const [newType, setNewType] = useState<string>("TASK");
@@ -186,9 +205,10 @@ export function ResponsibilitiesClient() {
   const loadDetail = useCallback(async (id: string) => {
     setLoadingDetail(true);
     setError("");
-    const [detailRes, relatedRes] = await Promise.all([
+    const [detailRes, relatedRes, depsRes] = await Promise.all([
       debugFetch(`/api/v1/responsibilities/${id}`),
       debugFetch(`/api/v1/responsibilities/${id}/related`),
+      debugFetch(`/api/v1/responsibilities/${id}/dependencies`),
     ]);
     if (detailRes.ok) {
       const body = await detailRes.json();
@@ -199,6 +219,14 @@ export function ResponsibilitiesClient() {
       setRelated(body.data.related);
     } else {
       setRelated([]);
+    }
+    if (depsRes.ok) {
+      const body = await depsRes.json();
+      setParents(body.data.parents);
+      setChildren(body.data.children);
+    } else {
+      setParents([]);
+      setChildren([]);
     }
     setLoadingDetail(false);
   }, []);
@@ -211,9 +239,23 @@ export function ResponsibilitiesClient() {
     if (selectedId) loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
+  // [2026-08-20追加] /relationsの関係図からノードをクリックした際、「今後TOPに
+  // 移動するだけで該当項目が分からない」という不備を修正する。?focus=IDを見て
+  // 自動選択し、該当行までスクロールする。
+  useEffect(() => {
+    const focus = searchParams.get("focus");
+    if (focus) {
+      setSelectedId(focus);
+      requestAnimationFrame(() => {
+        document.getElementById(`resp-row-${focus}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+    }
+  }, [searchParams]);
+
   function selectItem(id: string) {
     debugLog.event("ResponsibilitiesClient", "select item", { id });
     setSelectedId(id);
+    router.replace(`/responsibilities?focus=${id}`, { scroll: false });
   }
 
   const typeCounts = useMemo(() => {
@@ -224,12 +266,58 @@ export function ResponsibilitiesClient() {
   const availableTypes = RESPONSIBILITY_TYPES.filter((t) => (typeCounts[t] ?? 0) > 0);
 
   const visibleItems = useMemo(() => {
-    return items.filter((i) => {
+    const filtered = items.filter((i) => {
       if (filterType && i.type !== filterType) return false;
       if (hideDone && TERMINAL_STATUSES.has(i.status)) return false;
+      if ((i.importance ?? 0) < minImportance) return false;
+      if (blockedOnly && i.blockedByCount === 0) return false;
       return true;
     });
-  }, [items, filterType, hideDone]);
+    const sorted = [...filtered];
+    if (sortBy === "importance") {
+      sorted.sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0));
+    } else if (sortBy === "related") {
+      sorted.sort((a, b) => b.blockedByCount + b.childrenCount - (a.blockedByCount + a.childrenCount));
+    } else {
+      sorted.sort((a, b) => {
+        if (!a.targetAt && !b.targetAt) return 0;
+        if (!a.targetAt) return 1;
+        if (!b.targetAt) return -1;
+        return new Date(a.targetAt).getTime() - new Date(b.targetAt).getTime();
+      });
+    }
+    return sorted;
+  }, [items, filterType, hideDone, minImportance, blockedOnly, sortBy]);
+
+  /** この責任状態から一番自然な「次の一歩」を1つだけ選ぶ(一覧のホバー操作ボタン用)。 */
+  function quickActionFor(item: ResponsibilityListItem): TransitionAction | null {
+    const actions = transitionsForType(item.type)
+      .filter((r) => (r.from as readonly string[]).includes(item.status))
+      .map((r) => r.action);
+    if (actions.includes("COMPLETE")) return "COMPLETE";
+    if (actions.includes("START")) return "START";
+    if (actions.includes("DECIDE")) return null; // 理由入力が必須のため一覧からの即時実行はしない
+    if (actions.includes("RESOLVE")) return "RESOLVE";
+    if (actions.includes("FULFILL")) return "FULFILL";
+    return actions[0] ?? null;
+  }
+
+  /** 一覧行のホバーボタンから直接遷移を実行する(詳細パネルを開かずに完結させる)。 */
+  async function quickTransition(item: ResponsibilityListItem, action: TransitionAction) {
+    setQuickActingId(item.id);
+    try {
+      const res = await apiFetch(`/api/v1/responsibilities/${item.id}/transitions`, {
+        method: "POST",
+        body: JSON.stringify({ action, occurredAt: new Date().toISOString(), version: item.version }),
+      });
+      if (res.ok) {
+        await loadList();
+        if (selectedId === item.id) await loadDetail(item.id);
+      }
+    } finally {
+      setQuickActingId(null);
+    }
+  }
 
   async function submitCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -336,12 +424,32 @@ export function ResponsibilitiesClient() {
           <h1 className="font-serif text-3xl">今後</h1>
           <p className="text-sm text-muted mt-1">タスク・約束・判断・待ちを期限順に確認します</p>
         </div>
-        <button
-          onClick={() => setShowCreate((v) => !v)}
-          className="shrink-0 bg-ink text-white text-sm font-medium px-4 py-2 rounded-xl hover:bg-black transition"
-        >
-          {showCreate ? "閉じる" : "＋ 新しく登録する"}
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="flex gap-0.5 bg-canvas border border-line rounded-lg p-0.5">
+            <button
+              onClick={() => setView("list")}
+              className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
+                view === "list" ? "bg-surface shadow-sm text-ink" : "text-muted"
+              }`}
+            >
+              リスト
+            </button>
+            <button
+              onClick={() => setView("calendar")}
+              className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
+                view === "calendar" ? "bg-surface shadow-sm text-ink" : "text-muted"
+              }`}
+            >
+              カレンダー
+            </button>
+          </div>
+          <button
+            onClick={() => setShowCreate((v) => !v)}
+            className="shrink-0 bg-ink text-white text-sm font-medium px-4 py-2 rounded-xl hover:bg-black transition"
+          >
+            {showCreate ? "閉じる" : "＋ 新しく登録する"}
+          </button>
+        </div>
       </div>
 
       {showCreate && (
@@ -394,6 +502,8 @@ export function ResponsibilitiesClient() {
           <p className="text-sm text-muted">まだ何も登録されていません。</p>
           <p className="text-sm text-muted mt-1">「＋ 新しく登録する」から最初の項目を作ってみてください。</p>
         </div>
+      ) : view === "calendar" ? (
+        <CalendarView items={visibleItems} onSelect={selectItem} />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 items-start">
           <div className="lg:col-span-2 space-y-3">
@@ -417,10 +527,35 @@ export function ResponsibilitiesClient() {
                   {TYPE_LABEL[t]} <span className="opacity-60">{typeCounts[t]}</span>
                 </button>
               ))}
-              <label className="ml-auto flex items-center gap-1.5 text-[11px] text-muted">
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
+              <label className="flex items-center gap-1.5">
                 <input type="checkbox" checked={hideDone} onChange={(e) => setHideDone(e.target.checked)} />
                 完了を隠す
               </label>
+              <label className="flex items-center gap-1.5">
+                <input type="checkbox" checked={blockedOnly} onChange={(e) => setBlockedOnly(e.target.checked)} />
+                前提ありのみ
+              </label>
+              <select
+                value={minImportance}
+                onChange={(e) => setMinImportance(Number(e.target.value))}
+                className="border border-line rounded-md px-1.5 py-1 bg-surface text-[11px]"
+              >
+                <option value={0}>重要度: すべて</option>
+                <option value={3}>重要度3以上</option>
+                <option value={4}>重要度4以上</option>
+                <option value={5}>重要度5のみ</option>
+              </select>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+                className="border border-line rounded-md px-1.5 py-1 bg-surface text-[11px] ml-auto"
+              >
+                <option value="targetAt">並び替え: 期限順</option>
+                <option value="importance">並び替え: 重要度順</option>
+                <option value="related">並び替え: 関連数順</option>
+              </select>
             </div>
 
             <div className="space-y-1">
@@ -433,42 +568,106 @@ export function ResponsibilitiesClient() {
                 ))}
               {visibleItems.map((item) => {
                 const selected = selectedId === item.id;
+                const qa = quickActionFor(item);
+                const busy = quickActingId === item.id;
                 return (
-                  <button
-                    key={item.id}
-                    onClick={() => selectItem(item.id)}
-                    className={`w-full text-left rounded-lg pl-3 pr-3 py-2.5 border-l-[3px] transition ${
-                      selected ? "bg-brand-50 border-l-brand" : "border-l-transparent hover:bg-canvas"
-                    }`}
-                  >
-                    <div className="flex items-start gap-2">
-                      <span
-                        className={`shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full ${
-                          STATUS_DOT_STYLE[item.status] ?? "bg-faint"
-                        }`}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p
-                          className={`text-sm leading-snug line-clamp-1 ${
-                            selected ? "font-semibold text-brand-700" : "text-ink"
-                          }`}
-                        >
-                          {item.title}
-                        </p>
-                        <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${TYPE_CHIP_STYLE[item.type] ?? "bg-canvas text-muted"}`}>
-                            {TYPE_LABEL[item.type] ?? item.type}
-                          </span>
-                          <span className="text-[11px] text-faint">{STATUS_LABEL[item.status] ?? item.status}</span>
-                          {item.hardDeadlineAt && (
-                            <span className="text-[11px] text-warn font-mono">
-                              期限 {new Date(item.hardDeadlineAt).toLocaleDateString("ja-JP", { month: "short", day: "numeric" })}
-                            </span>
-                          )}
+                  <div key={item.id} id={`resp-row-${item.id}`}>
+                    <div
+                      className={`group w-full rounded-lg pl-3 pr-2 py-2.5 border-l-[3px] transition flex items-start gap-1 ${
+                        selected ? "bg-brand-50 border-l-brand" : "border-l-transparent hover:bg-canvas"
+                      }`}
+                    >
+                      <button onClick={() => selectItem(item.id)} className="min-w-0 flex-1 text-left">
+                        <div className="flex items-start gap-2">
+                          <span
+                            className={`shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full ${
+                              STATUS_DOT_STYLE[item.status] ?? "bg-faint"
+                            }`}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p
+                              className={`text-sm leading-snug line-clamp-1 ${
+                                selected ? "font-semibold text-brand-700" : "text-ink"
+                              }`}
+                            >
+                              {item.title}
+                            </p>
+                            <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${TYPE_CHIP_STYLE[item.type] ?? "bg-canvas text-muted"}`}>
+                                {TYPE_LABEL[item.type] ?? item.type}
+                              </span>
+                              <span className="text-[11px] text-faint">{STATUS_LABEL[item.status] ?? item.status}</span>
+                              {item.importance ? (
+                                <span className="text-[10px] text-amber-600" title={`重要度${item.importance}/5`}>
+                                  {"★".repeat(item.importance)}
+                                  <span className="text-line">{"★".repeat(5 - item.importance)}</span>
+                                </span>
+                              ) : null}
+                              {item.hardDeadlineAt && (
+                                <span className="text-[11px] text-warn font-mono">
+                                  期限 {new Date(item.hardDeadlineAt).toLocaleDateString("ja-JP", { month: "short", day: "numeric" })}
+                                </span>
+                              )}
+                              {item.blockedByCount > 0 && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-decide-50 text-decide" title="この完了に必要な前提の件数">
+                                  🔗前提{item.blockedByCount}
+                                </span>
+                              )}
+                              {item.childrenCount > 0 && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-ai-50 text-ai" title="これの完了を待っている後続の件数">
+                                  ⛓️後続{item.childrenCount}
+                                </span>
+                              )}
+                            </div>
+                          </div>
                         </div>
-                      </div>
+                      </button>
+                      {qa && (
+                        <button
+                          onClick={() => quickTransition(item, qa)}
+                          disabled={busy}
+                          title={ACTION_LABEL[qa]}
+                          className="shrink-0 hidden group-hover:flex items-center justify-center w-6 h-6 rounded-md border border-line bg-surface text-muted hover:border-brand hover:text-brand disabled:opacity-40 mt-1"
+                        >
+                          {qa === "COMPLETE" || qa === "RESOLVE" || qa === "FULFILL" ? "✓" : "▶"}
+                        </button>
+                      )}
                     </div>
-                  </button>
+                    {selected && (parents.length > 0 || children.length > 0) && (
+                      <div className="ml-4 mb-1 pl-3 border-l-2 border-line space-y-1.5 py-2">
+                        {parents.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-semibold text-decide mb-1">↥ この完了に必要な前提({parents.length})</p>
+                            {parents.map((p) => (
+                              <button
+                                key={p.id}
+                                onClick={() => selectItem(p.id)}
+                                className="block w-full text-left text-[11px] text-muted hover:text-ink truncate py-0.5"
+                              >
+                                • {p.title}
+                                <span className="text-faint ml-1">({STATUS_LABEL[p.status] ?? p.status})</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {children.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-semibold text-ai mb-1">↧ これの完了を待っている後続({children.length})</p>
+                            {children.map((c) => (
+                              <button
+                                key={c.id}
+                                onClick={() => selectItem(c.id)}
+                                className="block w-full text-left text-[11px] text-muted hover:text-ink truncate py-0.5"
+                              >
+                                • {c.title}
+                                <span className="text-faint ml-1">({STATUS_LABEL[c.status] ?? c.status})</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
               {!loadingList && visibleItems.length === 0 && (
@@ -576,6 +775,110 @@ export function ResponsibilitiesClient() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * カレンダービュー(2026-08-20新設)。hardDeadlineAt優先、無ければtargetAtで日付に配置する。
+ * 「今後」画面内のタブ切替で表示する簡易月表示(ガントチャートではない)。
+ */
+function CalendarView({
+  items,
+  onSelect,
+}: {
+  items: ResponsibilityListItem[];
+  onSelect: (id: string) => void;
+}) {
+  const [cursor, setCursor] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const firstDow = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const todayStr = new Date().toDateString();
+
+  const byDate = useMemo(() => {
+    const map = new Map<string, ResponsibilityListItem[]>();
+    for (const item of items) {
+      const dateStr = item.hardDeadlineAt ?? item.targetAt;
+      if (!dateStr) continue;
+      const d = new Date(dateStr);
+      if (d.getFullYear() !== year || d.getMonth() !== month) continue;
+      const key = d.getDate();
+      const arr = map.get(String(key)) ?? [];
+      arr.push(item);
+      map.set(String(key), arr);
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- year/monthはcursorから毎回導出される値のため、
+    // cursorのみを依存に含めれば十分(year/monthを含めるとReact CompilerがpreserveManualMemoizationで
+    // 誤検知するため、意図的にcursorのみとする)。
+  }, [items, cursor]);
+
+  const cells: (number | null)[] = [...Array(firstDow).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
+
+  return (
+    <div className="bg-surface border border-line rounded-2xl shadow-card p-5">
+      <div className="flex items-center justify-between mb-4">
+        <button
+          onClick={() => setCursor(new Date(year, month - 1, 1))}
+          className="text-xs border border-line rounded-md px-2 py-1 hover:bg-canvas"
+        >
+          ← 前月
+        </button>
+        <p className="text-sm font-semibold">
+          {year}年{month + 1}月
+        </p>
+        <button
+          onClick={() => setCursor(new Date(year, month + 1, 1))}
+          className="text-xs border border-line rounded-md px-2 py-1 hover:bg-canvas"
+        >
+          翌月 →
+        </button>
+      </div>
+      <div className="grid grid-cols-7 gap-1.5">
+        {["日", "月", "火", "水", "木", "金", "土"].map((d) => (
+          <div key={d} className="text-[10px] text-faint text-center pb-1">
+            {d}
+          </div>
+        ))}
+        {cells.map((day, idx) => {
+          if (day === null) return <div key={`empty-${idx}`} />;
+          const dateObj = new Date(year, month, day);
+          const isToday = dateObj.toDateString() === todayStr;
+          const dayItems = byDate.get(String(day)) ?? [];
+          return (
+            <div key={day} className="border border-line rounded-lg min-h-[74px] p-1.5 bg-canvas/40">
+              <span
+                className={`text-[10px] inline-flex items-center justify-center ${
+                  isToday ? "w-4 h-4 rounded-full bg-ink text-white" : "text-faint"
+                }`}
+              >
+                {day}
+              </span>
+              <div className="mt-1 space-y-0.5">
+                {dayItems.slice(0, 3).map((it) => (
+                  <button
+                    key={it.id}
+                    onClick={() => onSelect(it.id)}
+                    className={`block w-full text-left text-[9.5px] px-1 py-0.5 rounded truncate ${
+                      TYPE_CHIP_STYLE[it.type] ?? "bg-canvas text-muted"
+                    }`}
+                    title={it.title}
+                  >
+                    {it.title}
+                  </button>
+                ))}
+                {dayItems.length > 3 && <p className="text-[9px] text-faint px-1">+{dayItems.length - 3}件</p>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
