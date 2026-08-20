@@ -1,0 +1,127 @@
+import type { NextRequest } from "next/server";
+import { z } from "zod";
+import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
+import { requireAuth, requireCsrf } from "@/lib/auth/guard";
+import { ensureDefaultWorkspace } from "@/lib/workspace";
+import { apiOk, apiError } from "@/lib/auth/response";
+import { AI_CAPABILITIES, DEFAULT_PROVIDER_KEY, isKnownProviderKey, listAvailableProviderKeys } from "@/lib/ai/registry";
+
+/**
+ * MOD-10 Admin / MOD-06 AI Gateway: AIプロバイダー切替(2026-08-20新設)。
+ *
+ * [設計判断・未確認事項] システム基本設計書・要件定義書にMOD-10 Adminの認可モデル
+ * (管理者ロール)の定義が無く、Userテーブルにもrole/isAdmin相当の列が存在しない
+ * (schema.prisma確認済み)。ISMAYは現状カルキョンさん個人のワークスペース運用のため、
+ * 本APIは新たな管理者ロールを追加せず、他の全APIと同じrequireAuth(Workspace所属)を
+ * 認可条件とした。複数メンバーでの運用を始める場合は、WorkspaceMember.role等による
+ * 管理者限定化が別途必要になる(TBD候補として台帳への追加を推奨)。
+ */
+
+const CAPABILITY_ENUM = z.enum(AI_CAPABILITIES);
+
+const UpdateSchema = z.object({
+  capability: CAPABILITY_ENUM,
+  providerKey: z.string().min(1).max(100),
+  modelName: z.string().max(200).optional(),
+});
+
+/** GET /api/v1/admin/ai-providers: 現在の設定＋選択可能なプロバイダー一覧を返す。 */
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (!auth.authenticated) {
+    return apiError("AUTH_REQUIRED", "ログインが必要です");
+  }
+
+  const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+
+  const rows = await db.aiProviderConfig.findMany({ where: { workspaceId } });
+  type ConfigRow = {
+    capability: string;
+    providerKey: string;
+    modelName: string | null;
+    updatedAt: Date;
+  };
+  const byCapability = new Map<string, ConfigRow>((rows as ConfigRow[]).map((r) => [r.capability, r]));
+
+  const capabilities = AI_CAPABILITIES.map((capability) => {
+    const row = byCapability.get(capability);
+    const activeProviderKey = row && isKnownProviderKey(capability, row.providerKey)
+      ? row.providerKey
+      : DEFAULT_PROVIDER_KEY[capability];
+    return {
+      capability,
+      activeProviderKey,
+      modelName: row?.modelName ?? null,
+      isDefault: !row,
+      availableProviderKeys: listAvailableProviderKeys(capability),
+      updatedAt: row?.updatedAt ?? null,
+    };
+  });
+
+  return apiOk({ capabilities });
+}
+
+/** PATCH /api/v1/admin/ai-providers: 指定capabilityの使用プロバイダーを切り替える。 */
+export async function PATCH(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if (!auth.authenticated) {
+    return apiError("AUTH_REQUIRED", "ログインが必要です");
+  }
+  if (!requireCsrf(req)) {
+    return apiError("ACCESS_DENIED", "CSRFトークンが不正です");
+  }
+
+  const json = await req.json().catch(() => null);
+  debugServer.input("PATCH /admin/ai-providers", "requestBody", redactSensitive(json));
+  const parsed = UpdateSchema.safeParse(json);
+  if (!parsed.success) {
+    return apiError("VALIDATION_FAILED", "入力内容を確認してください", {
+      fieldErrors: Object.fromEntries(
+        Object.entries(parsed.error.flatten().fieldErrors).map(([k, v]) => [k, v?.[0] ?? "不正な値です"]),
+      ),
+    });
+  }
+  const { capability, providerKey, modelName } = parsed.data;
+
+  if (!isKnownProviderKey(capability, providerKey)) {
+    return apiError("VALIDATION_FAILED", "未登録のプロバイダーです", {
+      fieldErrors: { providerKey: `選択可能な値: ${listAvailableProviderKeys(capability).join(", ")}` },
+    });
+  }
+
+  const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+
+  const updated = await db.aiProviderConfig.upsert({
+    where: { workspaceId_capability: { workspaceId, capability } },
+    create: {
+      workspaceId,
+      capability,
+      providerKey,
+      modelName: modelName ?? null,
+      updatedById: auth.user.userId,
+    },
+    update: {
+      providerKey,
+      modelName: modelName ?? null,
+      updatedById: auth.user.userId,
+    },
+  });
+  debugServer.state("PATCH /admin/ai-providers", "AiProviderConfig", {
+    workspaceId,
+    capability,
+    providerKey: updated.providerKey,
+  });
+  debugServer.event("PATCH /admin/ai-providers", "AI_PROVIDER_SWITCHED", {
+    workspaceId,
+    capability,
+    providerKey: updated.providerKey,
+  });
+
+  return apiOk({
+    capability: updated.capability,
+    activeProviderKey: updated.providerKey,
+    modelName: updated.modelName,
+    updatedAt: updated.updatedAt,
+  });
+}

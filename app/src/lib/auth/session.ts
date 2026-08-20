@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { debugServer } from "@/lib/debugServer";
 import {
   generateRefreshToken,
   hashRefreshToken,
@@ -43,6 +44,7 @@ export async function createSession(
   });
 
   const accessToken = await signAccessToken({ sub: userId, sid: session.id, email });
+  debugServer.event("session/createSession", "SESSION_CREATED", { sessionId: session.id, userId });
 
   return { accessToken, refreshToken, sessionId: session.id, expiresAt };
 }
@@ -64,6 +66,7 @@ export async function rotateSession(
   const session = await db.userSession.findFirst({ where: { refreshTokenHash: presentedHash } });
 
   if (!session) {
+    debugServer.event("session/rotateSession", "REFRESH_REJECTED", { reason: "NOT_FOUND" });
     return { ok: false, reason: "NOT_FOUND" };
   }
   if (session.revokedAt) {
@@ -72,9 +75,14 @@ export async function rotateSession(
       where: { refreshTokenFamily: session.refreshTokenFamily, revokedAt: null },
       data: { revokedAt: new Date(), revokedReason: "REUSE_DETECTED" },
     });
+    debugServer.error("session/rotateSession", "REUSE_DETECTED(トークン盗難の可能性)", {
+      sessionId: session.id,
+      family: session.refreshTokenFamily,
+    });
     return { ok: false, reason: "REUSE_DETECTED" };
   }
   if (session.expiresAt.getTime() < Date.now()) {
+    debugServer.event("session/rotateSession", "REFRESH_REJECTED", { reason: "EXPIRED", sessionId: session.id });
     return { ok: false, reason: "EXPIRED" };
   }
 
@@ -98,6 +106,7 @@ export async function rotateSession(
   });
 
   const accessToken = await signAccessToken({ sub: user.id, sid: session.id, email: user.email });
+  debugServer.state("session/rotateSession", "UserSession.refreshTokenHash", { sessionId: session.id, rotated: true });
 
   return {
     ok: true,
@@ -110,6 +119,7 @@ export async function revokeSession(sessionId: string, reason = "LOGOUT"): Promi
     where: { id: sessionId },
     data: { revokedAt: new Date(), revokedReason: reason },
   });
+  debugServer.state("session/revokeSession", "UserSession.revokedAt", { sessionId, reason });
 }
 
 /** FR-AUTH-04: 全端末ログアウト。指定ユーザーの有効セッションを一括失効する。 */
@@ -118,6 +128,7 @@ export async function revokeAllSessions(userId: string, reason = "LOGOUT_ALL"): 
     where: { userId, revokedAt: null },
     data: { revokedAt: new Date(), revokedReason: reason },
   });
+  debugServer.state("session/revokeAllSessions", "UserSession.revokedAt(一括)", { userId, count: result.count, reason });
   return result.count;
 }
 

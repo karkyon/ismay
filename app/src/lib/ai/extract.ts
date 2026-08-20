@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
+import { debugServer } from "@/lib/debugServer";
 import { ExtractionResultSchema } from "@/lib/ai/schema";
-import { createAnthropicExtractionProvider } from "@/lib/ai/anthropicProvider";
+import { getActiveExtractionProvider } from "@/lib/ai/config";
 import type { AiExtractionProvider, AiExtractionUsage } from "@/lib/ai/provider";
 
 /**
@@ -20,10 +21,6 @@ export type ExtractionRunResult =
   | { status: "READY"; inferenceCount: number }
   | { status: "FAILED"; reason: string }
   | { status: "SKIPPED"; reason: string };
-
-function provider(): AiExtractionProvider {
-  return createAnthropicExtractionProvider();
-}
 
 export async function runExtractionForCapture(captureId: string): Promise<ExtractionRunResult> {
   const capture = await db.capture.findUnique({
@@ -59,7 +56,13 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
   }
 
   // Worker手順3〜5: PromptBuilder→Gateway呼び出し→Schema検証。最大2回まで試行。
-  const ai = provider();
+  // 使用するプロバイダーはWorkspace設定(管理画面/admin/ai-providersで切替可能)から解決する。
+  const ai = await getActiveExtractionProvider(capture.workspaceId);
+  debugServer.event("extract/runExtractionForCapture", "PROVIDER_RESOLVED", {
+    captureId: capture.id,
+    providerName: ai.providerName,
+    modelName: ai.modelName,
+  });
   let lastFailureReason = "";
   let lastUsage: AiExtractionUsage | undefined;
 

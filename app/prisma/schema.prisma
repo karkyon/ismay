@@ -104,6 +104,7 @@ model Workspace {
   captures      Capture[]
   responsibilities Responsibility[]
   integrations  Integration[]
+  aiProviderConfigs AiProviderConfig[]
 
   @@map("workspaces")
 }
@@ -467,6 +468,28 @@ model ResponsibilityEmbedding {
 
   @@index([workspaceId, domainId])
   @@map("responsibility_embeddings")
+}
+
+/// 新設: MOD-10 Admin / MOD-06 AI Gateway。FR-AI-07「AIモデルを交換可能にする」を
+/// 抽出(FN-AI-01)以外の能力(Embedding、将来のPEM助言)にも拡張し、管理画面から
+/// Workspace単位で使用事業者を切り替え可能にする。APIキー自体は環境変数管理のまま
+/// (インフラ・運用設計書v1.1の環境ごとの秘密分離方針に従う)、本テーブルは
+/// 「どの登録済みプロバイダーを使うか」の選択のみを保持する。
+model AiProviderConfig {
+  id          String    @id @default(uuid())
+  workspaceId String    @map("workspace_id")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  /// EXTRACTION(FN-AI-01)/EMBEDDING(FN-GR-01)/PEM_ADVICE(FN-PEM-03、将来)
+  capability  String
+  /// registry.tsに登録されたプロバイダーキー(例: "anthropic","openai")
+  providerKey String    @map("provider_key")
+  modelName   String?   @map("model_name")
+  updatedById String    @map("updated_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@unique([workspaceId, capability])
+  @@map("ai_provider_configs")
 }
 
 // =====================================================================

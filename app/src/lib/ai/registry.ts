@@ -1,0 +1,62 @@
+/**
+ * AI Provider レジストリ。
+ *
+ * カルキョンさんの指示(2026-08-20)「どの事業者でも対応できるよう管理画面で切り替え
+ * できる設計にしろ」に対応。新しい事業者を追加する場合、対応するProvider実装
+ * (AiExtractionProvider / AiEmbeddingProvider)を作成し、本ファイルの登録表へ
+ * 1行追加するだけでよい。管理画面(/admin/ai-providers)はこの登録表のキー一覧を
+ * 選択肢として表示するのみで、事業者固有のコードには一切依存しない。
+ *
+ * APIキー等の秘密情報は環境変数のまま管理する(インフラ・運用設計書v1.1の環境ごとの
+ * 秘密分離方針)。本レジストリ・DB(AiProviderConfig)が保持するのは
+ * 「どの登録済みプロバイダーを使うか」という選択のみ。
+ */
+
+import type { AiExtractionProvider } from "@/lib/ai/provider";
+import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
+import { createAnthropicExtractionProvider } from "@/lib/ai/anthropicProvider";
+import { createOpenAiEmbeddingProvider } from "@/lib/ai/openaiEmbeddingProvider";
+
+export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING"] as const;
+export type AiCapability = (typeof AI_CAPABILITIES)[number];
+
+export const EXTRACTION_PROVIDER_REGISTRY: Record<string, () => AiExtractionProvider> = {
+  anthropic: createAnthropicExtractionProvider,
+  // 例: openai: createOpenAiExtractionProvider (将来追加時はここに1行足すだけでよい)
+};
+
+export const EMBEDDING_PROVIDER_REGISTRY: Record<string, () => AiEmbeddingProvider> = {
+  openai: createOpenAiEmbeddingProvider,
+};
+
+export const DEFAULT_PROVIDER_KEY: Record<AiCapability, string> = {
+  // TBD-05(2026-08-18解消): 抽出はAnthropic Claude Haiku 4.5
+  EXTRACTION: "anthropic",
+  // 2026-08-20合意: EmbeddingはOpenAI text-embedding-3-small
+  EMBEDDING: "openai",
+};
+
+export function listAvailableProviderKeys(capability: AiCapability): string[] {
+  const registry = capability === "EXTRACTION" ? EXTRACTION_PROVIDER_REGISTRY : EMBEDDING_PROVIDER_REGISTRY;
+  return Object.keys(registry);
+}
+
+export function isKnownProviderKey(capability: AiCapability, providerKey: string): boolean {
+  return listAvailableProviderKeys(capability).includes(providerKey);
+}
+
+export function resolveExtractionProvider(providerKey: string): AiExtractionProvider {
+  const factory = EXTRACTION_PROVIDER_REGISTRY[providerKey];
+  if (!factory) {
+    throw new Error(`未登録の抽出プロバイダーです: ${providerKey}`);
+  }
+  return factory();
+}
+
+export function resolveEmbeddingProvider(providerKey: string): AiEmbeddingProvider {
+  const factory = EMBEDDING_PROVIDER_REGISTRY[providerKey];
+  if (!factory) {
+    throw new Error(`未登録のEmbeddingプロバイダーです: ${providerKey}`);
+  }
+  return factory();
+}
