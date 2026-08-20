@@ -32,6 +32,19 @@ interface InferenceItem {
   createdAt: string;
 }
 
+interface LatestAiRun {
+  id: string;
+  provider: string;
+  model: string;
+  status: string;
+  errorCode: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  latencyMs: number | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
 const STATUS_LABEL: Record<string, string> = {
   SAVED: "保存済み",
   QUEUED: "解析待ち",
@@ -89,6 +102,7 @@ export function InboxClient() {
   const [loadingList, setLoadingList] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CaptureDetail | null>(null);
+  const [latestAiRun, setLatestAiRun] = useState<LatestAiRun | null>(null);
   const [inferences, setInferences] = useState<InferenceItem[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -118,6 +132,7 @@ export function InboxClient() {
     if (detailRes.ok) {
       const body = await detailRes.json();
       setDetail(body.data.capture);
+      setLatestAiRun(body.data.latestAiRun ?? null);
     }
     if (inferRes.ok) {
       const body = await inferRes.json();
@@ -133,6 +148,19 @@ export function InboxClient() {
   useEffect(() => {
     if (selectedId) loadDetail(selectedId);
   }, [selectedId, loadDetail]);
+
+  // [2026-08-20追加] QUEUED/PROCESSING中は結果を見るために手動リロードが必要だった。
+  // AI Workerのポーリング間隔(5秒)に合わせて自動でポーリングし、READY/FAILEDに
+  // 遷移したら自動的に停止する(無駄なポーリングを続けない)。
+  useEffect(() => {
+    if (!selectedId || !detail) return;
+    if (detail.processingStatus !== "QUEUED" && detail.processingStatus !== "PROCESSING") return;
+    const interval = setInterval(() => {
+      loadDetail(selectedId);
+      loadList();
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [selectedId, detail, loadDetail, loadList]);
 
   function selectCapture(id: string) {
     debugLog.event("InboxClient", "select capture", { id });
@@ -346,6 +374,28 @@ export function InboxClient() {
                     {detail.rawText || "(本文なし・音声のみ)"}
                   </p>
                 </div>
+
+                {/* [2026-08-20追加] processingStatus=FAILEDの場合、ターミナル(journalctl)を
+                    見なくても失敗理由が分かるよう、直近のAiRunエラー内容をそのまま表示する。 */}
+                {detail.processingStatus === "FAILED" && latestAiRun && (
+                  <div className="border-t border-line bg-warn-50 px-5 py-3">
+                    <p className="text-xs font-semibold text-warn">AI解析に失敗しました</p>
+                    <p className="text-[11px] text-warn/80 mt-1 font-mono break-all">
+                      {latestAiRun.provider}/{latestAiRun.model}: {latestAiRun.errorCode ?? "(エラー詳細なし)"}
+                    </p>
+                    <p className="text-[10px] text-faint mt-1">
+                      {new Date(latestAiRun.startedAt).toLocaleString("ja-JP")}に実行
+                      {latestAiRun.latencyMs !== null ? `(${latestAiRun.latencyMs}ms)` : ""}
+                    </p>
+                  </div>
+                )}
+                {(detail.processingStatus === "QUEUED" || detail.processingStatus === "PROCESSING") && (
+                  <div className="border-t border-line bg-decide-50 px-5 py-3">
+                    <p className="text-[11px] text-decide">
+                      AI Workerの処理を待っています(自動的に数秒おきに確認します)。
+                    </p>
+                  </div>
+                )}
 
                 <div className="border-t border-line bg-canvas/60 px-5 py-4">
                   <div className="flex items-center justify-between gap-3">
