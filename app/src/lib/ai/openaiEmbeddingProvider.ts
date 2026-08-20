@@ -13,8 +13,8 @@ interface OpenAiEmbeddingResponse {
   usage: { prompt_tokens: number };
 }
 
-export function createOpenAiEmbeddingProvider(): AiEmbeddingProvider {
-  const modelName = process.env.OPENAI_EMBEDDING_MODEL ?? DEFAULT_MODEL;
+export function createOpenAiEmbeddingProvider(opts?: { apiKey?: string; model?: string }): AiEmbeddingProvider {
+  const modelName = opts?.model ?? process.env.OPENAI_EMBEDDING_MODEL ?? DEFAULT_MODEL;
 
   return {
     providerName: "openai",
@@ -22,9 +22,9 @@ export function createOpenAiEmbeddingProvider(): AiEmbeddingProvider {
     dimensions: DIMENSIONS,
 
     async embed(input: AiEmbeddingInput): Promise<AiEmbeddingOutcome> {
-      const apiKey = process.env.OPENAI_API_KEY;
+      const apiKey = opts?.apiKey ?? process.env.OPENAI_API_KEY;
       if (!apiKey) {
-        return { ok: false, kind: "FATAL", message: "OPENAI_API_KEYが未設定です(.envを確認してください)" };
+        return { ok: false, kind: "FATAL", message: "OpenAI APIキーが未設定です(管理画面または.envで設定してください)" };
       }
 
       const started = Date.now();

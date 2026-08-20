@@ -26,7 +26,7 @@ function safeLog(...args: unknown[]): void {
 
 // 「code」はMFA(TOTP)検証等で6桁確認コードのフィールド名として使われるため、
 // \bcode\b(単語境界)で明示的に対象化する(camelCase複合語のstatusCode等は誤爆させない)。
-const SENSITIVE_KEY_PATTERN = /password|secret|totp|otp|token|authorization|cookie|\bcode\b/i;
+const SENSITIVE_KEY_PATTERN = /password|secret|totp|otp|token|authorization|cookie|apikey|\bcode\b/i;
 
 /**
  * パスワード・TOTPシークレット・トークン等をログから除外するための浅い再帰マスク。

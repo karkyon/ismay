@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
 import { ExtractionResultSchema } from "@/lib/ai/schema";
 import { getActiveExtractionProvider } from "@/lib/ai/config";
+import { estimateCostMicros } from "@/lib/ai/pricing";
 import type { AiExtractionProvider, AiExtractionUsage } from "@/lib/ai/provider";
 
 /**
@@ -148,6 +149,7 @@ async function persistSuccess(
         schemaVersion: ai.schemaVersion,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
+        costMicros: estimateCostMicros(ai.modelName, usage.inputTokens, usage.outputTokens),
         latencyMs: usage.latencyMs,
         status: "SUCCEEDED",
         finishedAt: new Date(),
@@ -216,6 +218,7 @@ async function persistFailure(
         schemaVersion: ai.schemaVersion,
         inputTokens: usage?.inputTokens,
         outputTokens: usage?.outputTokens,
+        costMicros: usage ? estimateCostMicros(ai.modelName, usage.inputTokens, usage.outputTokens) : null,
         latencyMs: usage?.latencyMs,
         status: "FAILED",
         errorCode: reason.slice(0, 200),

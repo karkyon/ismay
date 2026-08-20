@@ -105,6 +105,7 @@ model Workspace {
   responsibilities Responsibility[]
   integrations  Integration[]
   aiProviderConfigs AiProviderConfig[]
+  aiProviderCredentials AiProviderCredential[]
 
   @@map("workspaces")
 }
@@ -490,6 +491,29 @@ model AiProviderConfig {
 
   @@unique([workspaceId, capability])
   @@map("ai_provider_configs")
+}
+
+/// 新設: AIプロバイダーAPIキー(暗号化保存)。2026-08-20カルキョンさんの指示
+/// 「APIキー登録や切り替えを明確にどのモデルで適用するか切り替えを容易にしろ」に対応。
+/// providerKey(事業者単位。例: "anthropic","openai")ごとに1件。同じ事業者を複数の
+/// capability(EXTRACTION/EMBEDDING等)で使い回せるよう、AiProviderConfigとは別テーブルにした。
+/// 暗号化方式はTOTP秘密鍵(TBD-17暫定方針)と同じAES-256-GCM、鍵は別環境変数
+/// (AI_CREDENTIAL_ENCRYPTION_KEY)で分離する(MFA用鍵とは用途混在させない)。
+model AiProviderCredential {
+  id             String    @id @default(uuid())
+  workspaceId    String    @map("workspace_id")
+  workspace      Workspace @relation(fields: [workspaceId], references: [id])
+  /// registry.tsのプロバイダーキー(例: "anthropic","openai")と対応
+  providerKey    String    @map("provider_key")
+  encryptedApiKey String   @map("encrypted_api_key")
+  /// UI表示用。キー末尾4文字のみ保持(全体は復号しないと分からないようにする)
+  last4          String    @map("last4")
+  updatedById    String    @map("updated_by")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@unique([workspaceId, providerKey])
+  @@map("ai_provider_credentials")
 }
 
 // =====================================================================

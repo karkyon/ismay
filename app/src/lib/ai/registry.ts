@@ -20,13 +20,30 @@ import { createOpenAiEmbeddingProvider } from "@/lib/ai/openaiEmbeddingProvider"
 export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING"] as const;
 export type AiCapability = (typeof AI_CAPABILITIES)[number];
 
-export const EXTRACTION_PROVIDER_REGISTRY: Record<string, () => AiExtractionProvider> = {
+export interface ProviderFactoryOpts {
+  apiKey?: string;
+  model?: string;
+}
+
+/** 管理画面のモデル選択プルダウンに表示する選択肢。事業者追加時はここも1行追加する。 */
+export interface AvailableModel {
+  modelName: string;
+  label: string;
+}
+
+export const EXTRACTION_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => AiExtractionProvider> = {
   anthropic: createAnthropicExtractionProvider,
   // 例: openai: createOpenAiExtractionProvider (将来追加時はここに1行足すだけでよい)
 };
 
-export const EMBEDDING_PROVIDER_REGISTRY: Record<string, () => AiEmbeddingProvider> = {
+export const EMBEDDING_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => AiEmbeddingProvider> = {
   openai: createOpenAiEmbeddingProvider,
+};
+
+/** 管理画面でモデル名を選べるようにするための一覧(価格根拠はlib/ai/pricing.ts)。 */
+export const AVAILABLE_MODELS: Record<string, AvailableModel[]> = {
+  anthropic: [{ modelName: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5($1/$5 per Mtok)" }],
+  openai: [{ modelName: "text-embedding-3-small", label: "text-embedding-3-small($0.02 per Mtok)" }],
 };
 
 export const DEFAULT_PROVIDER_KEY: Record<AiCapability, string> = {
@@ -41,22 +58,26 @@ export function listAvailableProviderKeys(capability: AiCapability): string[] {
   return Object.keys(registry);
 }
 
+export function listAvailableModels(providerKey: string): AvailableModel[] {
+  return AVAILABLE_MODELS[providerKey] ?? [];
+}
+
 export function isKnownProviderKey(capability: AiCapability, providerKey: string): boolean {
   return listAvailableProviderKeys(capability).includes(providerKey);
 }
 
-export function resolveExtractionProvider(providerKey: string): AiExtractionProvider {
+export function resolveExtractionProvider(providerKey: string, opts?: ProviderFactoryOpts): AiExtractionProvider {
   const factory = EXTRACTION_PROVIDER_REGISTRY[providerKey];
   if (!factory) {
     throw new Error(`未登録の抽出プロバイダーです: ${providerKey}`);
   }
-  return factory();
+  return factory(opts);
 }
 
-export function resolveEmbeddingProvider(providerKey: string): AiEmbeddingProvider {
+export function resolveEmbeddingProvider(providerKey: string, opts?: ProviderFactoryOpts): AiEmbeddingProvider {
   const factory = EMBEDDING_PROVIDER_REGISTRY[providerKey];
   if (!factory) {
     throw new Error(`未登録のEmbeddingプロバイダーです: ${providerKey}`);
   }
-  return factory();
+  return factory(opts);
 }

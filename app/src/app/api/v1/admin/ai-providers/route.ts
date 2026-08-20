@@ -5,10 +5,17 @@ import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
-import { AI_CAPABILITIES, DEFAULT_PROVIDER_KEY, isKnownProviderKey, listAvailableProviderKeys } from "@/lib/ai/registry";
+import {
+  AI_CAPABILITIES,
+  DEFAULT_PROVIDER_KEY,
+  isKnownProviderKey,
+  listAvailableProviderKeys,
+  listAvailableModels,
+} from "@/lib/ai/registry";
 
 /**
- * MOD-10 Admin / MOD-06 AI Gateway: AIプロバイダー切替(2026-08-20新設)。
+ * MOD-10 Admin / MOD-06 AI Gateway: AIプロバイダー切替・モデル選択(2026-08-20新設、
+ * 同日追補でAPIキー登録・運用コスト可視化に対応)。
  *
  * [設計判断・未確認事項] システム基本設計書・要件定義書にMOD-10 Adminの認可モデル
  * (管理者ロール)の定義が無く、Userテーブルにもrole/isAdmin相当の列が存在しない
@@ -26,7 +33,7 @@ const UpdateSchema = z.object({
   modelName: z.string().max(200).optional(),
 });
 
-/** GET /api/v1/admin/ai-providers: 現在の設定＋選択可能なプロバイダー一覧を返す。 */
+/** GET /api/v1/admin/ai-providers: 現在の設定＋選択可能なプロバイダー・モデル・登録済みキーの有無を返す。 */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (!auth.authenticated) {
@@ -35,34 +42,49 @@ export async function GET(req: NextRequest) {
 
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
 
-  const rows = await db.aiProviderConfig.findMany({ where: { workspaceId } });
-  type ConfigRow = {
-    capability: string;
-    providerKey: string;
-    modelName: string | null;
-    updatedAt: Date;
-  };
-  const byCapability = new Map<string, ConfigRow>((rows as ConfigRow[]).map((r) => [r.capability, r]));
+  const [configRows, credentialRows] = await Promise.all([
+    db.aiProviderConfig.findMany({ where: { workspaceId } }),
+    db.aiProviderCredential.findMany({ where: { workspaceId } }),
+  ]);
+
+  type ConfigRow = { capability: string; providerKey: string; modelName: string | null; updatedAt: Date };
+  type CredentialRow = { providerKey: string; last4: string; updatedAt: Date };
+
+  const byCapability = new Map<string, ConfigRow>((configRows as ConfigRow[]).map((r) => [r.capability, r]));
+  const credByProvider = new Map<string, CredentialRow>((credentialRows as CredentialRow[]).map((r) => [r.providerKey, r]));
 
   const capabilities = AI_CAPABILITIES.map((capability) => {
     const row = byCapability.get(capability);
-    const activeProviderKey = row && isKnownProviderKey(capability, row.providerKey)
-      ? row.providerKey
-      : DEFAULT_PROVIDER_KEY[capability];
+    const activeProviderKey =
+      row && isKnownProviderKey(capability, row.providerKey) ? row.providerKey : DEFAULT_PROVIDER_KEY[capability];
+    const availableProviderKeys = listAvailableProviderKeys(capability);
     return {
       capability,
       activeProviderKey,
-      modelName: row?.modelName ?? null,
+      modelName: row?.modelName ?? listAvailableModels(activeProviderKey)[0]?.modelName ?? null,
       isDefault: !row,
-      availableProviderKeys: listAvailableProviderKeys(capability),
+      availableProviderKeys,
+      availableModelsByProvider: Object.fromEntries(availableProviderKeys.map((k) => [k, listAvailableModels(k)])),
       updatedAt: row?.updatedAt ?? null,
     };
   });
 
-  return apiOk({ capabilities });
+  // 登場する全プロバイダーキー(EXTRACTION/EMBEDDING両方)についてキー登録状況を返す
+  const allProviderKeys = Array.from(new Set(AI_CAPABILITIES.flatMap((c) => listAvailableProviderKeys(c))));
+  const credentials = allProviderKeys.map((providerKey) => {
+    const cred = credByProvider.get(providerKey);
+    return {
+      providerKey,
+      registered: Boolean(cred),
+      last4: cred?.last4 ?? null,
+      updatedAt: cred?.updatedAt ?? null,
+    };
+  });
+
+  return apiOk({ capabilities, credentials });
 }
 
-/** PATCH /api/v1/admin/ai-providers: 指定capabilityの使用プロバイダーを切り替える。 */
+/** PATCH /api/v1/admin/ai-providers: 指定capabilityの使用プロバイダー・モデルを切り替える。 */
 export async function PATCH(req: NextRequest) {
   const auth = await requireAuth(req);
   if (!auth.authenticated) {
@@ -89,6 +111,18 @@ export async function PATCH(req: NextRequest) {
       fieldErrors: { providerKey: `選択可能な値: ${listAvailableProviderKeys(capability).join(", ")}` },
     });
   }
+  if (modelName) {
+    const known = listAvailableModels(providerKey).some((m) => m.modelName === modelName);
+    if (!known) {
+      return apiError("VALIDATION_FAILED", "未登録のモデルです", {
+        fieldErrors: {
+          modelName: `選択可能な値: ${listAvailableModels(providerKey)
+            .map((m) => m.modelName)
+            .join(", ")}`,
+        },
+      });
+    }
+  }
 
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
 
@@ -111,6 +145,7 @@ export async function PATCH(req: NextRequest) {
     workspaceId,
     capability,
     providerKey: updated.providerKey,
+    modelName: updated.modelName,
   });
   debugServer.event("PATCH /admin/ai-providers", "AI_PROVIDER_SWITCHED", {
     workspaceId,
