@@ -56,6 +56,8 @@ interface InferenceItem {
   decision: string;
   createdAt: string;
   version: number;
+  literalDuplicateOf?: string[];
+  similarExisting?: { responsibilityId: string; title: string; similarity: number }[];
 }
 
 interface LatestAiRun {
@@ -509,8 +511,13 @@ export function InboxClient() {
                         const p = inf.payload;
                         const isPending = inf.decision === "PENDING";
                         const isBusy = decidingId === inf.id;
+                        const hasLiteralDup = (inf.literalDuplicateOf?.length ?? 0) > 0;
+                        const hasSimilarExisting = (inf.similarExisting?.length ?? 0) > 0;
                         return (
-                          <li key={inf.id} className="bg-ai-50 rounded-lg p-3">
+                          <li
+                            key={inf.id}
+                            className={`rounded-lg p-3 ${hasLiteralDup ? "bg-warn-50 border border-warn-200" : "bg-ai-50"}`}
+                          >
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
                                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -552,6 +559,17 @@ export function InboxClient() {
                                     {p.blockedByCandidateIds?.length > 0 && (
                                       <>他{p.blockedByCandidateIds.length}件の完了が前提</>
                                     )}
+                                  </p>
+                                )}
+                                {hasLiteralDup && (
+                                  <p className="text-[11px] text-warn mt-1 font-medium">
+                                    ⚠ 同じ内容の候補が他に{inf.literalDuplicateOf!.length}件あります(同じメモを複数回保存した可能性)。片方のみ採用してください
+                                  </p>
+                                )}
+                                {hasSimilarExisting && (
+                                  <p className="text-[11px] text-warn mt-1">
+                                    ⚠ 既存の類似責任: {inf.similarExisting![0].title}(
+                                    {Math.round(inf.similarExisting![0].similarity * 100)}%)
                                   </p>
                                 )}
                               </div>

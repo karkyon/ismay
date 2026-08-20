@@ -141,3 +141,61 @@ export async function findRelatedResponsibilities(params: {
       };
     });
 }
+
+/**
+ * [2026-08-20追加] AI候補(まだResponsibility化されていないPENDING状態)の段階で
+ * 「これは既存の責任と重複していないか」を確認するための、任意テキストからの検索。
+ * カルキョンさんの指摘「そもそもタスクとして成立するのか(＝既に同じものが登録済みでは)
+ * が一切確認できていない」に対応。findRelatedResponsibilities()は既にEmbedding済みの
+ * Responsibility同士の比較用だったため、まだ存在しないテキストからの検索用に分離した。
+ */
+export async function findSimilarResponsibilitiesForText(params: {
+  text: string;
+  workspaceId: string;
+}): Promise<RelatedResponsibility[]> {
+  const provider = await getActiveEmbeddingProvider(params.workspaceId);
+  const outcome = await provider.embed({ text: params.text });
+  if (!outcome.ok) {
+    debugServer.error("ai/relatedResponsibilities", "候補の重複チェック用Embedding生成失敗", {
+      kind: outcome.kind,
+      message: outcome.message,
+    });
+    return [];
+  }
+  const vectorLiteral = toVectorLiteral(outcome.vector);
+
+  const rows = await db.$queryRaw<SimilarityRow[]>`
+    SELECT
+      e.responsibility_id,
+      1 - (e.embedding <=> ${vectorLiteral}::vector) AS similarity
+    FROM responsibility_embeddings e
+    JOIN responsibilities r ON r.id = e.responsibility_id
+    WHERE e.workspace_id = ${params.workspaceId}
+      AND r.deleted_at IS NULL
+    ORDER BY e.embedding <=> ${vectorLiteral}::vector
+    LIMIT ${TOP_K}
+  `;
+
+  const candidateIds = rows.map((r: SimilarityRow) => r.responsibility_id);
+  if (candidateIds.length === 0) return [];
+
+  const responsibilities = await db.responsibility.findMany({
+    where: { id: { in: candidateIds } },
+    select: { id: true, title: true, type: true, status: true },
+  });
+  type RespRow = { id: string; title: string; type: string; status: string };
+  const byId = new Map((responsibilities as RespRow[]).map((r) => [r.id, r]));
+
+  return (rows as SimilarityRow[])
+    .filter((r) => Number(r.similarity) >= SIMILARITY_THRESHOLD && byId.has(r.responsibility_id))
+    .map((r) => {
+      const resp = byId.get(r.responsibility_id) as RespRow;
+      return {
+        responsibilityId: resp.id,
+        title: resp.title,
+        type: resp.type,
+        status: resp.status,
+        similarity: Number(r.similarity),
+      };
+    });
+}
