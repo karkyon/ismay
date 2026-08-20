@@ -36,12 +36,72 @@ interface UsageRow {
   costMicros: string | null;
 }
 
+interface StatusBreakdownItem {
+  status: string;
+  count: number;
+}
+
+interface DecisionBreakdownItem {
+  decision: string;
+  count: number;
+}
+
+interface RecentRun {
+  id: string;
+  provider: string;
+  model: string;
+  status: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costMicros: string | null;
+  latencyMs: number | null;
+  errorCode: string | null;
+  startedAt: string;
+}
+
+interface DailyTrendItem {
+  date: string;
+  costMicros: string;
+  runCount: number;
+  failedCount: number;
+}
+
 interface UsageResponse {
   byModelAllTime: UsageRow[];
   byModelLast30Days: UsageRow[];
   totalCostMicrosAllTime: string;
   totalCostMicrosLast30Days: string;
   unknownCostRunCount: number;
+  statusBreakdown: StatusBreakdownItem[];
+  successRate: number | null;
+  avgLatencyMs: number | null;
+  p95LatencyMs: number | null;
+  recentRuns: RecentRun[];
+  dailyTrend: DailyTrendItem[];
+  decisionBreakdown: DecisionBreakdownItem[];
+  acceptanceRate: number | null;
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  SUCCEEDED: "成功",
+  FAILED: "失敗",
+  PENDING: "処理中",
+};
+
+const RUN_STATUS_DOT: Record<string, string> = {
+  SUCCEEDED: "bg-green-500",
+  FAILED: "bg-red-500",
+  PENDING: "bg-amber-400",
+};
+
+function formatPercent(ratio: number | null): string {
+  if (ratio === null) return "—";
+  return `${Math.round(ratio * 1000) / 10}%`;
+}
+
+function formatRelativeDate(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleDateString("ja-JP", { month: "short", day: "numeric", weekday: "short" });
 }
 
 const CAPABILITY_LABEL: Record<string, string> = {
@@ -282,58 +342,155 @@ export function AiProvidersAdminClient() {
             </div>
           </div>
 
-          {/* 運用コスト */}
+          {/* KPIカード(市販ツール同様のダッシュボード上部サマリー) */}
           {usage && (
-            <div className="bg-surface border border-line rounded-2xl shadow-card p-5">
-              <p className="font-medium text-ink mb-3">運用コスト</p>
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div>
-                  <p className="text-xs text-faint">直近30日</p>
-                  <p className="text-2xl font-serif text-ink">
-                    {formatUsd(microsToUsd(BigInt(usage.totalCostMicrosLast30Days)))}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-faint">累計</p>
-                  <p className="text-2xl font-serif text-ink">
-                    {formatUsd(microsToUsd(BigInt(usage.totalCostMicrosAllTime)))}
-                  </p>
-                </div>
-              </div>
-              {usage.unknownCostRunCount > 0 && (
-                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
-                  料金表未登録のモデル呼び出しが{usage.unknownCostRunCount}件あり、上記コストには含まれていません。
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="bg-surface border border-line rounded-2xl shadow-card p-4">
+                <p className="text-xs text-faint">直近30日コスト</p>
+                <p className="text-xl font-serif text-ink mt-1">
+                  {formatUsd(microsToUsd(BigInt(usage.totalCostMicrosLast30Days)))}
                 </p>
-              )}
+              </div>
+              <div className="bg-surface border border-line rounded-2xl shadow-card p-4">
+                <p className="text-xs text-faint">成功率(30日)</p>
+                <p className="text-xl font-serif text-ink mt-1">{formatPercent(usage.successRate)}</p>
+              </div>
+              <div className="bg-surface border border-line rounded-2xl shadow-card p-4">
+                <p className="text-xs text-faint">平均レイテンシ</p>
+                <p className="text-xl font-serif text-ink mt-1">
+                  {usage.avgLatencyMs !== null ? `${usage.avgLatencyMs}ms` : "—"}
+                </p>
+                <p className="text-xs text-faint mt-0.5">
+                  p95: {usage.p95LatencyMs !== null ? `${usage.p95LatencyMs}ms` : "—"}
+                </p>
+              </div>
+              <div className="bg-surface border border-line rounded-2xl shadow-card p-4">
+                <p className="text-xs text-faint">AI候補の採用率</p>
+                <p className="text-xl font-serif text-ink mt-1">{formatPercent(usage.acceptanceRate)}</p>
+                <p className="text-xs text-faint mt-0.5">Accept+Edit ÷ 判断済み件数</p>
+              </div>
+            </div>
+          )}
+
+          {/* 日次トレンド(直近14日) */}
+          {usage && usage.dailyTrend.length > 0 && (
+            <div className="bg-surface border border-line rounded-2xl shadow-card p-5">
+              <p className="font-medium text-ink mb-4">日次コスト推移(直近14日)</p>
+              {(() => {
+                const maxCost = Math.max(
+                  ...usage.dailyTrend.map((d) => microsToUsd(BigInt(d.costMicros))),
+                  0.0001,
+                );
+                return (
+                  <div className="flex items-end gap-1.5 h-32">
+                    {usage.dailyTrend.map((d) => {
+                      const usd = microsToUsd(BigInt(d.costMicros));
+                      const heightPct = Math.max(4, (usd / maxCost) * 100);
+                      return (
+                        <div key={d.date} className="flex-1 flex flex-col items-center justify-end h-full group relative">
+                          <div
+                            className={`w-full rounded-t ${d.failedCount > 0 ? "bg-red-300" : "bg-brand-300"}`}
+                            style={{ height: `${heightPct}%` }}
+                            title={`${d.date}: ${formatUsd(usd)}(${d.runCount}件${d.failedCount > 0 ? `、失敗${d.failedCount}件` : ""})`}
+                          />
+                          <span className="text-[9px] text-faint mt-1 rotate-0">{d.date.slice(5)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* モデル別内訳・エラー内訳 */}
+          {usage && (
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="bg-surface border border-line rounded-2xl shadow-card p-5">
+                <p className="font-medium text-ink mb-3">モデル別コスト(累計)</p>
+                {usage.unknownCostRunCount > 0 && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                    料金表未登録のモデル呼び出しが{usage.unknownCostRunCount}件あり、コストに含まれていません。
+                  </p>
+                )}
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-faint border-b border-line">
+                      <th className="py-1.5 font-normal">モデル</th>
+                      <th className="py-1.5 font-normal text-right">回数</th>
+                      <th className="py-1.5 font-normal text-right">コスト</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usage.byModelAllTime.map((row) => (
+                      <tr key={`${row.provider}/${row.model}`} className="border-b border-line last:border-0">
+                        <td className="py-1.5 font-mono text-xs">{row.model}</td>
+                        <td className="py-1.5 text-right">{row.runCount.toLocaleString()}</td>
+                        <td className="py-1.5 text-right">
+                          {row.costMicros !== null ? formatUsd(microsToUsd(BigInt(row.costMicros))) : "不明"}
+                        </td>
+                      </tr>
+                    ))}
+                    {usage.byModelAllTime.length === 0 && (
+                      <tr>
+                        <td colSpan={3} className="py-3 text-center text-faint">
+                          まだ利用実績がありません
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="bg-surface border border-line rounded-2xl shadow-card p-5">
+                <p className="font-medium text-ink mb-3">AI候補の採否内訳</p>
+                <ul className="space-y-1.5">
+                  {usage.decisionBreakdown.map((d) => (
+                    <li key={d.decision} className="flex items-center justify-between text-sm">
+                      <span className="font-mono text-xs text-muted">{d.decision}</span>
+                      <span className="text-ink">{d.count.toLocaleString()}件</span>
+                    </li>
+                  ))}
+                  {usage.decisionBreakdown.length === 0 && (
+                    <li className="text-sm text-faint">まだAI候補の判断実績がありません</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {/* 直近の呼び出しログ(ドリルダウン) */}
+          {usage && usage.recentRuns.length > 0 && (
+            <div className="bg-surface border border-line rounded-2xl shadow-card p-5">
+              <p className="font-medium text-ink mb-3">直近の呼び出しログ</p>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-xs text-faint border-b border-line">
+                    <th className="py-1.5 font-normal">状態</th>
+                    <th className="py-1.5 font-normal">日時</th>
                     <th className="py-1.5 font-normal">モデル</th>
-                    <th className="py-1.5 font-normal text-right">呼び出し回数</th>
-                    <th className="py-1.5 font-normal text-right">入力トークン</th>
-                    <th className="py-1.5 font-normal text-right">出力トークン</th>
-                    <th className="py-1.5 font-normal text-right">コスト(累計)</th>
+                    <th className="py-1.5 font-normal text-right">レイテンシ</th>
+                    <th className="py-1.5 font-normal text-right">コスト</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {usage.byModelAllTime.map((row) => (
-                    <tr key={`${row.provider}/${row.model}`} className="border-b border-line last:border-0">
-                      <td className="py-1.5 font-mono text-xs">{row.model}</td>
-                      <td className="py-1.5 text-right">{row.runCount.toLocaleString()}</td>
-                      <td className="py-1.5 text-right">{row.inputTokens.toLocaleString()}</td>
-                      <td className="py-1.5 text-right">{row.outputTokens.toLocaleString()}</td>
-                      <td className="py-1.5 text-right">
-                        {row.costMicros !== null ? formatUsd(microsToUsd(BigInt(row.costMicros))) : "不明"}
+                  {usage.recentRuns.map((run) => (
+                    <tr key={run.id} className="border-b border-line last:border-0">
+                      <td className="py-1.5">
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className={`w-1.5 h-1.5 rounded-full ${RUN_STATUS_DOT[run.status] ?? "bg-gray-300"}`} />
+                          <span className="text-xs">{STATUS_LABEL[run.status] ?? run.status}</span>
+                        </span>
+                        {run.errorCode && <p className="text-[10px] text-red-600 mt-0.5">{run.errorCode}</p>}
+                      </td>
+                      <td className="py-1.5 text-xs text-muted">{formatRelativeDate(run.startedAt)}</td>
+                      <td className="py-1.5 font-mono text-xs">{run.model}</td>
+                      <td className="py-1.5 text-right text-xs">{run.latencyMs !== null ? `${run.latencyMs}ms` : "—"}</td>
+                      <td className="py-1.5 text-right text-xs">
+                        {run.costMicros !== null ? formatUsd(microsToUsd(BigInt(run.costMicros))) : "不明"}
                       </td>
                     </tr>
                   ))}
-                  {usage.byModelAllTime.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="py-3 text-center text-faint">
-                        まだ利用実績がありません
-                      </td>
-                    </tr>
-                  )}
                 </tbody>
               </table>
             </div>
