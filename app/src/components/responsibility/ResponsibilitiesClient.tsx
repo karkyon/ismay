@@ -32,6 +32,14 @@ interface ResponsibilityDetail extends ResponsibilityListItem {
   originCaptureId: string | null;
 }
 
+interface RelatedItem {
+  responsibilityId: string;
+  title: string;
+  type: string;
+  status: string;
+  similarity: number;
+}
+
 const TYPE_LABEL: Record<string, string> = {
   TASK: "作業",
   COMMITMENT: "約束",
@@ -149,6 +157,7 @@ export function ResponsibilitiesClient() {
   const [loadingList, setLoadingList] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ResponsibilityDetail | null>(null);
+  const [related, setRelated] = useState<RelatedItem[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [error, setError] = useState("");
@@ -177,10 +186,19 @@ export function ResponsibilitiesClient() {
   const loadDetail = useCallback(async (id: string) => {
     setLoadingDetail(true);
     setError("");
-    const res = await debugFetch(`/api/v1/responsibilities/${id}`);
-    if (res.ok) {
-      const body = await res.json();
+    const [detailRes, relatedRes] = await Promise.all([
+      debugFetch(`/api/v1/responsibilities/${id}`),
+      debugFetch(`/api/v1/responsibilities/${id}/related`),
+    ]);
+    if (detailRes.ok) {
+      const body = await detailRes.json();
       setDetail(body.data.responsibility);
+    }
+    if (relatedRes.ok) {
+      const body = await relatedRes.json();
+      setRelated(body.data.related);
+    } else {
+      setRelated([]);
     }
     setLoadingDetail(false);
   }, []);
@@ -499,6 +517,30 @@ export function ResponsibilitiesClient() {
                     {detail.importance && <span>重要度: {detail.importance}/5</span>}
                   </div>
                 </div>
+
+                {related.length > 0 && (
+                  <div className="border-t border-line bg-ai-50/60 px-5 py-4">
+                    <p className="text-xs font-semibold text-ink mb-2">関連する可能性がある責任</p>
+                    <ul className="space-y-1.5">
+                      {related.map((r) => (
+                        <li key={r.responsibilityId} className="flex items-center justify-between gap-2 text-xs">
+                          <button
+                            onClick={() => selectItem(r.responsibilityId)}
+                            className="text-ink hover:underline text-left truncate"
+                          >
+                            {r.title}
+                          </button>
+                          <span className="shrink-0 text-faint">
+                            類似度 {Math.round(r.similarity * 100)}%
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-[10px] text-faint mt-2">
+                      意味的な近さのみを示しています(重複・関連の種別判定は未実装です)。
+                    </p>
+                  </div>
+                )}
 
                 <div className="border-t border-line bg-canvas/60 px-5 py-4">
                   <div className="flex flex-wrap items-center gap-2">

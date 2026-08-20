@@ -7,6 +7,7 @@ import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { RESPONSIBILITY_TYPES, initialStatusFor } from "@/lib/responsibility";
 import { ResponsibilityCandidateSchema } from "@/lib/ai/schema";
+import { embedAndStoreResponsibility, findRelatedResponsibilities } from "@/lib/ai/relatedResponsibilities";
 
 /**
  * API-AI-01: POST /inferences/{id}/decision 候補採否(FN-AI-01/UI-04)
@@ -301,12 +302,36 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return apiError("VERSION_CONFLICT", "他の操作と競合しました。最新の状態を取得してください", { retryable: true });
   }
 
+  // FN-GR-01: 意味照合用の埋め込みを生成・保存する(トランザクション外。Embedding API呼び出しは
+  // レイテンシがあり、かつ失敗してもResponsibility本体の作成自体は成立済みのため、
+  // ここで失敗しても responsibility 作成自体はロールバックしない)。
+  const embedResult = await embedAndStoreResponsibility({
+    responsibilityId: created.id,
+    workspaceId,
+    domainId: created.domainId,
+    title: created.title,
+    description: created.description,
+    actor: candidate.actor,
+    counterparty: candidate.counterparty,
+  }).catch((err: unknown) => {
+    debugServer.error("POST /inferences/[id]/decision", "embedAndStoreResponsibility例外", err);
+    return { ok: false as const, reason: String(err) };
+  });
+
+  const relatedResponsibilities = embedResult.ok
+    ? await findRelatedResponsibilities({ responsibilityId: created.id, workspaceId }).catch((err: unknown) => {
+        debugServer.error("POST /inferences/[id]/decision", "findRelatedResponsibilities例外", err);
+        return [];
+      })
+    : [];
+
   return apiOk(
     {
       inferenceId: inference.id,
       decision: storedDecision,
       responsibilityId: created.id,
       undoDeadlineAt: null,
+      relatedResponsibilities,
     },
     { status: 201 },
   );
