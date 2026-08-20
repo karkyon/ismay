@@ -200,6 +200,10 @@ model Responsibility {
   domain           Domain    @relation(fields: [domainId], references: [id])
   originCaptureId  String?   @map("origin_capture_id")
   originCapture    Capture?  @relation(fields: [originCaptureId], references: [id])
+  /// 新設: AI採用によって生成された場合、元のAiInference.idを保持する。
+  /// 同一Capture内の候補間依存関係(blockedByCandidateIds)をResponsibilityRelationへ
+  /// 変換する際、「どの候補がどのResponsibilityになったか」を突き合わせるために使う。
+  originInferenceId String?   @map("origin_inference_id")
   /// TASK/COMMITMENT/DECISION/WAITING/EVENT/RISK/CONCERN/HABIT/IDEA
   /// (v1.1注記: Constraintは含まない。Goalは本テーブルに現れない)
   type             String

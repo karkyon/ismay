@@ -121,7 +121,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const finalType = edit.type ?? candidate.type;
   const finalTitle = edit.title ?? candidate.title;
   const finalDescription = edit.description ?? candidate.description;
-  const finalImportance = edit.importance;
+  // [2026-08-20修正] 従来はedit.importanceのみを見ており、AIが推定したimportance
+  // (candidate.importance)を採用時に一切反映していなかった(手動編集しない限り
+  // 常にnullになる不備)。AI推定値をフォールバックとして使うよう修正。
+  const finalImportance = edit.importance ?? candidate.importance;
 
   // UNKNOWNをHard deadlineへ昇格しない(AI・PEM設計書v1.0 3章)。編集で明示指定された場合のみ例外的に許可する。
   const hardDeadlineFromCandidate = candidate.dateMentions.find((d) => d.meaning === "HARD_DEADLINE")?.normalizedAt;
@@ -149,6 +152,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         workspaceId,
         domainId: inference.capture.domainId ?? defaultDomainId,
         originCaptureId: inference.captureId,
+        originInferenceId: inference.id,
         type: finalType,
         title: finalTitle,
         description: finalDescription ?? null,
@@ -167,6 +171,89 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       inferenceId: inference.id,
       decision: storedDecision,
     });
+
+    // [2026-08-20追加] カルキョンさんの指示「候補間の親子・依存関係を自動検出しろ」に対応。
+    // 同一Capture内の他候補で、AIがblockedByCandidateIdsとして関連付けたものが
+    // 既に採用済み(Responsibility化済み)であれば、ここでResponsibilityRelationを
+    // 自動生成する。他Captureをまたぐ意味的関連付け(FN-GR-01)はスコープ外。
+    if (candidate.blockedByCandidateIds.length > 0) {
+      const siblingInferences = await tx.aiInference.findMany({
+        where: {
+          captureId: inference.captureId,
+          decision: { in: ["ACCEPTED", "EDITED"] },
+          id: { not: inference.id },
+        },
+        select: { id: true, payload: true },
+      });
+      for (const sibling of siblingInferences) {
+        const siblingCandidate = ResponsibilityCandidateSchema.safeParse(sibling.payload);
+        if (!siblingCandidate.success) continue;
+        if (!candidate.blockedByCandidateIds.includes(siblingCandidate.data.candidateId)) continue;
+        const blockingResponsibility = await tx.responsibility.findFirst({
+          where: { originInferenceId: sibling.id },
+          select: { id: true },
+        });
+        if (!blockingResponsibility) continue;
+        await tx.responsibilityRelation.create({
+          data: {
+            fromId: blockingResponsibility.id,
+            toId: responsibility.id,
+            relationType: "BLOCKS",
+            status: "CONFIRMED",
+            sourceKind: "AI",
+            confirmedById: auth.user.userId,
+            confirmedAt: new Date(),
+          },
+        });
+        debugServer.event("POST /inferences/[id]/decision", "RESPONSIBILITY_RELATION_CREATED(採用時解決)", {
+          fromId: blockingResponsibility.id,
+          toId: responsibility.id,
+        });
+      }
+    }
+
+    // 逆方向: 既に採用済みの他候補が、この候補(今作成したResponsibility)を
+    // blockedByCandidateIdsに含めていた場合(=先にブロック元でない方が採用されていた場合)、
+    // 今このタイミングで関係を解決する。
+    const dependentSiblingInferences = await tx.aiInference.findMany({
+      where: {
+        captureId: inference.captureId,
+        decision: { in: ["ACCEPTED", "EDITED"] },
+        id: { not: inference.id },
+      },
+      select: { id: true, payload: true },
+    });
+    for (const sibling of dependentSiblingInferences) {
+      const siblingCandidate = ResponsibilityCandidateSchema.safeParse(sibling.payload);
+      if (!siblingCandidate.success) continue;
+      if (!siblingCandidate.data.blockedByCandidateIds.includes(candidate.candidateId)) continue;
+      const dependentResponsibility = await tx.responsibility.findFirst({
+        where: { originInferenceId: sibling.id },
+        select: { id: true },
+      });
+      if (!dependentResponsibility) continue;
+      // 既に(採用順序次第で)上のループで作成済みの場合はスキップする
+      const alreadyExists = await tx.responsibilityRelation.findFirst({
+        where: { fromId: responsibility.id, toId: dependentResponsibility.id, relationType: "BLOCKS" },
+        select: { id: true },
+      });
+      if (alreadyExists) continue;
+      await tx.responsibilityRelation.create({
+        data: {
+          fromId: responsibility.id,
+          toId: dependentResponsibility.id,
+          relationType: "BLOCKS",
+          status: "CONFIRMED",
+          sourceKind: "AI",
+          confirmedById: auth.user.userId,
+          confirmedAt: new Date(),
+        },
+      });
+      debugServer.event("POST /inferences/[id]/decision", "RESPONSIBILITY_RELATION_CREATED(逆方向解決)", {
+        fromId: responsibility.id,
+        toId: dependentResponsibility.id,
+      });
+    }
 
     await tx.eventLog.create({
       data: {

@@ -40,6 +40,16 @@ export const ResponsibilityCandidateSchema = z
     evidenceSpans: z.array(EvidenceSpanSchema).min(1).max(20),
     confidence: z.number().min(0).max(1),
     unknowns: z.array(z.string().max(200)).max(10).default([]),
+    // [2026-08-20追加] カルキョンさんの指示「重要度・親子関係の自動推定」に対応。
+    // 1(低)〜5(高)。原文に重要度の手がかりが無い場合はモデルが省略してよく、
+    // その場合はUI側で人手設定を促す(勝手に3等の既定値を作らない)。
+    importance: z.number().int().min(1).max(5).optional(),
+    // 同一抽出バッチ内(同じCapture由来)の他候補candidateIdのうち、この候補が
+    // 完了する前提として必要なもの(前提条件・ブロック元)。責任間関係
+    // (ResponsibilityRelation)の自動生成に使う。他Captureの候補までは
+    // 参照できない(FN-GR-01の意味照合が別途必要な領域のため、ここでは
+    // 同一原文内の明示的な依存関係のみを対象とする)。
+    blockedByCandidateIds: z.array(z.string().max(64)).max(10).default([]),
   })
   .refine((c) => c.evidenceSpans.every((s) => s.end > s.start), {
     message: "evidenceSpansのendはstartより大きい必要があります",
@@ -101,6 +111,15 @@ export const EXTRACTION_TOOL_JSON_SCHEMA = {
           },
           confidence: { type: "number", description: "0〜1" },
           unknowns: { type: "array", items: { type: "string" } },
+          importance: {
+            type: "integer",
+            description: "1(低)〜5(高)。原文に手がかりが無ければ省略してよい",
+          },
+          blockedByCandidateIds: {
+            type: "array",
+            items: { type: "string" },
+            description: "この候補の完了前提として必要な、同一原文内の他候補のcandidateId",
+          },
         },
         required: ["candidateId", "type", "title", "evidenceSpans", "confidence"],
       },

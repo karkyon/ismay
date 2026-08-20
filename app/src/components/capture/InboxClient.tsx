@@ -44,6 +44,8 @@ interface CandidatePayload {
   completionCondition?: string;
   negationOrChange?: string;
   unknowns: string[];
+  importance?: number;
+  blockedByCandidateIds: string[];
 }
 
 interface InferenceItem {
@@ -541,6 +543,15 @@ export function InboxClient() {
                                     {p.dateMentions
                                       .map((d) => `${DATE_MEANING_LABEL[d.meaning] ?? d.meaning}: ${d.rawExpression}`)
                                       .join("、")}
+                                  </p>
+                                )}
+                                {(p?.importance || p?.blockedByCandidateIds?.length > 0) && (
+                                  <p className="text-[11px] text-muted mt-0.5">
+                                    {p.importance && <>重要度: {"★".repeat(p.importance)}{"☆".repeat(5 - p.importance)}</>}
+                                    {p.importance && p.blockedByCandidateIds?.length > 0 && " / "}
+                                    {p.blockedByCandidateIds?.length > 0 && (
+                                      <>他{p.blockedByCandidateIds.length}件の完了が前提</>
+                                    )}
                                   </p>
                                 )}
                               </div>
