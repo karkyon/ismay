@@ -4,12 +4,7 @@ import { requireAuth } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
 
-/**
- * API-CAP-04: GET /captures/{id}/inferences 候補取得(UI-04)
- *
- * [既知の制約] AI Workerが未実装のため、現時点では常に空配列を返す
- * (ai_inferencesへの書き込みはAI Worker実装後に発生する)。
- */
+/** UI-04向け候補取得(GET /captures/{id}/inferences)。 */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const auth = await requireAuth(req);
   if (!auth.authenticated) {
@@ -39,6 +34,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       decision: true,
       decidedAt: true,
       createdAt: true,
+      // [2026-08-20追加] Inbox画面でACCEPT/REJECT操作(API-AI-01)を行うために必須。
+      // 従来この列を返しておらず、フロント側でexpectedInferenceVersionを渡せないため
+      // 候補内容の表示・採否操作が一切実装できていなかった。
+      version: true,
     },
   });
 

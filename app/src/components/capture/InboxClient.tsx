@@ -24,12 +24,36 @@ interface CaptureDetail extends CaptureListItem {
   updatedAt: string;
 }
 
+interface CandidateDateMention {
+  rawExpression: string;
+  normalizedAt?: string;
+  meaning: string;
+  timezone: string;
+  confidence: number;
+}
+
+/** lib/ai/schema.ts ResponsibilityCandidateSchemaと同型(フロント側の表示用)。 */
+interface CandidatePayload {
+  candidateId: string;
+  type: string;
+  title: string;
+  description?: string;
+  actor?: string;
+  counterparty?: string;
+  dateMentions: CandidateDateMention[];
+  completionCondition?: string;
+  negationOrChange?: string;
+  unknowns: string[];
+}
+
 interface InferenceItem {
   id: string;
   inferenceType: string;
+  payload: CandidatePayload;
   confidence: string;
   decision: string;
   createdAt: string;
+  version: number;
 }
 
 interface LatestAiRun {
@@ -76,6 +100,36 @@ const SOURCE_TYPE_LABEL: Record<string, string> = {
   IMPORT: "取込",
 };
 
+/** AI候補の種別ラベル(用語・状態・コード定義書v1.1 2章の9種別に対応)。 */
+const CANDIDATE_TYPE_LABEL: Record<string, string> = {
+  TASK: "作業",
+  COMMITMENT: "約束",
+  DECISION: "判断",
+  WAITING: "待ち",
+  EVENT: "予定",
+  RISK: "危険",
+  CONCERN: "気がかり",
+  HABIT: "習慣",
+  IDEA: "アイデア",
+};
+
+const CANDIDATE_TYPE_CHIP_STYLE: Record<string, string> = {
+  TASK: "bg-brand-50 text-brand-700",
+  COMMITMENT: "bg-decide-50 text-decide",
+  DECISION: "bg-decide-50 text-decide",
+  WAITING: "bg-ai-50 text-ai",
+  EVENT: "bg-safe-50 text-safe",
+  RISK: "bg-warn-50 text-warn",
+};
+
+const DATE_MEANING_LABEL: Record<string, string> = {
+  HARD_DEADLINE: "締切",
+  SOFT_TARGET: "目標",
+  FOLLOW_UP: "追跡",
+  EVENT: "予定",
+  UNKNOWN: "不明",
+};
+
 // TickTick/Craftのパステルカラーブロックを参考に、種類ごとに淡色を割り当てる。
 // 新しい色を増やさず既存デザイントークン(brand/ai/decide/safe)を再利用する。
 const SOURCE_TYPE_CHIP_STYLE: Record<string, string> = {
@@ -106,6 +160,7 @@ export function InboxClient() {
   const [inferences, setInferences] = useState<InferenceItem[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [filterType, setFilterType] = useState<string | null>(null);
 
@@ -230,6 +285,33 @@ export function InboxClient() {
       await Promise.all([loadDetail(selectedId), loadList()]);
     } finally {
       setAnalyzing(false);
+    }
+  }
+
+  /**
+   * API-AI-01: AI候補の採否(ACCEPT/REJECT)。ACCEPTは新規Responsibilityとして
+   * その場で作成される(POST /inferences/{id}/decision側の実装)。
+   * [2026-08-20追加] 従来この操作自体がUIから一切呼べず、AIが候補を抽出しても
+   * 実タスク化する手段がなかった(候補が画面に表示すらされていなかった)。
+   */
+  async function decideInference(inf: InferenceItem, decision: "ACCEPT" | "REJECT") {
+    setDecidingId(inf.id);
+    setError("");
+    debugLog.event("InboxClient", "decide inference", { id: inf.id, decision });
+    try {
+      const res = await apiFetch(`/api/v1/inferences/${inf.id}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision, expectedInferenceVersion: inf.version }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        setError(body.error?.message ?? "候補の採否処理に失敗しました");
+        return;
+      }
+      if (selectedId) await loadDetail(selectedId);
+    } finally {
+      setDecidingId(null);
     }
   }
 
@@ -421,12 +503,69 @@ export function InboxClient() {
                   </div>
                   {inferences.length > 0 && (
                     <ul className="space-y-2 mt-3">
-                      {inferences.map((inf) => (
-                        <li key={inf.id} className="bg-ai-50 rounded-lg p-3 text-xs">
-                          <span className="font-mono text-ai">{inf.inferenceType}</span>
-                          <span className="ml-2 text-muted">確度 {inf.confidence}</span>
-                        </li>
-                      ))}
+                      {inferences.map((inf) => {
+                        const p = inf.payload;
+                        const isPending = inf.decision === "PENDING";
+                        const isBusy = decidingId === inf.id;
+                        return (
+                          <li key={inf.id} className="bg-ai-50 rounded-lg p-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span
+                                    className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                                      CANDIDATE_TYPE_CHIP_STYLE[p?.type] ?? "bg-canvas text-muted"
+                                    }`}
+                                  >
+                                    {CANDIDATE_TYPE_LABEL[p?.type] ?? p?.type ?? inf.inferenceType}
+                                  </span>
+                                  <span className="text-[10px] text-faint">確度 {inf.confidence}</span>
+                                  {!isPending && (
+                                    <span className="text-[10px] text-faint">
+                                      ({inf.decision === "ACCEPTED" ? "採用済み" : inf.decision === "REJECTED" ? "却下済み" : inf.decision})
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-sm text-ink font-medium mt-1 break-words">
+                                  {p?.title ?? "(タイトルなし)"}
+                                </p>
+                                {(p?.actor || p?.counterparty) && (
+                                  <p className="text-[11px] text-muted mt-0.5">
+                                    {p?.actor && <>担当: {p.actor}</>}
+                                    {p?.actor && p?.counterparty && " / "}
+                                    {p?.counterparty && <>相手: {p.counterparty}</>}
+                                  </p>
+                                )}
+                                {p?.dateMentions?.length > 0 && (
+                                  <p className="text-[11px] text-muted mt-0.5">
+                                    {p.dateMentions
+                                      .map((d) => `${DATE_MEANING_LABEL[d.meaning] ?? d.meaning}: ${d.rawExpression}`)
+                                      .join("、")}
+                                  </p>
+                                )}
+                              </div>
+                              {isPending && (
+                                <div className="shrink-0 flex gap-1.5">
+                                  <button
+                                    onClick={() => decideInference(inf, "ACCEPT")}
+                                    disabled={isBusy}
+                                    className="text-[11px] bg-ink text-white rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-black transition"
+                                  >
+                                    採用
+                                  </button>
+                                  <button
+                                    onClick={() => decideInference(inf, "REJECT")}
+                                    disabled={isBusy}
+                                    className="text-[11px] bg-canvas border border-line text-muted rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-line/40 transition"
+                                  >
+                                    却下
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                   {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
