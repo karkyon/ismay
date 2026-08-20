@@ -91,6 +91,15 @@ export async function POST(req: NextRequest) {
   // FN-PRV-02: source_type=MEETINGは同意登録(consent_id確定)まで解析キューへ投入しない。
   // 同意登録はPOST /captures/{id}/consent(別API)で行うため、ここではconsentIdを設定せず
   // processingStatus=SAVEDのまま保存する(解析要求時にゲートする)。
+  //
+  // [2026-08-20修正] 機能別詳細設計書v1.1 3章FN-CAP-01手順6「Outbox Workerが解析Jobを作る」
+  // が実装されておらず、保存のみでAI解析が一切自動起動しない不備を発見・修正した
+  // (従来はPOST /captures/{id}/analyzeの手動呼び出しが必須で、UIにボタンはあるが
+  // 誰も押さない限りAI抽出が永遠に走らなかった)。TEXT/IMPORT/同意済みMEETINGは
+  // 保存と同時に自動でCaptureAnalysisRequested.v1を発行する。VOICE(文字起こし未実装)と
+  // 未同意MEETINGのみ、従来通りSAVEDのまま留め、手動/別APIでの解析要求を待つ。
+  const shouldAutoQueue = sourceType !== "VOICE" && sourceType !== "MEETING";
+
   const created = await db.$transaction(async (tx) => {
     const capture = await tx.capture.create({
       data: {
@@ -99,7 +108,7 @@ export async function POST(req: NextRequest) {
         createdById: auth.user.userId,
         sourceType,
         rawText: rawText ?? null,
-        processingStatus: "SAVED",
+        processingStatus: shouldAutoQueue ? "QUEUED" : "SAVED",
         sourceCapturedAt: capturedAt ? new Date(capturedAt) : null,
         clientDraftId,
       },
@@ -138,6 +147,31 @@ export async function POST(req: NextRequest) {
       },
     });
     debugServer.event("POST /captures", "CaptureSaved.v1", { aggregateId: capture.id });
+
+    if (shouldAutoQueue) {
+      await tx.eventLog.create({
+        data: {
+          aggregateType: "Capture",
+          aggregateId: capture.id,
+          eventType: "CAPTURE_ANALYSIS_REQUESTED",
+          beforeJson: { processingStatus: "SAVED" },
+          afterJson: { processingStatus: "QUEUED" },
+          actorType: "SYSTEM",
+          correlationId: req.headers.get("x-correlation-id") ?? undefined,
+        },
+      });
+      await tx.outboxEvent.create({
+        data: {
+          eventName: "CaptureAnalysisRequested.v1",
+          eventVersion: "1",
+          aggregateId: capture.id,
+          aggregateVersion: capture.version,
+          correlationId: req.headers.get("x-correlation-id") ?? undefined,
+          payload: { captureId: capture.id, workspaceId, sourceType: capture.sourceType },
+        },
+      });
+      debugServer.event("POST /captures", "CaptureAnalysisRequested.v1(自動)", { aggregateId: capture.id });
+    }
 
     return capture;
   });
