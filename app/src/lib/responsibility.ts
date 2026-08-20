@@ -66,7 +66,23 @@ export type TransitionAction =
   | "INTERRUPT"
   | "RESUME"
   | "MARK_NOT_NEEDED"
-  | "REOPEN";
+  | "REOPEN"
+  // COMMITMENT専用
+  | "MARK_AT_RISK"
+  | "MARK_ACTIVE"
+  | "FULFILL"
+  | "BREAK"
+  // DECISION専用
+  | "START_GATHERING"
+  | "DECIDE"
+  // WAITING専用
+  | "MARK_FOLLOW_UP_DUE"
+  | "RESOLVE"
+  // RISK専用
+  | "START_MONITORING"
+  | "MITIGATE"
+  | "OCCUR"
+  | "CLOSE";
 
 interface TransitionRule {
   from: readonly string[];
@@ -91,3 +107,71 @@ export const COMMON_TRANSITIONS: readonly TransitionRule[] = [
   { from: ["INBOX", "PLANNED", "IN_PROGRESS", "DEFERRED"], action: "MARK_NOT_NEEDED", to: "NOT_NEEDED" },
   { from: ["COMPLETED", "NOT_NEEDED"], action: "REOPEN", to: "PLANNED" },
 ];
+
+/**
+ * COMMITMENT/DECISION/WAITING/RISKの種別固有状態遷移表。
+ * 用語・状態・コード定義書v1.1 3章の状態一覧・Webシステム要件定義書v2.1 7.1節の
+ * 完了条件(「成果証拠＋相手への履行」「選択と理由が記録」「回答・条件成立」
+ * 「解消・受容・発生」)を踏まえ、遷移規則自体は本パッチで新規に設計した
+ * (FN-WK-01は共通状態専用のため、種別固有の遷移表は設計書に明記が無かった。
+ * 2026-08-19、カルキョンさんに提案し合意のうえ確定)。
+ */
+export const COMMITMENT_TRANSITIONS: readonly TransitionRule[] = [
+  { from: ["ACTIVE"], action: "MARK_AT_RISK", to: "AT_RISK" },
+  { from: ["AT_RISK"], action: "MARK_ACTIVE", to: "ACTIVE" },
+  { from: ["ACTIVE", "AT_RISK"], action: "FULFILL", to: "FULFILLED" },
+  { from: ["ACTIVE", "AT_RISK"], action: "BREAK", to: "BROKEN" },
+  { from: ["FULFILLED", "BROKEN"], action: "REOPEN", to: "ACTIVE" },
+];
+
+export const DECISION_TRANSITIONS: readonly TransitionRule[] = [
+  { from: ["OPEN", "REOPENED"], action: "START_GATHERING", to: "EVIDENCE_GATHERING" },
+  { from: ["OPEN", "EVIDENCE_GATHERING", "REOPENED"], action: "DECIDE", to: "DECIDED" },
+  { from: ["DECIDED"], action: "REOPEN", to: "REOPENED" },
+];
+
+export const WAITING_TRANSITIONS: readonly TransitionRule[] = [
+  { from: ["WAITING"], action: "MARK_FOLLOW_UP_DUE", to: "FOLLOW_UP_DUE" },
+  { from: ["WAITING", "FOLLOW_UP_DUE"], action: "RESOLVE", to: "RESOLVED" },
+  { from: ["RESOLVED"], action: "REOPEN", to: "WAITING" },
+];
+
+export const RISK_TRANSITIONS: readonly TransitionRule[] = [
+  { from: ["OPEN"], action: "START_MONITORING", to: "MONITORING" },
+  { from: ["OPEN", "MONITORING"], action: "MITIGATE", to: "MITIGATED" },
+  { from: ["OPEN", "MONITORING"], action: "OCCUR", to: "OCCURRED" },
+  { from: ["OPEN", "MONITORING", "MITIGATED", "OCCURRED"], action: "CLOSE", to: "CLOSED" },
+  { from: ["MITIGATED", "OCCURRED", "CLOSED"], action: "REOPEN", to: "OPEN" },
+];
+
+/** typeに応じた遷移表を返す。共通状態型はCOMMON_TRANSITIONS、種別固有型は専用表。 */
+export function transitionsForType(type: string): readonly TransitionRule[] {
+  switch (type) {
+    case "COMMITMENT":
+      return COMMITMENT_TRANSITIONS;
+    case "DECISION":
+      return DECISION_TRANSITIONS;
+    case "WAITING":
+      return WAITING_TRANSITIONS;
+    case "RISK":
+      return RISK_TRANSITIONS;
+    default:
+      return COMMON_TRANSITIONS; // TASK/EVENT/CONCERN/HABIT/IDEA
+  }
+}
+
+/** 到達すると「完了」扱いになる終端状態(completedAt設定・REOPEN対象の判定に使う)。 */
+const TYPE_SPECIFIC_TERMINAL_STATUS: Partial<Record<ResponsibilityType, readonly string[]>> = {
+  COMMITMENT: ["FULFILLED", "BROKEN"],
+  DECISION: ["DECIDED"],
+  WAITING: ["RESOLVED"],
+  RISK: ["MITIGATED", "OCCURRED", "CLOSED"],
+};
+
+export function isTypeSpecificTerminalStatus(type: string, status: string): boolean {
+  const terminals = TYPE_SPECIFIC_TERMINAL_STATUS[type as ResponsibilityType];
+  return terminals ? (terminals as readonly string[]).includes(status) : false;
+}
+
+/** reasonの入力(選択理由)を必須とするアクション。DECISION完了条件「選択と理由が記録」に対応。 */
+export const ACTIONS_REQUIRING_REASON: readonly TransitionAction[] = ["DECIDE"];

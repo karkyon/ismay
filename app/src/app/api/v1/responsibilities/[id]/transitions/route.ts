@@ -4,10 +4,15 @@ import { db } from "@/lib/db";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
-import { isCommonStatusType, COMMON_TRANSITIONS } from "@/lib/responsibility";
+import {
+  transitionsForType,
+  isTypeSpecificTerminalStatus,
+  ACTIONS_REQUIRING_REASON,
+} from "@/lib/responsibility";
 
 const TransitionSchema = z.object({
   action: z.enum([
+    // 共通状態(TASK/EVENT/CONCERN/HABIT/IDEA)
     "START",
     "COMPLETE",
     "PARTIAL_COMPLETE",
@@ -16,6 +21,22 @@ const TransitionSchema = z.object({
     "RESUME",
     "MARK_NOT_NEEDED",
     "REOPEN",
+    // COMMITMENT
+    "MARK_AT_RISK",
+    "MARK_ACTIVE",
+    "FULFILL",
+    "BREAK",
+    // DECISION
+    "START_GATHERING",
+    "DECIDE",
+    // WAITING
+    "MARK_FOLLOW_UP_DUE",
+    "RESOLVE",
+    // RISK
+    "START_MONITORING",
+    "MITIGATE",
+    "OCCUR",
+    "CLOSE",
   ]),
   occurredAt: z.string().datetime(),
   reason: z.string().max(2000).optional(),
@@ -26,11 +47,10 @@ const TransitionSchema = z.object({
 });
 
 /**
- * API-RESP-03: POST /responsibilities/{id}/transitions (機能別詳細設計書v1.1 FN-WK-01)
- *
- * [スコープ] 共通状態(TASK/EVENT/CONCERN/HABIT/IDEA)のみ対応。
- * COMMITMENT/DECISION/WAITING/RISKは種別固有の状態語彙を持ち別の遷移規則が
- * 必要なため今回は未実装(次回対応)。該当種別への遷移要求は明示的に拒否する。
+ * API-RESP-03: POST /responsibilities/{id}/transitions
+ * 共通状態(FN-WK-01、機能別詳細設計書v1.1 4章)に加え、COMMITMENT/DECISION/WAITING/RISKの
+ * 種別固有遷移(2026-08-19、カルキョンさんと合意のうえ新規設計。lib/responsibility.ts参照)
+ * に対応する。
  */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const auth = await requireAuth(req);
@@ -61,6 +81,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     );
   }
 
+  // DECISION完了条件(Webシステム要件定義書v2.1 7.1節「選択と理由が記録」): DECIDEはreason必須
+  if (ACTIONS_REQUIRING_REASON.includes(action) && !reason) {
+    return apiError("VALIDATION_FAILED", "この操作には理由(reason)の入力が必要です", {
+      fieldErrors: { reason: "reasonを指定してください" },
+    });
+  }
+
   const { id } = await ctx.params;
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
 
@@ -69,30 +96,28 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return apiError("RESOURCE_NOT_FOUND", "指定された責任が見つかりません");
   }
 
-  if (!isCommonStatusType(existing.type)) {
-    return apiError(
-      "STATE_TRANSITION_INVALID",
-      `${existing.type}の状態遷移は現在未対応です(次回実装予定)`,
-    );
-  }
-
-  const rule = COMMON_TRANSITIONS.find(
+  const rule = transitionsForType(existing.type).find(
     (r) => r.action === action && (r.from as readonly string[]).includes(existing.status),
   );
   if (!rule) {
     return apiError(
       "STATE_TRANSITION_INVALID",
-      `現在の状態(${existing.status})から${action}へは遷移できません`,
+      `${existing.type}の現在の状態(${existing.status})から${action}へは遷移できません`,
     );
   }
   const nextStatus = typeof rule.to === "function" ? rule.to(existing.status) : rule.to;
+
+  // completedAt: 共通状態のCOMPLETED、または種別固有の終端状態(FULFILLED/DECIDED/RESOLVED/
+  // MITIGATED/OCCURRED/CLOSED等)に到達した時点を「完了日時」として記録する。REOPENでは解除する。
+  const reachesTerminal = nextStatus === "COMPLETED" || isTypeSpecificTerminalStatus(existing.type, nextStatus);
+  const completedAtValue = reachesTerminal ? new Date() : action === "REOPEN" ? null : undefined;
 
   const result = await db.$transaction(async (tx) => {
     const updateResult = await tx.responsibility.updateMany({
       where: { id, version },
       data: {
         status: nextStatus,
-        completedAt: nextStatus === "COMPLETED" ? new Date() : action === "REOPEN" ? null : undefined,
+        completedAt: completedAtValue,
         targetAt: newTargetAt ? new Date(newTargetAt) : undefined,
         updatedById: auth.user.userId,
         version: { increment: 1 },

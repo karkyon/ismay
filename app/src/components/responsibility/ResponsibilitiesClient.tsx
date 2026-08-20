@@ -6,8 +6,7 @@ import { debugLog } from "@/lib/debug";
 import { formatRelativeTime } from "@/lib/format";
 import {
   RESPONSIBILITY_TYPES,
-  isCommonStatusType,
-  COMMON_TRANSITIONS,
+  transitionsForType,
   type TransitionAction,
 } from "@/lib/responsibility";
 
@@ -103,6 +102,22 @@ const ACTION_LABEL: Record<TransitionAction, string> = {
   RESUME: "再開する",
   MARK_NOT_NEEDED: "不要にする",
   REOPEN: "取消を解除する",
+  // COMMITMENT
+  MARK_AT_RISK: "危険な状態にする",
+  MARK_ACTIVE: "リスク解消",
+  FULFILL: "履行済みにする",
+  BREAK: "不履行にする",
+  // DECISION
+  START_GATHERING: "検討を開始する",
+  DECIDE: "決定する",
+  // WAITING
+  MARK_FOLLOW_UP_DUE: "追跡期限にする",
+  RESOLVE: "解決済みにする",
+  // RISK
+  START_MONITORING: "監視を開始する",
+  MITIGATE: "軽減済みにする",
+  OCCUR: "発生扱いにする",
+  CLOSE: "終了する",
 };
 
 const STATUS_DOT_STYLE: Record<string, string> = {
@@ -245,6 +260,14 @@ export function ResponsibilitiesClient() {
       remainingWork = input.trim();
     }
 
+    // DECISION完了条件(Webシステム要件定義書v2.1 7.1節「選択と理由が記録」): DECIDEはreason必須。
+    let reason: string | undefined;
+    if (action === "DECIDE") {
+      const input = window.prompt("決定理由を入力してください(空欄でキャンセル)");
+      if (!input || !input.trim()) return;
+      reason = input.trim();
+    }
+
     debugLog.event("ResponsibilitiesClient", "transition", { id: detail.id, action });
     setTransitioning(true);
     setError("");
@@ -256,6 +279,7 @@ export function ResponsibilitiesClient() {
           occurredAt: new Date().toISOString(),
           version: detail.version,
           ...(remainingWork ? { remainingWork } : {}),
+          ...(reason ? { reason } : {}),
         }),
       });
       const body = await res.json();
@@ -281,10 +305,10 @@ export function ResponsibilitiesClient() {
   }
 
   const availableActions = useMemo(() => {
-    if (!detail || !isCommonStatusType(detail.type)) return [];
-    return COMMON_TRANSITIONS.filter((r) => (r.from as readonly string[]).includes(detail.status)).map(
-      (r) => r.action,
-    );
+    if (!detail) return [];
+    return transitionsForType(detail.type)
+      .filter((r) => (r.from as readonly string[]).includes(detail.status))
+      .map((r) => r.action);
   }, [detail]);
 
   return (
@@ -477,41 +501,27 @@ export function ResponsibilitiesClient() {
                 </div>
 
                 <div className="border-t border-line bg-canvas/60 px-5 py-4">
-                  {isCommonStatusType(detail.type) ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {availableActions.length === 0 && (
-                        <p className="text-[11px] text-faint">この状態から遷移できる操作はありません。</p>
-                      )}
-                      {availableActions.map((action) => (
-                        <button
-                          key={action}
-                          onClick={() => runTransition(action)}
-                          disabled={transitioning}
-                          className="text-xs bg-ink text-white rounded-lg px-3 py-2 disabled:opacity-40 hover:bg-black transition"
-                        >
-                          {ACTION_LABEL[action]}
-                        </button>
-                      ))}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {availableActions.length === 0 && (
+                      <p className="text-[11px] text-faint">この状態から遷移できる操作はありません。</p>
+                    )}
+                    {availableActions.map((action) => (
                       <button
-                        onClick={deleteResponsibility}
-                        className="ml-auto text-xs text-red-600 hover:underline"
+                        key={action}
+                        onClick={() => runTransition(action)}
+                        disabled={transitioning}
+                        className="text-xs bg-ink text-white rounded-lg px-3 py-2 disabled:opacity-40 hover:bg-black transition"
                       >
-                        削除する
+                        {ACTION_LABEL[action]}
                       </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-between">
-                      <p className="text-[11px] text-faint max-w-md">
-                        {TYPE_LABEL[detail.type]}の状態遷移は現在未対応です(次回実装予定)。
-                      </p>
-                      <button
-                        onClick={deleteResponsibility}
-                        className="text-xs text-red-600 hover:underline"
-                      >
-                        削除する
-                      </button>
-                    </div>
-                  )}
+                    ))}
+                    <button
+                      onClick={deleteResponsibility}
+                      className="ml-auto text-xs text-red-600 hover:underline"
+                    >
+                      削除する
+                    </button>
+                  </div>
                   {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
                 </div>
               </div>
