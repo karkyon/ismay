@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { href: "/today", label: "今日", icon: TodayIcon },
   { href: "/inbox", label: "Inbox", icon: InboxIcon },
   { href: "/responsibilities", label: "今後", icon: CalendarIcon },
+  { href: "/relations", label: "関係図", icon: CalendarIcon },
   { href: "/admin/ai-providers", label: "AIプロバイダー", icon: SettingsIcon },
 ] as const;
 

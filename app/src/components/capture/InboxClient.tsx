@@ -181,8 +181,12 @@ export function InboxClient() {
     setLoadingList(false);
   }, []);
 
-  const loadDetail = useCallback(async (id: string) => {
-    setLoadingDetail(true);
+  const loadDetail = useCallback(async (id: string, silent = false) => {
+    // [2026-08-20修正] 採用/却下後の再読込でsetLoadingDetail(true)を経由すると、
+    // 詳細パネル(候補一覧含む)が一瞬アンマウントされ、スクロール位置が失われ
+    // ページ先頭に戻ってしまう不備があった。silent=trueの場合はローディング表示を
+    // 経由せず、取得完了時に既存DOMへ差分反映するだけにする。
+    if (!silent) setLoadingDetail(true);
     setError("");
     const [detailRes, inferRes] = await Promise.all([
       debugFetch(`/api/v1/captures/${id}`),
@@ -197,7 +201,7 @@ export function InboxClient() {
       const body = await inferRes.json();
       setInferences(body.data.inferences);
     }
-    setLoadingDetail(false);
+    if (!silent) setLoadingDetail(false);
   }, []);
 
   useEffect(() => {
@@ -215,7 +219,7 @@ export function InboxClient() {
     if (!selectedId || !detail) return;
     if (detail.processingStatus !== "QUEUED" && detail.processingStatus !== "PROCESSING") return;
     const interval = setInterval(() => {
-      loadDetail(selectedId);
+      loadDetail(selectedId, true);
       loadList();
     }, 4000);
     return () => clearInterval(interval);
@@ -286,7 +290,7 @@ export function InboxClient() {
         setError(body.error?.message ?? "解析要求に失敗しました");
         return;
       }
-      await Promise.all([loadDetail(selectedId), loadList()]);
+      await Promise.all([loadDetail(selectedId, true), loadList()]);
     } finally {
       setAnalyzing(false);
     }
@@ -313,7 +317,13 @@ export function InboxClient() {
         setError(body.error?.message ?? "候補の採否処理に失敗しました");
         return;
       }
-      if (selectedId) await loadDetail(selectedId);
+      // [2026-08-20修正] スクロール位置維持のため、サーバー全体を再取得する代わりに
+      // このinferenceだけをローカルで書き換える(楽観的更新)。他の候補の重複警告
+      // (literalDuplicateOf)は再計算が必要なため、そこだけ静かに(silent)再取得する。
+      setInferences((prev) =>
+        prev.map((i) => (i.id === inf.id ? { ...i, decision: decision === "ACCEPT" ? "ACCEPTED" : "REJECTED" } : i)),
+      );
+      if (selectedId) await loadDetail(selectedId, true);
     } finally {
       setDecidingId(null);
     }
