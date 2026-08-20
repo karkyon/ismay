@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { debugServer } from "@/lib/debugServer";
 import { runExtractionForCapture } from "@/lib/ai/extract";
 
 /**
@@ -33,6 +34,7 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
       data: { status: "RUNNING" },
     });
     if (claimed.count === 0) continue;
+    debugServer.state("Worker/aiExtractJob", "Job.status", { jobId: job.id, status: "RUNNING" });
 
     const payload = job.payload as { captureId?: string } | null;
     const captureId = payload?.captureId;
@@ -46,6 +48,11 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
 
     try {
       const result = await runExtractionForCapture(captureId);
+      debugServer.event("Worker/aiExtractJob", "runExtractionForCapture", {
+        jobId: job.id,
+        captureId,
+        status: result.status,
+      });
       await db.job.update({
         where: { id: job.id },
         data: {
@@ -53,6 +60,7 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
           lastError: result.status === "FAILED" ? result.reason.slice(0, 500) : null,
         },
       });
+      debugServer.state("Worker/aiExtractJob", "Job.status", { jobId: job.id, status: "SUCCEEDED" });
       processed++;
     } catch (err) {
       const attempts = job.attempts + 1;
@@ -67,7 +75,12 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
           nextRunAt: isDead ? null : new Date(Date.now() + backoffSeconds * 1000),
         },
       });
-      console.error("[processAiExtractJobs] 想定外の例外", { jobId: job.id, captureId, err });
+      debugServer.state("Worker/aiExtractJob", "Job.status", {
+        jobId: job.id,
+        status: isDead ? "DEAD_LETTER" : "QUEUED",
+        attempts,
+      });
+      debugServer.error("Worker/aiExtractJob", "processAiExtractJobs想定外の例外", { jobId: job.id, captureId, err });
     }
   }
 

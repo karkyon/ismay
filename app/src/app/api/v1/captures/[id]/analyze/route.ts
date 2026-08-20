@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
+import { debugServer } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
@@ -49,6 +50,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       return null;
     }
     const next = await tx.capture.findUniqueOrThrow({ where: { id: capture.id } });
+    debugServer.state("POST /captures/[id]/analyze", "Capture.processingStatus", {
+      id: capture.id,
+      from: capture.processingStatus,
+      to: next.processingStatus,
+    });
 
     await tx.eventLog.create({
       data: {
@@ -62,6 +68,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         correlationId: req.headers.get("x-correlation-id") ?? undefined,
       },
     });
+    debugServer.event("POST /captures/[id]/analyze", "CAPTURE_ANALYSIS_REQUESTED", { aggregateId: capture.id });
 
     await tx.outboxEvent.create({
       data: {
@@ -73,6 +80,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         payload: { captureId: capture.id, workspaceId, sourceType: capture.sourceType },
       },
     });
+    debugServer.event("POST /captures/[id]/analyze", "CaptureAnalysisRequested.v1", { aggregateId: capture.id });
 
     return next;
   });

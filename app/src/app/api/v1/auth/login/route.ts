@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { verifyPassword } from "@/lib/auth/password";
 import { signMfaChallengeToken } from "@/lib/auth/tokens";
 import { createSession } from "@/lib/auth/session";
@@ -43,6 +44,7 @@ function clearFailures(email: string): void {
 
 export async function POST(req: NextRequest) {
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /auth/login", "requestBody", redactSensitive(json));
   const parsed = LoginSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください");

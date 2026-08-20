@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { debugServer } from "@/lib/debugServer";
 
 /**
  * Outbox Worker(システム基本設計書v1.2 8.3節「Outbox Workerがイベントを配送し、
@@ -35,6 +36,8 @@ export async function relayOutboxToJobs(): Promise<{ relayed: number }> {
           data: { status: "PUBLISHED", publishedAt: new Date() },
         });
       });
+      debugServer.event("Worker/relay", "OutboxEvent→Job", { eventId: event.id, aggregateId: event.aggregateId });
+      debugServer.state("Worker/relay", "OutboxEvent.status", { eventId: event.id, status: "PUBLISHED" });
       relayed++;
     } catch (err: unknown) {
       // P2002(一意制約違反) = 既にJob化済み。OutboxEventだけPUBLISHEDへ進める。
@@ -44,10 +47,15 @@ export async function relayOutboxToJobs(): Promise<{ relayed: number }> {
           where: { id: event.id },
           data: { status: "PUBLISHED", publishedAt: new Date() },
         });
+        debugServer.state("Worker/relay", "OutboxEvent.status", {
+          eventId: event.id,
+          status: "PUBLISHED",
+          note: "既にJob化済み(P2002)",
+        });
         continue;
       }
       // その他の失敗はこのtickでは諦め、次回tickで再試行する(OutboxEventはPENDINGのまま)。
-      console.error("[relayOutboxToJobs] リレー失敗", { eventId: event.id, err });
+      debugServer.error("Worker/relay", "relayOutboxToJobsリレー失敗", { eventId: event.id, err });
     }
   }
 

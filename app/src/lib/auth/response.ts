@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
+import { debugServer } from "@/lib/debugServer";
 
 export type ErrorCode =
   | "VALIDATION_FAILED"
@@ -31,9 +32,12 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
 };
 
 export function apiOk<T>(data: T, init?: { status?: number; extraMeta?: Record<string, unknown> }) {
+  const status = init?.status ?? 200;
+  // 全API成功応答を一元的にログ出力(個別Route Handlerでの呼び出し漏れを防ぐ)。
+  debugServer.event("apiOk", `status=${status}`, data);
   return NextResponse.json(
     { data, meta: { requestId: randomUUID(), ...(init?.extraMeta ?? {}) } },
-    { status: init?.status ?? 200 },
+    { status },
   );
 }
 
@@ -47,6 +51,9 @@ export function apiError(
     extra?: Record<string, unknown>;
   },
 ) {
+  const status = STATUS_BY_CODE[code];
+  // 全APIエラー応答を一元的にログ出力(個別Route Handlerでの呼び出し漏れを防ぐ)。
+  debugServer.error("apiError", `${code} (status=${status})`, { message, fieldErrors: opts?.fieldErrors });
   return NextResponse.json(
     {
       error: {
@@ -58,6 +65,6 @@ export function apiError(
         ...(opts?.extra ?? {}),
       },
     },
-    { status: STATUS_BY_CODE[code] },
+    { status },
   );
 }

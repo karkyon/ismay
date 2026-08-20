@@ -1,5 +1,6 @@
 import { relayOutboxToJobs } from "@/lib/worker/relay";
 import { processAiExtractJobs } from "@/lib/worker/aiExtractJob";
+import { debugServer } from "@/lib/debugServer";
 
 /**
  * AI Workerのインプロセス実行ループ。
@@ -23,11 +24,14 @@ async function tick(): Promise<void> {
   if (tickInFlight) return; // 前回tickが長引いている場合は重複実行しない
   tickInFlight = true;
   try {
-    await relayOutboxToJobs();
-    await processAiExtractJobs();
+    const relayResult = await relayOutboxToJobs();
+    const jobResult = await processAiExtractJobs();
+    if (relayResult.relayed > 0 || jobResult.processed > 0) {
+      debugServer.event("Worker/tick", "tick完了", { ...relayResult, ...jobResult });
+    }
   } catch (err) {
     // tick自体の例外でループを止めない(fail-open)。次回tickで再試行される。
-    console.error("[ismay-worker] tick失敗", err);
+    debugServer.error("Worker/tick", "tick失敗", err);
   } finally {
     tickInFlight = false;
   }

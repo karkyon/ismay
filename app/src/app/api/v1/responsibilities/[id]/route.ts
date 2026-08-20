@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
@@ -47,6 +48,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   }
 
   const json = await req.json().catch(() => null);
+  debugServer.input("PATCH /responsibilities/[id]", "requestBody", redactSensitive(json));
   const parsed = UpdateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください", {
@@ -108,6 +110,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   }
 
   const updated = await db.responsibility.findUniqueOrThrow({ where: { id } });
+  debugServer.state("PATCH /responsibilities/[id]", "Responsibility", { id, status: updated.status });
 
   await db.eventLog.create({
     data: {
@@ -120,6 +123,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       actorId: auth.user.userId,
     },
   });
+  debugServer.event("PATCH /responsibilities/[id]", "RESPONSIBILITY_CHANGED", { aggregateId: id });
 
   return apiOk({ responsibility: updated });
 }
@@ -158,6 +162,7 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
         actorId: auth.user.userId,
       },
     });
+    debugServer.event("DELETE /responsibilities/[id]", "RESPONSIBILITY_DELETED", { aggregateId: id });
   });
 
   // DB設計書v1.1 8章: 通常削除はdeleted_at。30日後にPurge Job(未実装、次回対応)。

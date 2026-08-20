@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
@@ -62,6 +63,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /responsibilities/[id]/transitions", "requestBody", redactSensitive(json));
   const parsed = TransitionSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください", {
@@ -126,6 +128,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (updateResult.count === 0) return null;
 
     const updated = await tx.responsibility.findUniqueOrThrow({ where: { id } });
+    debugServer.state("POST /responsibilities/[id]/transitions", "Responsibility.status", {
+      id,
+      action,
+      from: existing.status,
+      to: updated.status,
+    });
 
     await tx.eventLog.create({
       data: {
@@ -145,6 +153,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         correlationId: req.headers.get("x-correlation-id") ?? undefined,
       },
     });
+    debugServer.event("POST /responsibilities/[id]/transitions", "STATUS_CHANGED(EventLog)", { aggregateId: id, action });
 
     await tx.outboxEvent.create({
       data: {
@@ -156,6 +165,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         payload: { responsibilityId: id, action, fromStatus: existing.status, toStatus: updated.status },
       },
     });
+    debugServer.event("POST /responsibilities/[id]/transitions", "ResponsibilityTransitioned.v1", { aggregateId: id });
 
     return updated;
   });

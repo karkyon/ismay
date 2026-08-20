@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { hashPassword, validatePasswordPolicy } from "@/lib/auth/password";
 import { apiOk, apiError } from "@/lib/auth/response";
 
@@ -12,6 +13,7 @@ const RegisterSchema = z.object({
 
 export async function POST(req: NextRequest) {
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /auth/register", "requestBody", redactSensitive(json));
   const parsed = RegisterSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください", {

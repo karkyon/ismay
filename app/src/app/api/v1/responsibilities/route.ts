@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
@@ -32,6 +33,7 @@ export async function POST(req: NextRequest) {
   }
 
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /responsibilities", "requestBody", redactSensitive(json));
   const parsed = CreateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください", {
@@ -102,6 +104,10 @@ export async function POST(req: NextRequest) {
         updatedById: auth.user.userId,
       },
     });
+    debugServer.state("POST /responsibilities", "Responsibility.status", {
+      id: responsibility.id,
+      status: responsibility.status,
+    });
 
     await tx.eventLog.create({
       data: {
@@ -114,6 +120,7 @@ export async function POST(req: NextRequest) {
         correlationId: req.headers.get("x-correlation-id") ?? undefined,
       },
     });
+    debugServer.event("POST /responsibilities", "RESPONSIBILITY_CREATED", { aggregateId: responsibility.id });
 
     await tx.outboxEvent.create({
       data: {
@@ -130,6 +137,7 @@ export async function POST(req: NextRequest) {
         },
       },
     });
+    debugServer.event("POST /responsibilities", "ResponsibilityCreated.v1", { aggregateId: responsibility.id });
 
     return responsibility;
   });

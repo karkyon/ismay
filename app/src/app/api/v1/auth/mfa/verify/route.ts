@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { verifyMfaChallengeToken } from "@/lib/auth/tokens";
 import { decryptTotpSecret, verifyTotpToken, hashRecoveryCode } from "@/lib/auth/totp";
 import { createSession } from "@/lib/auth/session";
@@ -15,6 +16,7 @@ const VerifySchema = z.object({
 
 export async function POST(req: NextRequest) {
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /auth/mfa/verify", "requestBody", redactSensitive(json));
   const parsed = VerifySchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください");

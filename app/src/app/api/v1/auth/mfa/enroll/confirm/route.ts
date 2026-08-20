@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { verifyEnrollmentToken } from "@/lib/auth/tokens";
 import { decryptTotpSecret, verifyTotpToken, generateRecoveryCodes } from "@/lib/auth/totp";
@@ -21,6 +22,7 @@ export async function POST(req: NextRequest) {
   }
 
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /auth/mfa/enroll/confirm", "requestBody", redactSensitive(json));
   const parsed = ConfirmSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "6桁のコードを入力してください");

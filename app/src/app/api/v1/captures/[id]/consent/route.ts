@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
@@ -25,6 +26,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /captures/[id]/consent", "requestBody", redactSensitive(json));
   const parsed = ConsentSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください", {
@@ -65,6 +67,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       if (updateResult.count === 0) {
         throw new Error("ISMAY_VERSION_CONFLICT");
       }
+      debugServer.state("POST /captures/[id]/consent", "Capture.consentId", {
+        id: capture.id,
+        consentId: consent.id,
+      });
 
       await tx.eventLog.create({
         data: {
@@ -77,6 +83,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           correlationId: req.headers.get("x-correlation-id") ?? undefined,
         },
       });
+      debugServer.event("POST /captures/[id]/consent", "CONSENT_REGISTERED", { aggregateId: capture.id });
 
       await tx.outboxEvent.create({
         data: {
@@ -88,6 +95,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           payload: { captureId: capture.id, consentId: consent.id },
         },
       });
+      debugServer.event("POST /captures/[id]/consent", "ConsentRegistered.v1", { aggregateId: capture.id });
 
       return consent;
     })

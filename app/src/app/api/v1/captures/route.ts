@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
@@ -32,6 +33,7 @@ export async function POST(req: NextRequest) {
   }
 
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /captures", "requestBody", redactSensitive(json));
   const parsed = CreateCaptureSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください", {
@@ -102,6 +104,10 @@ export async function POST(req: NextRequest) {
         clientDraftId,
       },
     });
+    debugServer.state("POST /captures", "Capture.processingStatus", {
+      id: capture.id,
+      processingStatus: capture.processingStatus,
+    });
 
     await tx.eventLog.create({
       data: {
@@ -114,6 +120,7 @@ export async function POST(req: NextRequest) {
         correlationId: req.headers.get("x-correlation-id") ?? undefined,
       },
     });
+    debugServer.event("POST /captures", "CAPTURE_SAVED", { aggregateId: capture.id });
 
     await tx.outboxEvent.create({
       data: {
@@ -130,6 +137,7 @@ export async function POST(req: NextRequest) {
         },
       },
     });
+    debugServer.event("POST /captures", "CaptureSaved.v1", { aggregateId: capture.id });
 
     return capture;
   });

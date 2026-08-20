@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
@@ -54,6 +55,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   const json = await req.json().catch(() => null);
+  debugServer.input("POST /inferences/[id]/decision", "requestBody", redactSensitive(json));
   const parsed = DecisionSchema.safeParse(json);
   if (!parsed.success) {
     return apiError("VALIDATION_FAILED", "入力内容を確認してください", {
@@ -161,6 +163,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         updatedById: auth.user.userId,
       },
     });
+    debugServer.state("POST /inferences/[id]/decision", "AiInference.decision", {
+      inferenceId: inference.id,
+      decision: storedDecision,
+    });
 
     await tx.eventLog.create({
       data: {
@@ -174,6 +180,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         correlationId: req.headers.get("x-correlation-id") ?? undefined,
       },
     });
+    debugServer.event("POST /inferences/[id]/decision", "AI_CANDIDATE_DECIDED", { aggregateId: responsibility.id });
 
     await tx.outboxEvent.create({
       data: {
@@ -190,6 +197,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           fromInferenceId: inference.id,
         },
       },
+    });
+    debugServer.event("POST /inferences/[id]/decision", "ResponsibilityCreated.v1", {
+      aggregateId: responsibility.id,
     });
 
     return responsibility;
