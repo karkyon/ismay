@@ -6,12 +6,14 @@ import {
   resolveExtractionProvider,
   resolveEmbeddingProvider,
   resolveTranscriptionProvider,
+  resolveOcrProvider,
   type AiCapability,
 } from "@/lib/ai/registry";
 import { decryptApiKey } from "@/lib/ai/credentialCrypto";
 import type { AiExtractionProvider } from "@/lib/ai/provider";
 import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
 import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
+import type { AiOcrProvider } from "@/lib/ai/ocrProvider";
 
 /**
  * Workspaceに設定された有効プロバイダーキー・モデル名を返す。未設定・不明なキーの場合は
@@ -75,4 +77,10 @@ export async function getActiveTranscriptionProvider(workspaceId: string): Promi
   const { providerKey, modelName } = await getActiveProviderSelection(workspaceId, "TRANSCRIPTION");
   const apiKey = await getDecryptedApiKey(workspaceId, providerKey);
   return resolveTranscriptionProvider(providerKey, { apiKey, model: modelName });
+}
+
+export async function getActiveOcrProvider(workspaceId: string): Promise<AiOcrProvider> {
+  const { providerKey, modelName } = await getActiveProviderSelection(workspaceId, "OCR");
+  const apiKey = await getDecryptedApiKey(workspaceId, providerKey);
+  return resolveOcrProvider(providerKey, { apiKey, model: modelName });
 }

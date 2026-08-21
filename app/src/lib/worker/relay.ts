@@ -14,6 +14,7 @@ const RELAY_BATCH_SIZE = 20;
 const RELAYED_EVENT_TO_JOB_TYPE: Record<string, string> = {
   "CaptureAnalysisRequested.v1": "AI_EXTRACT",
   "AudioTranscriptionRequested.v1": "TRANSCRIBE_AUDIO",
+  "ImageOcrRequested.v1": "OCR_IMAGE",
 };
 
 export async function relayOutboxToJobs(): Promise<{ relayed: number }> {

@@ -12,8 +12,10 @@ import { FOCUS_CAPTURE_EVENT } from "@/components/app/AppShell";
 // 従来は小さいボタン1つで音声投入を用意していたが発見性が低かったため、
 // テキスト/音声を対等な入口として最上部に並べる形にした。
 const ACCEPTED_AUDIO_EXTENSIONS = ["mp3", "mp4", "m4a", "wav", "webm", "ogg"];
+// [2026-08-21追加] 画像OCR(会議メモ写真等)。音声タブと同じ横並びタブ構成に揃える。
+const ACCEPTED_IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
 
-type Mode = "text" | "audio";
+type Mode = "text" | "audio" | "image";
 
 /**
  * UX原則「Capture First」: 分類・期限なしで10秒以内に保存できる入口。
@@ -30,9 +32,12 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
   const [error, setError] = useState("");
   const [savedFlash, setSavedFlash] = useState(false);
   const [uploadingAudio, setUploadingAudio] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [imageDragActive, setImageDragActive] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     function onFocusRequest() {
@@ -130,6 +135,50 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
     if (file) void uploadAudioFile(file);
   }
 
+  async function uploadImageFile(file: File) {
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    if (!ACCEPTED_IMAGE_EXTENSIONS.includes(ext)) {
+      setError(`対応していない形式です(対応: ${ACCEPTED_IMAGE_EXTENSIONS.join(" / ")})`);
+      return;
+    }
+    debugLog.event("QuickCaptureForm", "image upload start", { fileName: file.name, size: file.size });
+    setUploadingImage(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("clientDraftId", generateClientId());
+      const res = await apiFetch("/api/v1/captures/image", { method: "POST", body: form });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        debugLog.event("QuickCaptureForm", "image upload failed", body?.error);
+        setError(body?.error?.message ?? "画像のアップロードに失敗しました");
+        return;
+      }
+      debugLog.event("QuickCaptureForm", "image upload succeeded", body?.data);
+      flashSaved();
+      onCreated?.();
+    } catch (err) {
+      debugLog.error("QuickCaptureForm", "image upload", err);
+      setError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
+    } finally {
+      setUploadingImage(false);
+    }
+  }
+
+  function handleImageFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file) void uploadImageFile(file);
+  }
+
+  function handleImageDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setImageDragActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) void uploadImageFile(file);
+  }
+
   return (
     <div className="relative">
       <div className="bg-surface border border-line rounded-2xl shadow-card overflow-hidden">
@@ -156,6 +205,16 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
           >
             🎧 音声ファイルを取り込む
           </button>
+          {/* [2026-08-21追加] 画像OCR(会議メモ写真等)。音声タブと対等の入口として並べる。 */}
+          <button
+            type="button"
+            onClick={() => setMode("image")}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-semibold transition border-l border-line ${
+              mode === "image" ? "bg-canvas text-ink" : "text-faint hover:text-muted"
+            }`}
+          >
+            📷 写真を取り込む
+          </button>
         </div>
 
         {mode === "text" ? (
@@ -179,7 +238,7 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
               </button>
             </div>
           </form>
-        ) : (
+        ) : mode === "audio" ? (
           <div className="p-4">
             <input
               ref={audioInputRef}
@@ -208,6 +267,38 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
             </div>
             <p className="text-[11px] text-faint mt-2">
               取り込むと自動で文字起こしされ、通常のメモと同じようにAIがタスク候補を抽出します。
+            </p>
+          </div>
+        ) : (
+          // [2026-08-21追加] 画像OCR取り込みパネル。音声パネルと対称的な構成。
+          <div className="p-4">
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
+              onChange={handleImageFileInput}
+              className="hidden"
+            />
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setImageDragActive(true);
+              }}
+              onDragLeave={() => setImageDragActive(false)}
+              onDrop={handleImageDrop}
+              onClick={() => !uploadingImage && imageInputRef.current?.click()}
+              className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed py-8 cursor-pointer transition ${
+                imageDragActive ? "border-brand bg-brand-50" : "border-line hover:border-brand/60 hover:bg-canvas"
+              } ${uploadingImage ? "opacity-60 pointer-events-none" : ""}`}
+            >
+              <span className="text-2xl">{uploadingImage ? "⏳" : "📷"}</span>
+              <p className="text-sm font-medium text-ink">
+                {uploadingImage ? "アップロード中..." : "写真をドラッグ＆ドロップ、またはクリックして選択"}
+              </p>
+              <p className="text-[11px] text-faint">対応形式: jpg / png / gif / webp(7MBまで)</p>
+            </div>
+            <p className="text-[11px] text-faint mt-2">
+              会議メモやホワイトボードの写真から文字を自動で読み取り、通常のメモと同じようにAIがタスク候補を抽出します。
             </p>
           </div>
         )}

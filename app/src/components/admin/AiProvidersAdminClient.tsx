@@ -107,6 +107,8 @@ function formatRelativeDate(iso: string): string {
 const CAPABILITY_LABEL: Record<string, string> = {
   EXTRACTION: "責任候補抽出(FN-AI-01)",
   EMBEDDING: "意味照合・類似度計算(FN-GR-01)",
+  TRANSCRIPTION: "音声文字起こし(API-CAP-02)",
+  OCR: "画像文字起こし(FR-CAP-02)",
 };
 
 /**

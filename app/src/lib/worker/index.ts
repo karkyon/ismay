@@ -1,6 +1,7 @@
 import { relayOutboxToJobs } from "@/lib/worker/relay";
 import { processAiExtractJobs } from "@/lib/worker/aiExtractJob";
 import { processTranscribeAudioJobs } from "@/lib/worker/transcribeAudioJob";
+import { processOcrImageJobs } from "@/lib/worker/ocrImageJob";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -28,8 +29,14 @@ async function tick(): Promise<void> {
     const relayResult = await relayOutboxToJobs();
     const jobResult = await processAiExtractJobs();
     const transcribeResult = await processTranscribeAudioJobs();
-    if (relayResult.relayed > 0 || jobResult.processed > 0 || transcribeResult.processed > 0) {
-      debugServer.event("Worker/tick", "tick完了", { ...relayResult, ...jobResult, transcribed: transcribeResult.processed });
+    const ocrResult = await processOcrImageJobs();
+    if (relayResult.relayed > 0 || jobResult.processed > 0 || transcribeResult.processed > 0 || ocrResult.processed > 0) {
+      debugServer.event("Worker/tick", "tick完了", {
+        ...relayResult,
+        ...jobResult,
+        transcribed: transcribeResult.processed,
+        ocrProcessed: ocrResult.processed,
+      });
     }
   } catch (err) {
     // tick自体の例外でループを止めない(fail-open)。次回tickで再試行される。

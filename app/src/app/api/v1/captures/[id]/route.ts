@@ -28,6 +28,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       rawText: true,
       aiSummary: true,
       audioObjectKey: true,
+      imageObjectKey: true,
       processingStatus: true,
       domainId: true,
       consentId: true,

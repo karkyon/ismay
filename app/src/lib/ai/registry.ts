@@ -15,11 +15,13 @@
 import type { AiExtractionProvider } from "@/lib/ai/provider";
 import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
 import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
+import type { AiOcrProvider } from "@/lib/ai/ocrProvider";
 import { createAnthropicExtractionProvider } from "@/lib/ai/anthropicProvider";
 import { createOpenAiEmbeddingProvider } from "@/lib/ai/openaiEmbeddingProvider";
 import { createOpenAiTranscriptionProvider } from "@/lib/ai/openaiTranscriptionProvider";
+import { createAnthropicOcrProvider } from "@/lib/ai/anthropicOcrProvider";
 
-export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION"] as const;
+export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION", "OCR"] as const;
 export type AiCapability = (typeof AI_CAPABILITIES)[number];
 
 export interface ProviderFactoryOpts {
@@ -47,6 +49,12 @@ export const TRANSCRIPTION_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFac
   openai: createOpenAiTranscriptionProvider,
 };
 
+// [2026-08-21追加] 画像OCR事業者はAnthropic Claude(Vision)に確定。
+// 専用OCR事業者を別途用意しない方針(anthropicOcrProvider.ts冒頭コメント参照)。
+export const OCR_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => AiOcrProvider> = {
+  anthropic: createAnthropicOcrProvider,
+};
+
 /** 管理画面でモデル名を選べるようにするための一覧(価格根拠はlib/ai/pricing.ts)。 */
 export const AVAILABLE_MODELS: Record<string, AvailableModel[]> = {
   anthropic: [{ modelName: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5($1/$5 per Mtok)" }],
@@ -63,12 +71,15 @@ export const DEFAULT_PROVIDER_KEY: Record<AiCapability, string> = {
   EMBEDDING: "openai",
   // 2026-08-21合意: 文字起こしはOpenAI gpt-transcribe
   TRANSCRIPTION: "openai",
+  // 2026-08-21合意: 画像OCRはAnthropic Claude(Vision)。専用OCR事業者は用意しない
+  OCR: "anthropic",
 };
 
 function registryFor(capability: AiCapability): Record<string, unknown> {
   if (capability === "EXTRACTION") return EXTRACTION_PROVIDER_REGISTRY;
   if (capability === "EMBEDDING") return EMBEDDING_PROVIDER_REGISTRY;
-  return TRANSCRIPTION_PROVIDER_REGISTRY;
+  if (capability === "TRANSCRIPTION") return TRANSCRIPTION_PROVIDER_REGISTRY;
+  return OCR_PROVIDER_REGISTRY;
 }
 
 export function listAvailableProviderKeys(capability: AiCapability): string[] {
@@ -103,6 +114,14 @@ export function resolveTranscriptionProvider(providerKey: string, opts?: Provide
   const factory = TRANSCRIPTION_PROVIDER_REGISTRY[providerKey];
   if (!factory) {
     throw new Error(`未登録の文字起こしプロバイダーです: ${providerKey}`);
+  }
+  return factory(opts);
+}
+
+export function resolveOcrProvider(providerKey: string, opts?: ProviderFactoryOpts): AiOcrProvider {
+  const factory = OCR_PROVIDER_REGISTRY[providerKey];
+  if (!factory) {
+    throw new Error(`未登録のOCRプロバイダーです: ${providerKey}`);
   }
   return factory(opts);
 }

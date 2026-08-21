@@ -54,8 +54,9 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
     // [2026-08-21修正] 従来sourceType==="VOICE"を無条件でブロックしていたが、
     // 音声文字起こし(transcribeAudioJob.ts)が実装されたことで、VOICE Captureも
     // 文字起こし完了後はrawTextが埋まった状態でここに到達するようになった。
-    // rawTextが空の場合(文字起こし未実行/失敗)のみブロックする。
-    const reason = "本文がありません(音声の場合は文字起こしが完了していない可能性があります)";
+    // 画像OCR(ocrImageJob.ts、2026-08-21追加)も同様の理由でIMAGE Captureをブロックしない。
+    // rawTextが空の場合(文字起こし/OCR未実行・失敗)のみブロックする。
+    const reason = "本文がありません(音声・画像の場合は文字起こし/OCRが完了していない可能性があります)";
     await markFailed(capture.id, processingVersion, reason);
     return { status: "FAILED", reason };
   }

@@ -21,6 +21,7 @@ interface CaptureListItem {
 
 interface CaptureDetail extends CaptureListItem {
   audioObjectKey: string | null;
+  imageObjectKey: string | null;
   consentId: string | null;
   updatedAt: string;
 }
@@ -103,6 +104,7 @@ const SOURCE_TYPE_LABEL: Record<string, string> = {
   VOICE: "音声",
   MEETING: "会議",
   IMPORT: "取込",
+  IMAGE: "画像",
 };
 
 /** AI候補の種別ラベル(用語・状態・コード定義書v1.1 2章の9種別に対応)。 */
@@ -142,9 +144,17 @@ const SOURCE_TYPE_CHIP_STYLE: Record<string, string> = {
   VOICE: "bg-ai-50 text-ai",
   MEETING: "bg-decide-50 text-decide",
   IMPORT: "bg-safe-50 text-safe",
+  IMAGE: "bg-warn-50 text-warn",
 };
 
-const SOURCE_TYPE_ORDER = ["TEXT", "VOICE", "MEETING", "IMPORT"] as const;
+const SOURCE_TYPE_ORDER = ["TEXT", "VOICE", "MEETING", "IMPORT", "IMAGE"] as const;
+
+/** rawText/aiSummaryが未確定(文字起こし/OCR待ち)の間の一覧・詳細プレースホルダー文言。 */
+function emptyBodyPlaceholder(sourceType: string): string {
+  if (sourceType === "VOICE") return "🎧 音声(文字起こし待ち)";
+  if (sourceType === "IMAGE") return "🖼️ 画像(文字認識待ち)";
+  return "(本文なし)";
+}
 
 /**
  * UI-04 Inbox: 原文から責任候補を確認する画面(API-CAP-01〜04と接続)。
@@ -456,7 +466,7 @@ export function InboxClient() {
                             selected ? "font-semibold text-brand-700" : "text-ink"
                           }`}
                         >
-                          {c.aiSummary || c.rawText || (c.sourceType === "VOICE" ? "🎧 音声(文字起こし待ち)" : "(本文なし)")}
+                          {c.aiSummary || c.rawText || emptyBodyPlaceholder(c.sourceType)}
                         </p>
                         <div className="flex items-center gap-1.5 mt-1">
                           <span
@@ -523,7 +533,12 @@ export function InboxClient() {
                     </div>
                   )}
                   <p className="text-base font-serif leading-relaxed whitespace-pre-wrap">
-                    {detail.rawText || (detail.sourceType === "VOICE" ? "🎧 音声ファイル(文字起こし待ち、または本文なし)" : "(本文なし)")}
+                    {detail.rawText ||
+                      (detail.sourceType === "VOICE"
+                        ? "🎧 音声ファイル(文字起こし待ち、または本文なし)"
+                        : detail.sourceType === "IMAGE"
+                          ? "🖼️ 画像ファイル(文字認識待ち、または本文なし)"
+                          : "(本文なし)")}
                   </p>
                 </div>
 

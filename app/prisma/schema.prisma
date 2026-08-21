@@ -161,10 +161,14 @@ model Capture {
   domain             Domain?   @relation(fields: [domainId], references: [id])
   createdById        String    @map("created_by")
   createdBy          User      @relation("CaptureCreatedBy", fields: [createdById], references: [id])
-  /// TEXT/VOICE/MEETING/IMPORT
+  /// TEXT/VOICE/MEETING/IMPORT/IMAGE (IMAGE: 2026-08-21新設。会議メモ写真等のOCR文字起こし対応。
+  /// FR-CAP-02「画像」将来用途の前倒し実装)
   sourceType         String    @map("source_type")
   rawText            String?   @map("raw_text")
   audioObjectKey     String?   @map("audio_object_key")
+  /// 新設(2026-08-21): 画像OCR用。MinIO格納キー。audioObjectKeyと同じ設計方針
+  /// (workspaceId/captureId/元ファイル名)。バケットは音声と共用する。
+  imageObjectKey     String?   @map("image_object_key")
   /// 新設(2026-08-21): AIによる原文全体の一言要約。Inbox一覧で原文の機械的な
   /// 切り詰め表示の代わりに使う(カルキョンさんの指摘「タイトルと概要説明が
   /// 関連付けられるようになっているのか」への対応)。

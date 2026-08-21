@@ -67,3 +67,36 @@ export function buildAudioObjectKey(workspaceId: string, captureId: string, orig
   const safeName = originalFileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80);
   return `${workspaceId}/${captureId}/${safeName}`;
 }
+
+/**
+ * 画像ファイルをMinIOへアップロードする(2026-08-21新設、画像OCR機能用)。
+ * バケットは音声と共用する(BUCKET_NAME)。用途別にバケットを分けるほどの規模ではないため、
+ * 既存のMINIO_BUCKET設定・接続クライアントをそのまま流用する(汎用オブジェクトストレージとして運用)。
+ */
+export async function uploadImageObject(params: {
+  objectKey: string;
+  buffer: Buffer;
+  contentType: string;
+}): Promise<void> {
+  await ensureBucketExists();
+  const c = getClient();
+  await c.putObject(BUCKET_NAME, params.objectKey, params.buffer, params.buffer.length, {
+    "Content-Type": params.contentType,
+  });
+}
+
+/** 保存済み画像ファイルを取得する(Worker側のOCR処理で使う)。 */
+export async function downloadImageObject(objectKey: string): Promise<Buffer> {
+  const c = getClient();
+  const stream = await c.getObject(BUCKET_NAME, objectKey);
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+export function buildImageObjectKey(workspaceId: string, captureId: string, originalFileName: string): string {
+  const safeName = originalFileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80);
+  return `${workspaceId}/${captureId}/${safeName}`;
+}
