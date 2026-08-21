@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { isTypingTarget } from "@/lib/keyboard";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
@@ -173,6 +174,7 @@ function emptyBodyPlaceholder(sourceType: string): string {
  *   (Responsibility/Planning API未実装のため、動かないタブになるのを避けた)。
  */
 export function InboxClient() {
+  const searchParams = useSearchParams();
   const [captures, setCaptures] = useState<CaptureListItem[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -180,10 +182,18 @@ export function InboxClient() {
   const [latestAiRun, setLatestAiRun] = useState<LatestAiRun | null>(null);
   const [inferences, setInferences] = useState<InferenceItem[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  // [2026-08-21追加] カルキョンさんの指摘「クリックしても何も表示されない」に対応。
+  // 従来はdetailRes.ok===falseの場合に何もエラーを出さず沈黙していたため、
+  // 500等のAPI障害時に画面が完全に無反応に見える不備があった。
+  const [detailError, setDetailError] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [filterType, setFilterType] = useState<string | null>(null);
+  // [2026-08-21追加] カルキョンさんの指示「タイトル、概要は編集できるようにしろ」に対応。
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
   // [2026-08-20追加] AI候補の一括採用。カルキョンさんの指摘「AIでの分析候補を一括登録
   // できるようにしろ、チェックボックスや一括登録」に対応。
   const [selectedInferenceIds, setSelectedInferenceIds] = useState<Set<string>>(new Set());
@@ -197,10 +207,13 @@ export function InboxClient() {
       const items: CaptureListItem[] = body.data.captures;
       debugLog.state("InboxClient", "captures", { count: items.length });
       setCaptures(items);
-      setSelectedId((current) => current ?? items[0]?.id ?? null);
+      // [2026-08-21追加] /inbox?focus=<captureId> で特定のメモを直接開けるようにする
+      // (「今後」画面の?focus=パターンと同じ。責任詳細から元メモへ辿れるようにするため)。
+      const focus = searchParams.get("focus");
+      setSelectedId((current) => current ?? focus ?? items[0]?.id ?? null);
     }
     setLoadingList(false);
-  }, []);
+  }, [searchParams]);
 
   const loadDetail = useCallback(async (id: string, silent = false) => {
     // [2026-08-20修正] 採用/却下後の再読込でsetLoadingDetail(true)を経由すると、
@@ -209,6 +222,7 @@ export function InboxClient() {
     // 経由せず、取得完了時に既存DOMへ差分反映するだけにする。
     if (!silent) setLoadingDetail(true);
     setError("");
+    setDetailError("");
     const [detailRes, inferRes] = await Promise.all([
       debugFetch(`/api/v1/captures/${id}`),
       debugFetch(`/api/v1/captures/${id}/inferences`),
@@ -217,10 +231,20 @@ export function InboxClient() {
       const body = await detailRes.json();
       setDetail(body.data.capture);
       setLatestAiRun(body.data.latestAiRun ?? null);
+    } else {
+      // [2026-08-21追加] 失敗時はdetailを消してエラーメッセージを表示する(古いメモの
+      // 詳細を誤表示したまま放置しない)。500の場合はJSONで返らないことがあるためcatchする。
+      const body = await detailRes.json().catch(() => null);
+      debugLog.event("InboxClient", "loadDetail failed", body?.error);
+      setDetail(null);
+      setLatestAiRun(null);
+      setDetailError(body?.error?.message ?? `メモの詳細取得に失敗しました(サーバーエラー ${detailRes.status})`);
     }
     if (inferRes.ok) {
       const body = await inferRes.json();
       setInferences(body.data.inferences);
+    } else {
+      setInferences([]);
     }
     if (!silent) setLoadingDetail(false);
   }, []);
@@ -228,6 +252,29 @@ export function InboxClient() {
   useEffect(() => {
     loadList();
   }, [loadList]);
+
+  async function saveTitle() {
+    if (!detail) return;
+    setTitleSaving(true);
+    try {
+      const res = await apiFetch(`/api/v1/captures/${detail.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ aiSummary: titleDraft.trim() || null, version: detail.version }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(body?.error?.message ?? "タイトルの保存に失敗しました");
+        return;
+      }
+      setDetail({ ...detail, aiSummary: titleDraft.trim() || null, version: body.data.version });
+      setCaptures((prev) => prev.map((c) => (c.id === detail.id ? { ...c, aiSummary: titleDraft.trim() || null } : c)));
+      setEditingTitle(false);
+    } catch {
+      setError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
+    } finally {
+      setTitleSaving(false);
+    }
+  }
 
   useEffect(() => {
     if (selectedId) loadDetail(selectedId);
@@ -511,6 +558,19 @@ export function InboxClient() {
                 </div>
               </div>
             )}
+            {/* [2026-08-21追加] 詳細取得失敗時に何も表示されない不備を修正。 */}
+            {selectedId && !loadingDetail && !detail && detailError && (
+              <div className="bg-surface border border-warn/40 rounded-2xl p-5">
+                <p className="text-sm font-semibold text-warn">詳細の取得に失敗しました</p>
+                <p className="text-xs text-muted mt-1">{detailError}</p>
+                <button
+                  onClick={() => loadDetail(selectedId)}
+                  className="mt-3 text-xs border border-line rounded-lg px-3 py-1.5 hover:bg-canvas"
+                >
+                  再試行
+                </button>
+              </div>
+            )}
             {selectedId && !loadingDetail && detail && (
               <div className="bg-surface border border-line rounded-2xl shadow-card overflow-hidden">
                 <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-line bg-canvas/60">
@@ -541,12 +601,53 @@ export function InboxClient() {
                 </div>
 
                 <div className="px-5 py-5">
-                  {detail.aiSummary && (
-                    <div className="mb-3 bg-ai-50 rounded-lg px-3 py-2">
-                      <p className="text-[10px] font-semibold text-ai uppercase tracking-wide mb-0.5">AI要約</p>
-                      <p className="text-xs text-ink">{detail.aiSummary}</p>
+                  {/* [2026-08-21新設] タイトル/概要(aiSummary)の手動編集。AI生成のまま
+                      放置せず、的外れな場合に修正できるようにする。 */}
+                  <div className="mb-3 bg-ai-50 rounded-lg px-3 py-2">
+                    <div className="flex items-center justify-between mb-0.5">
+                      <p className="text-[10px] font-semibold text-ai uppercase tracking-wide">タイトル・概要</p>
+                      {!editingTitle && (
+                        <button
+                          onClick={() => {
+                            setTitleDraft(detail.aiSummary ?? "");
+                            setEditingTitle(true);
+                          }}
+                          className="text-[10px] text-ai hover:underline"
+                        >
+                          編集
+                        </button>
+                      )}
                     </div>
-                  )}
+                    {editingTitle ? (
+                      <div className="space-y-1.5">
+                        <input
+                          type="text"
+                          value={titleDraft}
+                          onChange={(e) => setTitleDraft(e.target.value)}
+                          maxLength={120}
+                          autoFocus
+                          className="w-full text-xs border border-line rounded-md px-2 py-1.5 focus:outline-none focus:border-brand"
+                        />
+                        <div className="flex gap-1.5">
+                          <button
+                            onClick={saveTitle}
+                            disabled={titleSaving}
+                            className="text-[10.5px] bg-ink text-white rounded-md px-2 py-1 disabled:opacity-50"
+                          >
+                            {titleSaving ? "保存中..." : "保存"}
+                          </button>
+                          <button
+                            onClick={() => setEditingTitle(false)}
+                            className="text-[10.5px] border border-line rounded-md px-2 py-1"
+                          >
+                            キャンセル
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-ink">{detail.aiSummary || "(未設定。「編集」から入力できます)"}</p>
+                    )}
+                  </div>
                   <p className="text-base font-serif leading-relaxed whitespace-pre-wrap">
                     {detail.rawText ||
                       (detail.sourceType === "VOICE"

@@ -13,6 +13,15 @@ import { apiOk, apiError } from "@/lib/auth/response";
  *
  * 描画はフロント側(React+SVG)で行う。バックエンドはトポロジカルな層(layer)を
  * 事前計算して返し、フロント側での配置計算を簡略化する。
+ *
+ * [2026-08-21修正] カルキョンさんの指摘「関係図はなぜ一つか、もっと多くの会話や
+ * メモを読み込んだら1つの画面に表示する気か、めっちゃ見にくい」「メモや音声データ
+ * などそれぞれの単位にしろ」「関連性の無い独立したタスクでも編集できるように」に
+ * 対応。?captureId=を追加し、指定時はそのCapture由来の責任を(前提関係の有無に
+ * 関わらず)全件ノードとして返すようにした。従来はrelations由来のnodeIdsのみを
+ * 対象にしていたため、前提関係が一切無い(孤立した)責任はグラフに一切現れず、
+ * 「関係が編集できない」不備の一因になっていた。captureId未指定時は従来通り
+ * 全ワークスペースの関係済みノードのみを返す(全体俯瞰用、後方互換)。
  */
 
 interface NodeRow {
@@ -25,6 +34,7 @@ interface NodeRow {
   graphX: number | null;
   graphY: number | null;
   version: number;
+  originCaptureId: string | null;
 }
 
 interface EdgeRow {
@@ -40,25 +50,56 @@ export async function GET(req: NextRequest) {
     return apiError("AUTH_REQUIRED", "ログインが必要です");
   }
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+  const url = new URL(req.url);
+  const captureId = url.searchParams.get("captureId") ?? undefined;
+
+  const nodeIds = new Set<string>();
+  // [2026-08-21追加] captureId指定時は、そのCapture由来の責任を関係の有無を問わず
+  // 全件nodeIdsへ加える(孤立タスクも表示するための起点)。
+  const externalIds = new Set<string>(); // 他Capture由来だが、このグラフに関係を通じて含まれるノード
+
+  if (captureId) {
+    const own = await db.responsibility.findMany({
+      where: { workspaceId, deletedAt: null, originCaptureId: captureId },
+      select: { id: true },
+    });
+    for (const r of own as { id: string }[]) nodeIds.add(r.id);
+    if (nodeIds.size === 0) {
+      return apiOk({ nodes: [], edges: [], externalIds: [] });
+    }
+  }
+
+  const relationWhere = captureId
+    ? {
+        status: "CONFIRMED",
+        deletedAt: null,
+        OR: [{ fromId: { in: Array.from(nodeIds) } }, { toId: { in: Array.from(nodeIds) } }],
+      }
+    : {
+        status: "CONFIRMED",
+        deletedAt: null,
+        from: { workspaceId, deletedAt: null },
+        to: { workspaceId, deletedAt: null },
+      };
 
   const relations = await db.responsibilityRelation.findMany({
-    where: {
-      status: "CONFIRMED",
-      deletedAt: null,
-      from: { workspaceId, deletedAt: null },
-      to: { workspaceId, deletedAt: null },
-    },
+    where: relationWhere,
     select: { id: true, fromId: true, toId: true, relationType: true },
   });
 
-  const nodeIds = new Set<string>();
   for (const r of relations as EdgeRow[]) {
-    nodeIds.add(r.fromId);
-    nodeIds.add(r.toId);
+    if (!nodeIds.has(r.fromId)) {
+      nodeIds.add(r.fromId);
+      if (captureId) externalIds.add(r.fromId);
+    }
+    if (!nodeIds.has(r.toId)) {
+      nodeIds.add(r.toId);
+      if (captureId) externalIds.add(r.toId);
+    }
   }
 
   if (nodeIds.size === 0) {
-    return apiOk({ nodes: [], edges: [] });
+    return apiOk({ nodes: [], edges: [], externalIds: [] });
   }
 
   const nodes = await db.responsibility.findMany({
@@ -73,6 +114,7 @@ export async function GET(req: NextRequest) {
       graphX: true,
       graphY: true,
       version: true,
+      originCaptureId: true,
     },
   });
 
@@ -133,6 +175,8 @@ export async function GET(req: NextRequest) {
     graphX: n.graphX,
     graphY: n.graphY,
     version: n.version,
+    originCaptureId: n.originCaptureId,
+    external: externalIds.has(n.id),
   }));
 
   const edgesOut = (relations as EdgeRow[]).map((r) => ({
@@ -142,5 +186,5 @@ export async function GET(req: NextRequest) {
     relationType: r.relationType,
   }));
 
-  return apiOk({ nodes: nodesOut, edges: edgesOut });
+  return apiOk({ nodes: nodesOut, edges: edgesOut, externalIds: Array.from(externalIds) });
 }

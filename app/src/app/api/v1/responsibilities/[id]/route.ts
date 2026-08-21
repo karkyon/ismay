@@ -17,7 +17,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const responsibility = await db.responsibility.findFirst({
     where: { id, workspaceId, deletedAt: null },
-    include: { tags: { include: { tag: { select: { id: true, name: true, color: true } } } } },
+    include: {
+      tags: { include: { tag: { select: { id: true, name: true, color: true } } } },
+      // 新設(2026-08-21): 元Captureのタイトル・作成日・種別を同梱し、
+      // 「もともとどんな文書・音声・画像で抽出したものか」を画面から辿れるようにする。
+      originCapture: { select: { id: true, sourceType: true, aiSummary: true, rawText: true, createdAt: true } },
+    },
   });
   if (!responsibility) {
     // 他Workspaceの responsibility IDを推測されても存在有無を漏らさない(IDOR対策)

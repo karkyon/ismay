@@ -192,7 +192,10 @@ export async function GET(req: NextRequest) {
       workspaceId,
       ...(includeDeleted ? {} : { deletedAt: null }),
       ...(type ? { type } : {}),
-      ...(status ? { status } : {}),
+      // [2026-08-21修正] 関係図画面(RelationGraphClient)がCapture単位のグルーピング用に
+      // 「未完了系ステータスを複数まとめて」取得する必要が生じたため、カンマ区切りの
+      // 複数指定(?status=PLANNED,IN_PROGRESS)にも対応させた(既存の単一指定と両立)。
+      ...(status ? (status.includes(",") ? { status: { in: status.split(",").map((s) => s.trim()) } } : { status }) : {}),
       ...(domainId ? { domainId } : {}),
       ...(from || to
         ? {
@@ -220,6 +223,12 @@ export async function GET(req: NextRequest) {
       version: true,
       createdAt: true,
       updatedAt: true,
+      /// 新設(2026-08-21): カルキョンさんの指摘「どのInboxからの生成タスクか判別
+      /// できるようにしろ」に対応。一覧表示・関係図でのグルーピングに使う。
+      originCaptureId: true,
+      originCapture: {
+        select: { id: true, sourceType: true, aiSummary: true, rawText: true, createdAt: true },
+      },
     },
   });
 

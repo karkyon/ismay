@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
+import { z } from "zod";
 import { db } from "@/lib/db";
-import { requireAuth } from "@/lib/auth/guard";
+import { debugServer } from "@/lib/debugServer";
+import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
 
@@ -67,4 +69,55 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const { aiRuns, _count, ...captureFields } = capture;
   return apiOk({ capture: { ...captureFields, imagePageCount: _count.images }, latestAiRun: aiRuns[0] ?? null });
+}
+
+const UpdateCaptureSchema = z.object({
+  // [2026-08-21新設] カルキョンさんの指示「Inboxからの生成タスクのタイトル、概要は
+  // 編集できるようにしろ」に対応。aiSummaryはInbox一覧・詳細で「タイトル/概要」として
+  // 表示している列であり、AI生成のままだと的外れな場合に手動修正できなかった。
+  aiSummary: z.string().max(120).nullable().optional(),
+  version: z.number().int(),
+});
+
+/** PATCH /api/v1/captures/{id}(2026-08-21新設)。現状aiSummaryのみ編集対象。 */
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireAuth(req);
+  if (!auth.authenticated) {
+    return apiError("AUTH_REQUIRED", "ログインが必要です");
+  }
+  if (!requireCsrf(req)) {
+    return apiError("ACCESS_DENIED", "CSRFトークンが不正です");
+  }
+
+  const { id } = await ctx.params;
+  const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+
+  const json = await req.json().catch(() => null);
+  const parsed = UpdateCaptureSchema.safeParse(json);
+  if (!parsed.success) {
+    return apiError("VALIDATION_FAILED", "入力内容を確認してください", {
+      fieldErrors: Object.fromEntries(
+        Object.entries(parsed.error.flatten().fieldErrors).map(([k, v]) => [k, v?.[0] ?? "不正な値です"]),
+      ),
+    });
+  }
+
+  const existing = await db.capture.findFirst({ where: { id, workspaceId, deletedAt: null }, select: { version: true } });
+  if (!existing) {
+    return apiError("RESOURCE_NOT_FOUND", "指定されたCaptureが見つかりません");
+  }
+  if (existing.version !== parsed.data.version) {
+    return apiError("VERSION_CONFLICT", "他の変更と競合しました。画面を更新してから再度お試しください");
+  }
+
+  const updated = await db.capture.updateMany({
+    where: { id, workspaceId, version: parsed.data.version },
+    data: { aiSummary: parsed.data.aiSummary, version: { increment: 1 } },
+  });
+  if (updated.count === 0) {
+    return apiError("VERSION_CONFLICT", "他の変更と競合しました。画面を更新してから再度お試しください");
+  }
+  debugServer.event("PATCH /captures/{id}", "aiSummary手動編集", { captureId: id });
+
+  return apiOk({ id, version: parsed.data.version + 1 });
 }

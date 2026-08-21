@@ -33,6 +33,13 @@ export function DashboardClient() {
   const [code, setCode] = useState("");
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [error, setError] = useState("");
+  // [2026-08-21追加] カルキョンさんの指示「パス変更」に対応。従来パスワード変更手段が
+  // 一つも存在しなかった(未実装の抜け漏れ)。
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [passwordSubmitting, setPasswordSubmitting] = useState(false);
 
   const load = useCallback(async () => {
     // debugFetchは401時に自動でRefresh Tokenによるサイレント延長を1回試みる(src/lib/auth/client.ts)。
@@ -93,6 +100,33 @@ export function DashboardClient() {
   async function logout() {
     await apiFetch("/api/v1/auth/logout", { method: "POST" });
     router.replace("/login");
+  }
+
+  async function changePassword(e: React.FormEvent) {
+    e.preventDefault();
+    setPasswordError("");
+    if (newPassword !== newPasswordConfirm) {
+      setPasswordError("新しいパスワード(確認)が一致しません");
+      return;
+    }
+    setPasswordSubmitting(true);
+    try {
+      const res = await apiFetch("/api/v1/auth/password", {
+        method: "POST",
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setPasswordError(body?.error?.message ?? "パスワードの変更に失敗しました");
+        return;
+      }
+      // 成功時は全端末で再ログインが必要になる(サーバー側で全セッション失効済み)。
+      router.replace("/login");
+    } catch {
+      setPasswordError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
+    } finally {
+      setPasswordSubmitting(false);
+    }
   }
 
   async function revokeSession(id: string) {
@@ -171,6 +205,58 @@ export function DashboardClient() {
           </div>
         )}
         {error && <p className="text-sm text-red-600 mt-2">{error}</p>}
+      </section>
+
+      {/* [2026-08-21新設] パスワード変更フォーム。成功時は全端末が再ログイン必須になる。 */}
+      <section className="bg-white border border-slate-200 rounded-xl p-5">
+        <h2 className="font-semibold text-slate-800 mb-3">パスワード変更</h2>
+        <form onSubmit={changePassword} className="space-y-3 max-w-sm">
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">現在のパスワード</label>
+            <input
+              type="password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              required
+              autoComplete="current-password"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">新しいパスワード</label>
+            <input
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+              autoComplete="new-password"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            />
+            <p className="text-[11px] text-slate-400 mt-1">
+              8文字以上、英大文字・英小文字・数字・記号のうち3種類以上を組み合わせてください
+            </p>
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">新しいパスワード(確認)</label>
+            <input
+              type="password"
+              value={newPasswordConfirm}
+              onChange={(e) => setNewPasswordConfirm(e.target.value)}
+              required
+              autoComplete="new-password"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            />
+          </div>
+          {passwordError && <p className="text-sm text-red-600">{passwordError}</p>}
+          <button
+            type="submit"
+            disabled={passwordSubmitting}
+            className="bg-slate-900 hover:bg-black text-white text-sm rounded-lg px-4 py-2 disabled:opacity-50"
+          >
+            {passwordSubmitting ? "変更中..." : "パスワードを変更する"}
+          </button>
+          <p className="text-[11px] text-slate-400">変更すると、この端末を含む全ての端末で再ログインが必要になります。</p>
+        </form>
       </section>
 
       <section className="bg-white border border-slate-200 rounded-xl p-5">

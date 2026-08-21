@@ -12,6 +12,14 @@ import {
   type TransitionAction,
 } from "@/lib/responsibility";
 
+interface OriginCaptureRef {
+  id: string;
+  sourceType: string;
+  aiSummary: string | null;
+  rawText: string | null;
+  createdAt: string;
+}
+
 interface ResponsibilityListItem {
   id: string;
   type: string;
@@ -28,6 +36,9 @@ interface ResponsibilityListItem {
   updatedAt: string;
   blockedByCount: number;
   childrenCount: number;
+  /** 新設(2026-08-21): どのInboxメモから生成されたか。手動作成の場合はnull。 */
+  originCaptureId: string | null;
+  originCapture: OriginCaptureRef | null;
 }
 
 interface DependencyItem {
@@ -77,6 +88,15 @@ const TYPE_LABEL: Record<string, string> = {
   CONCERN: "懸念",
   HABIT: "習慣",
   IDEA: "アイデア",
+};
+
+/** [2026-08-21新設] 元メモバッジ用の短いsourceTypeラベル(aiSummary/rawTextが無い場合のフォールバック)。 */
+const SOURCE_TYPE_LABEL_SHORT: Record<string, string> = {
+  TEXT: "テキスト",
+  VOICE: "音声",
+  MEETING: "会議",
+  IMPORT: "取込",
+  IMAGE: "画像",
 };
 
 const TYPE_CHIP_STYLE: Record<string, string> = {
@@ -776,6 +796,24 @@ export function ResponsibilitiesClient() {
                                   ⛓️後続{item.childrenCount}
                                 </span>
                               )}
+                              {/* [2026-08-21新設] カルキョンさんの指摘「どのInboxからの生成タスクか
+                                  判別できるようにしろ」に対応。クリックで元メモへ遷移する。 */}
+                              {item.originCapture && (
+                                <span
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    router.push(`/inbox?focus=${item.originCaptureId}`);
+                                  }}
+                                  title="元メモを開く"
+                                  className="text-[10px] px-1.5 py-0.5 rounded bg-canvas text-faint hover:text-ink hover:bg-line/60 cursor-pointer truncate max-w-[140px]"
+                                >
+                                  📄{" "}
+                                  {item.originCapture.aiSummary ||
+                                    item.originCapture.rawText?.slice(0, 20) ||
+                                    SOURCE_TYPE_LABEL_SHORT[item.originCapture.sourceType] ||
+                                    "元メモ"}
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -915,6 +953,25 @@ export function ResponsibilitiesClient() {
                     )}
                     {detail.importance && <span>重要度: {detail.importance}/5</span>}
                   </div>
+
+                  {/* [2026-08-21新設] カルキョンさんの指摘「もともとどんな文書、音声、画像で
+                      抽出したものか正確に把握できないといけない」に対応。 */}
+                  {detail.originCapture ? (
+                    <button
+                      onClick={() => router.push(`/inbox?focus=${detail.originCapture!.id}`)}
+                      className="w-full text-left bg-canvas hover:bg-line/40 border border-line rounded-lg px-3 py-2 transition"
+                    >
+                      <p className="text-[10px] font-semibold text-faint uppercase tracking-wide mb-0.5">
+                        元メモ({SOURCE_TYPE_LABEL_SHORT[detail.originCapture.sourceType] ?? detail.originCapture.sourceType}・
+                        {new Date(detail.originCapture.createdAt).toLocaleDateString("ja-JP")})
+                      </p>
+                      <p className="text-xs text-ink line-clamp-2">
+                        {detail.originCapture.aiSummary || detail.originCapture.rawText || "(本文なし)"}
+                      </p>
+                    </button>
+                  ) : (
+                    <p className="text-[11px] text-faint">手動で作成された責任です(元メモはありません)</p>
+                  )}
 
                   {/* [2026-08-21追加] タグ管理。既存タグはクリックで付け外し、新規はその場で作成できる。 */}
                   <div className="pt-2 border-t border-line">
