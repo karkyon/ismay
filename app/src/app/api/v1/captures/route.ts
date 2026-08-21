@@ -217,6 +217,7 @@ export async function GET(req: NextRequest) {
       id: true,
       sourceType: true,
       rawText: true,
+      aiSummary: true,
       processingStatus: true,
       domainId: true,
       sourceCapturedAt: true,

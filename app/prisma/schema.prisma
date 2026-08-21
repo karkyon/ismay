@@ -165,6 +165,10 @@ model Capture {
   sourceType         String    @map("source_type")
   rawText            String?   @map("raw_text")
   audioObjectKey     String?   @map("audio_object_key")
+  /// 新設(2026-08-21): AIによる原文全体の一言要約。Inbox一覧で原文の機械的な
+  /// 切り詰め表示の代わりに使う(カルキョンさんの指摘「タイトルと概要説明が
+  /// 関連付けられるようになっているのか」への対応)。
+  aiSummary          String?   @map("ai_summary")
   language           String    @default("ja-JP")
   /// SAVED/QUEUED/PROCESSING/READY/FAILED
   processingStatus   String    @default("SAVED") @map("processing_status")

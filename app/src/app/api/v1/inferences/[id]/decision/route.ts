@@ -173,6 +173,29 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       decision: storedDecision,
     });
 
+    // [2026-08-21追加] カルキョンさんの指摘「文字起こし文章の内容によりカテゴリやタグ付けが
+    // 関連付けられるようになっているのか」に対応。AIが提案したタグ(suggestedTags)を、
+    // 既存タグは再利用・未登録のタグは自動作成のうえ、採用したResponsibilityへ付与する。
+    if (candidate.suggestedTags.length > 0) {
+      for (const tagName of candidate.suggestedTags.slice(0, 3)) {
+        const trimmed = tagName.trim();
+        if (!trimmed) continue;
+        const tag = await tx.tag.upsert({
+          where: { workspaceId_name: { workspaceId, name: trimmed } },
+          create: { workspaceId, name: trimmed },
+          update: {},
+          select: { id: true },
+        });
+        await tx.responsibilityTag.create({
+          data: { responsibilityId: responsibility.id, tagId: tag.id },
+        });
+      }
+      debugServer.event("POST /inferences/[id]/decision", "AI提案タグを自動付与", {
+        responsibilityId: responsibility.id,
+        tags: candidate.suggestedTags,
+      });
+    }
+
     // [2026-08-20追加] カルキョンさんの指示「候補間の親子・依存関係を自動検出しろ」に対応。
     // 同一Capture内の他候補で、AIがblockedByCandidateIdsとして関連付けたものが
     // 既に採用済み(Responsibility化済み)であれば、ここでResponsibilityRelationを

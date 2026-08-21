@@ -50,8 +50,12 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
     return { status: "FAILED", reason: policyCheck.reason };
   }
 
-  if (capture.sourceType === "VOICE" || !capture.rawText) {
-    const reason = "音声文字起こし(API-CAP-02/PRV-03)は未実装のため、本文なしCaptureは解析できません";
+  if (!capture.rawText) {
+    // [2026-08-21修正] 従来sourceType==="VOICE"を無条件でブロックしていたが、
+    // 音声文字起こし(transcribeAudioJob.ts)が実装されたことで、VOICE Captureも
+    // 文字起こし完了後はrawTextが埋まった状態でここに到達するようになった。
+    // rawTextが空の場合(文字起こし未実行/失敗)のみブロックする。
+    const reason = "本文がありません(音声の場合は文字起こしが完了していない可能性があります)";
     await markFailed(capture.id, processingVersion, reason);
     return { status: "FAILED", reason };
   }
@@ -67,11 +71,21 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
   let lastFailureReason = "";
   let lastUsage: AiExtractionUsage | undefined;
 
+  // [2026-08-21追加] AI提案タグ(suggestedTags)が既存タグの表記ゆれを増やさないよう、
+  // このWorkspaceの既存タグ名一覧をプロンプトへ渡す。
+  const existingTags = await db.tag.findMany({
+    where: { workspaceId: capture.workspaceId, deletedAt: null },
+    select: { name: true },
+    take: 50,
+  });
+  const existingTagNames = (existingTags as { name: string }[]).map((t) => t.name);
+
   for (let attempt = 1; attempt <= MAX_AI_ATTEMPTS; attempt++) {
     const outcome = await ai.extractCandidates({
       rawText: capture.rawText,
       nowIso: new Date().toISOString(),
       timezone: DEFAULT_TIMEZONE,
+      existingTagNames,
     });
 
     if (!outcome.ok) {
@@ -136,7 +150,7 @@ async function persistSuccess(
   captureId: string,
   processingVersion: number,
   ai: AiExtractionProvider,
-  result: { candidates: import("@/lib/ai/schema").ResponsibilityCandidate[] },
+  result: { candidates: import("@/lib/ai/schema").ResponsibilityCandidate[]; captureSummary?: string },
   usage: AiExtractionUsage,
 ): Promise<number> {
   return db.$transaction(async (tx) => {
@@ -172,7 +186,11 @@ async function persistSuccess(
 
     const updated = await tx.capture.updateMany({
       where: { id: captureId, version: processingVersion, processingStatus: "PROCESSING" },
-      data: { processingStatus: "READY", version: { increment: 1 } },
+      data: {
+        processingStatus: "READY",
+        version: { increment: 1 },
+        ...(result.captureSummary ? { aiSummary: result.captureSummary } : {}),
+      },
     });
 
     await tx.eventLog.create({

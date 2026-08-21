@@ -5,11 +5,13 @@ import {
   isKnownProviderKey,
   resolveExtractionProvider,
   resolveEmbeddingProvider,
+  resolveTranscriptionProvider,
   type AiCapability,
 } from "@/lib/ai/registry";
 import { decryptApiKey } from "@/lib/ai/credentialCrypto";
 import type { AiExtractionProvider } from "@/lib/ai/provider";
 import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
+import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
 
 /**
  * Workspaceに設定された有効プロバイダーキー・モデル名を返す。未設定・不明なキーの場合は
@@ -67,4 +69,10 @@ export async function getActiveEmbeddingProvider(workspaceId: string): Promise<A
   const { providerKey, modelName } = await getActiveProviderSelection(workspaceId, "EMBEDDING");
   const apiKey = await getDecryptedApiKey(workspaceId, providerKey);
   return resolveEmbeddingProvider(providerKey, { apiKey, model: modelName });
+}
+
+export async function getActiveTranscriptionProvider(workspaceId: string): Promise<AiTranscriptionProvider> {
+  const { providerKey, modelName } = await getActiveProviderSelection(workspaceId, "TRANSCRIPTION");
+  const apiKey = await getDecryptedApiKey(workspaceId, providerKey);
+  return resolveTranscriptionProvider(providerKey, { apiKey, model: modelName });
 }

@@ -50,6 +50,11 @@ export const ResponsibilityCandidateSchema = z
     // 参照できない(FN-GR-01の意味照合が別途必要な領域のため、ここでは
     // 同一原文内の明示的な依存関係のみを対象とする)。
     blockedByCandidateIds: z.array(z.string().max(64)).max(10).default([]),
+    // [2026-08-21追加] カルキョンさんの指摘「音声ファイルの内容によりカテゴリやタグ付けが
+    // 関連付けられるようになっているのか」に対応。既存タグ名と一致・類似するものが
+    // あればモデルに挙げさせる(自由入力ではなく、原文の文脈から妥当なラベルを推定させる)。
+    // 新規タグの自動作成は候補採用(ACCEPT)時に限り許可し、乱造を防ぐため最大3件に制限する。
+    suggestedTags: z.array(z.string().max(50)).max(3).default([]),
   })
   .refine((c) => c.evidenceSpans.every((s) => s.end > s.start), {
     message: "evidenceSpansのendはstartより大きい必要があります",
@@ -57,6 +62,10 @@ export const ResponsibilityCandidateSchema = z
 
 export const ExtractionResultSchema = z.object({
   candidates: z.array(ResponsibilityCandidateSchema).max(20),
+  // [2026-08-21追加] カルキョンさんの指摘「生成データにタイトルと概要説明が
+  // 関連付けられるようになっているのか」に対応。Capture一覧(Inbox)で原文の
+  // 冒頭を機械的に切り詰めて表示していたのを、内容を要約した一言に置き換える。
+  captureSummary: z.string().max(120).optional(),
 });
 
 export type ResponsibilityCandidate = z.infer<typeof ResponsibilityCandidateSchema>;
@@ -120,9 +129,18 @@ export const EXTRACTION_TOOL_JSON_SCHEMA = {
             items: { type: "string" },
             description: "この候補の完了前提として必要な、同一原文内の他候補のcandidateId",
           },
+          suggestedTags: {
+            type: "array",
+            items: { type: "string" },
+            description: "この候補に付けるべきタグ名(最大3件)。既存タグ一覧が渡されている場合はそこから優先的に選ぶ",
+          },
         },
         required: ["candidateId", "type", "title", "evidenceSpans", "confidence"],
       },
+    },
+    captureSummary: {
+      type: "string",
+      description: "原文全体を要約した一言(120文字以内)。一覧画面での表示用",
     },
   },
   required: ["candidates"],

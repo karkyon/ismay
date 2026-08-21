@@ -11,21 +11,26 @@ import { debugServer } from "@/lib/debugServer";
  */
 
 const RELAY_BATCH_SIZE = 20;
+const RELAYED_EVENT_TO_JOB_TYPE: Record<string, string> = {
+  "CaptureAnalysisRequested.v1": "AI_EXTRACT",
+  "AudioTranscriptionRequested.v1": "TRANSCRIBE_AUDIO",
+};
 
 export async function relayOutboxToJobs(): Promise<{ relayed: number }> {
   const pending = await db.outboxEvent.findMany({
-    where: { status: "PENDING", eventName: "CaptureAnalysisRequested.v1" },
+    where: { status: "PENDING", eventName: { in: Object.keys(RELAYED_EVENT_TO_JOB_TYPE) } },
     orderBy: { createdAt: "asc" },
     take: RELAY_BATCH_SIZE,
   });
 
   let relayed = 0;
   for (const event of pending) {
+    const jobType = RELAYED_EVENT_TO_JOB_TYPE[event.eventName];
     try {
       await db.$transaction(async (tx) => {
         await tx.job.create({
           data: {
-            jobType: "AI_EXTRACT",
+            jobType,
             aggregateId: event.aggregateId,
             sourceVersion: event.aggregateVersion,
             payload: { captureId: event.aggregateId },
@@ -36,7 +41,7 @@ export async function relayOutboxToJobs(): Promise<{ relayed: number }> {
           data: { status: "PUBLISHED", publishedAt: new Date() },
         });
       });
-      debugServer.event("Worker/relay", "OutboxEvent→Job", { eventId: event.id, aggregateId: event.aggregateId });
+      debugServer.event("Worker/relay", "OutboxEvent→Job", { eventId: event.id, aggregateId: event.aggregateId, jobType });
       debugServer.state("Worker/relay", "OutboxEvent.status", { eventId: event.id, status: "PUBLISHED" });
       relayed++;
     } catch (err: unknown) {

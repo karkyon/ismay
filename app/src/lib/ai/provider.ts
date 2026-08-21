@@ -10,6 +10,8 @@ export interface AiExtractionInput {
   /** モデルへ伝える現在時刻(相対日付の解釈基準)。 */
   nowIso: string;
   timezone: string;
+  /** [2026-08-21追加] 候補のsuggestedTags推定時、既存タグから優先的に選ばせるための一覧。 */
+  existingTagNames?: string[];
 }
 
 export interface AiExtractionUsage {

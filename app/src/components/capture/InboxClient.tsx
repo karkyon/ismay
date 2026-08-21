@@ -11,6 +11,7 @@ interface CaptureListItem {
   id: string;
   sourceType: string;
   rawText: string | null;
+  aiSummary: string | null;
   processingStatus: string;
   domainId: string | null;
   sourceCapturedAt: string | null;
@@ -167,7 +168,7 @@ export function InboxClient() {
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [filterType, setFilterType] = useState<string | null>(null);
-  // [2026-08-21追加] AI候補の一括採用。カルキョンさんの指摘「AIでの分析候補を一括登録
+  // [2026-08-20追加] AI候補の一括採用。カルキョンさんの指摘「AIでの分析候補を一括登録
   // できるようにしろ、チェックボックスや一括登録」に対応。
   const [selectedInferenceIds, setSelectedInferenceIds] = useState<Set<string>>(new Set());
   const [bulkProcessing, setBulkProcessing] = useState(false);
@@ -336,7 +337,11 @@ export function InboxClient() {
   function toggleInferenceSelection(id: string) {
     setSelectedInferenceIds((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
       return next;
     });
   }
@@ -451,7 +456,7 @@ export function InboxClient() {
                             selected ? "font-semibold text-brand-700" : "text-ink"
                           }`}
                         >
-                          {c.rawText || "(本文なし・音声のみ)"}
+                          {c.aiSummary || c.rawText || (c.sourceType === "VOICE" ? "🎧 音声(文字起こし待ち)" : "(本文なし)")}
                         </p>
                         <div className="flex items-center gap-1.5 mt-1">
                           <span
@@ -511,8 +516,14 @@ export function InboxClient() {
                 </div>
 
                 <div className="px-5 py-5">
+                  {detail.aiSummary && (
+                    <div className="mb-3 bg-ai-50 rounded-lg px-3 py-2">
+                      <p className="text-[10px] font-semibold text-ai uppercase tracking-wide mb-0.5">AI要約</p>
+                      <p className="text-xs text-ink">{detail.aiSummary}</p>
+                    </div>
+                  )}
                   <p className="text-base font-serif leading-relaxed whitespace-pre-wrap">
-                    {detail.rawText || "(本文なし・音声のみ)"}
+                    {detail.rawText || (detail.sourceType === "VOICE" ? "🎧 音声ファイル(文字起こし待ち、または本文なし)" : "(本文なし)")}
                   </p>
                 </div>
 

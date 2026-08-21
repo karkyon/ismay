@@ -14,10 +14,12 @@
 
 import type { AiExtractionProvider } from "@/lib/ai/provider";
 import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
+import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
 import { createAnthropicExtractionProvider } from "@/lib/ai/anthropicProvider";
 import { createOpenAiEmbeddingProvider } from "@/lib/ai/openaiEmbeddingProvider";
+import { createOpenAiTranscriptionProvider } from "@/lib/ai/openaiTranscriptionProvider";
 
-export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING"] as const;
+export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION"] as const;
 export type AiCapability = (typeof AI_CAPABILITIES)[number];
 
 export interface ProviderFactoryOpts {
@@ -40,10 +42,18 @@ export const EMBEDDING_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactory
   openai: createOpenAiEmbeddingProvider,
 };
 
+// [2026-08-21追加] 文字起こし事業者はOpenAI gpt-transcribeに確定。
+export const TRANSCRIPTION_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => AiTranscriptionProvider> = {
+  openai: createOpenAiTranscriptionProvider,
+};
+
 /** 管理画面でモデル名を選べるようにするための一覧(価格根拠はlib/ai/pricing.ts)。 */
 export const AVAILABLE_MODELS: Record<string, AvailableModel[]> = {
   anthropic: [{ modelName: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5($1/$5 per Mtok)" }],
-  openai: [{ modelName: "text-embedding-3-small", label: "text-embedding-3-small($0.02 per Mtok)" }],
+  openai: [
+    { modelName: "text-embedding-3-small", label: "text-embedding-3-small($0.02 per Mtok)" },
+    { modelName: "gpt-transcribe", label: "gpt-transcribe($0.0045/分)" },
+  ],
 };
 
 export const DEFAULT_PROVIDER_KEY: Record<AiCapability, string> = {
@@ -51,11 +61,18 @@ export const DEFAULT_PROVIDER_KEY: Record<AiCapability, string> = {
   EXTRACTION: "anthropic",
   // 2026-08-20合意: EmbeddingはOpenAI text-embedding-3-small
   EMBEDDING: "openai",
+  // 2026-08-21合意: 文字起こしはOpenAI gpt-transcribe
+  TRANSCRIPTION: "openai",
 };
 
+function registryFor(capability: AiCapability): Record<string, unknown> {
+  if (capability === "EXTRACTION") return EXTRACTION_PROVIDER_REGISTRY;
+  if (capability === "EMBEDDING") return EMBEDDING_PROVIDER_REGISTRY;
+  return TRANSCRIPTION_PROVIDER_REGISTRY;
+}
+
 export function listAvailableProviderKeys(capability: AiCapability): string[] {
-  const registry = capability === "EXTRACTION" ? EXTRACTION_PROVIDER_REGISTRY : EMBEDDING_PROVIDER_REGISTRY;
-  return Object.keys(registry);
+  return Object.keys(registryFor(capability));
 }
 
 export function listAvailableModels(providerKey: string): AvailableModel[] {
@@ -78,6 +95,14 @@ export function resolveEmbeddingProvider(providerKey: string, opts?: ProviderFac
   const factory = EMBEDDING_PROVIDER_REGISTRY[providerKey];
   if (!factory) {
     throw new Error(`未登録のEmbeddingプロバイダーです: ${providerKey}`);
+  }
+  return factory(opts);
+}
+
+export function resolveTranscriptionProvider(providerKey: string, opts?: ProviderFactoryOpts): AiTranscriptionProvider {
+  const factory = TRANSCRIPTION_PROVIDER_REGISTRY[providerKey];
+  if (!factory) {
+    throw new Error(`未登録の文字起こしプロバイダーです: ${providerKey}`);
   }
   return factory(opts);
 }
