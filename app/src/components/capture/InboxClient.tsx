@@ -167,6 +167,10 @@ export function InboxClient() {
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [filterType, setFilterType] = useState<string | null>(null);
+  // [2026-08-21追加] AI候補の一括採用。カルキョンさんの指摘「AIでの分析候補を一括登録
+  // できるようにしろ、チェックボックスや一括登録」に対応。
+  const [selectedInferenceIds, setSelectedInferenceIds] = useState<Set<string>>(new Set());
+  const [bulkProcessing, setBulkProcessing] = useState(false);
 
   const loadList = useCallback(async () => {
     setLoadingList(true);
@@ -327,6 +331,47 @@ export function InboxClient() {
     } finally {
       setDecidingId(null);
     }
+  }
+
+  function toggleInferenceSelection(id: string) {
+    setSelectedInferenceIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  /**
+   * [2026-08-21新設] 選択済み候補を一括で採用/却下する。決定APIは1件ずつしか処理
+   * できない(バージョン競合検知のため)ため、直列に呼び出す。重複扱いの候補は
+   * 一括採用の対象から除外し、誤って両方登録してしまう事故を防ぐ。
+   */
+  async function bulkDecide(decision: "ACCEPT" | "REJECT") {
+    const targets = inferences.filter(
+      (i) => selectedInferenceIds.has(i.id) && i.decision === "PENDING" && (decision === "REJECT" || !i.literalDuplicateOf?.length),
+    );
+    if (targets.length === 0) return;
+    setBulkProcessing(true);
+    setError("");
+    let failCount = 0;
+    for (const inf of targets) {
+      const res = await apiFetch(`/api/v1/inferences/${inf.id}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision, expectedInferenceVersion: inf.version }),
+      });
+      if (res.ok) {
+        setInferences((prev) =>
+          prev.map((i) => (i.id === inf.id ? { ...i, decision: decision === "ACCEPT" ? "ACCEPTED" : "REJECTED" } : i)),
+        );
+      } else {
+        failCount++;
+      }
+    }
+    setSelectedInferenceIds(new Set());
+    if (selectedId) await loadDetail(selectedId, true);
+    if (failCount > 0) setError(`${failCount}件の一括処理に失敗しました(重複や競合の可能性)`);
+    setBulkProcessing(false);
   }
 
   return (
@@ -516,6 +561,45 @@ export function InboxClient() {
                     </button>
                   </div>
                   {inferences.length > 0 && (
+                    <div className="flex items-center gap-2 mt-3 pb-2 border-b border-line">
+                      <label className="flex items-center gap-1.5 text-[11px] text-muted">
+                        <input
+                          type="checkbox"
+                          checked={
+                            inferences.filter((i) => i.decision === "PENDING").length > 0 &&
+                            inferences
+                              .filter((i) => i.decision === "PENDING")
+                              .every((i) => selectedInferenceIds.has(i.id))
+                          }
+                          onChange={(e) => {
+                            const pendingIds = inferences.filter((i) => i.decision === "PENDING").map((i) => i.id);
+                            setSelectedInferenceIds(e.target.checked ? new Set(pendingIds) : new Set());
+                          }}
+                        />
+                        すべて選択
+                      </label>
+                      {selectedInferenceIds.size > 0 && (
+                        <>
+                          <span className="text-[11px] text-faint">{selectedInferenceIds.size}件選択中</span>
+                          <button
+                            onClick={() => bulkDecide("ACCEPT")}
+                            disabled={bulkProcessing}
+                            className="ml-auto text-[11px] bg-safe text-white rounded-md px-2.5 py-1 disabled:opacity-40"
+                          >
+                            {bulkProcessing ? "処理中..." : "選択項目を一括採用"}
+                          </button>
+                          <button
+                            onClick={() => bulkDecide("REJECT")}
+                            disabled={bulkProcessing}
+                            className="text-[11px] bg-canvas border border-line text-muted rounded-md px-2.5 py-1 disabled:opacity-40"
+                          >
+                            一括却下
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {inferences.length > 0 && (
                     <ul className="space-y-2 mt-3">
                       {inferences.map((inf) => {
                         const p = inf.payload;
@@ -529,6 +613,14 @@ export function InboxClient() {
                             className={`rounded-lg p-3 ${hasLiteralDup ? "bg-warn-50 border border-warn-200" : "bg-ai-50"}`}
                           >
                             <div className="flex items-start justify-between gap-2">
+                              {isPending && (
+                                <input
+                                  type="checkbox"
+                                  checked={selectedInferenceIds.has(inf.id)}
+                                  onChange={() => toggleInferenceSelection(inf.id)}
+                                  className="mt-1 shrink-0"
+                                />
+                              )}
                               <div className="min-w-0">
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   <span

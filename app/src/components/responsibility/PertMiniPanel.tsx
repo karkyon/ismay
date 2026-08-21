@@ -16,6 +16,9 @@ const NODE_H = 52;
 const COL_GAP = 46;
 const ROW_GAP = 10;
 const PAD = 12;
+// [2026-08-21修正] 「エリアが狭すぎる」との指摘に対応。既定の高さを260px→420pxに拡大し、
+// さらに全画面モーダル表示を追加した。
+const DEFAULT_MAX_HEIGHT = 420;
 
 const STATUS_COLOR: Record<string, string> = {
   IN_PROGRESS: "#2563eb",
@@ -44,6 +47,74 @@ export function PertMiniPanel({
   nodes: PertNode[];
   onSelect: (id: string) => void;
 }) {
+  const [fullscreen, setFullscreen] = useState(false);
+
+  if (nodes.length <= 1) {
+    return (
+      <p className="text-xs text-faint px-1 py-3">
+        前提・後続関係が設定されていません。「関係図」ページでドラッグして関係を作成できます。
+      </p>
+    );
+  }
+
+  return (
+    <>
+      <div className="flex justify-end mb-1.5">
+        <button
+          onClick={() => setFullscreen(true)}
+          className="text-[10.5px] text-muted hover:text-ink border border-line rounded-md px-2 py-1 flex items-center gap-1"
+        >
+          ⤢ 全画面で見る
+        </button>
+      </div>
+      <PertCanvas
+        centerId={centerId}
+        nodes={nodes}
+        onSelect={onSelect}
+        maxHeight={DEFAULT_MAX_HEIGHT}
+      />
+
+      {fullscreen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6"
+          onClick={() => setFullscreen(false)}
+        >
+          <div
+            className="bg-surface rounded-2xl shadow-2xl w-full max-w-6xl h-[85vh] flex flex-col p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3 shrink-0">
+              <p className="text-sm font-semibold text-ink">前提・後続関係(PERT図) — 全画面</p>
+              <button
+                onClick={() => setFullscreen(false)}
+                className="text-xs border border-line rounded-lg px-3 py-1.5 hover:bg-canvas"
+              >
+                閉じる ✕
+              </button>
+            </div>
+            <div className="flex-1 min-h-0">
+              <PertCanvas centerId={centerId} nodes={nodes} onSelect={onSelect} maxHeight="100%" fillParent />
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function PertCanvas({
+  centerId,
+  nodes,
+  onSelect,
+  maxHeight,
+  fillParent = false,
+}: {
+  centerId: string;
+  nodes: PertNode[];
+  onSelect: (id: string) => void;
+  maxHeight: number | string;
+  fillParent?: boolean;
+}) {
   const [balloonId, setBalloonId] = useState<string | null>(null);
 
   const layout = useMemo(() => {
@@ -69,19 +140,14 @@ export function PertMiniPanel({
     return { positions, width: x - COL_GAP + PAD, height: PAD * 2 + maxRows * NODE_H + (maxRows - 1) * ROW_GAP };
   }, [nodes]);
 
-  if (nodes.length <= 1) {
-    return (
-      <p className="text-xs text-faint px-1 py-3">
-        前提・後続関係が設定されていません。「関係図」ページでドラッグして関係を作成できます。
-      </p>
-    );
-  }
-
   const balloonNode = balloonId ? nodes.find((n) => n.id === balloonId) : null;
   const balloonPos = balloonId ? layout.positions.get(balloonId) : null;
 
   return (
-    <div className="relative overflow-auto bg-canvas/40 rounded-xl border border-line" style={{ maxHeight: 260 }}>
+    <div
+      className={`relative overflow-auto bg-canvas/40 rounded-xl border border-line ${fillParent ? "h-full" : ""}`}
+      style={{ maxHeight }}
+    >
       <div style={{ position: "relative", width: layout.width, height: Math.max(layout.height, 90) }}>
         <svg width={layout.width} height={layout.height} className="absolute inset-0">
           <defs>
@@ -196,3 +262,4 @@ export function PertMiniPanel({
     </div>
   );
 }
+

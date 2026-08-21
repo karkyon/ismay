@@ -236,6 +236,14 @@ export function ResponsibilitiesClient() {
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editDescription, setEditDescription] = useState("");
+  // [2026-08-21追加] 「期日など一般的なタスク管理ツールの要素がない」との指摘に対応。
+  // hardDeadlineAt(固定期限)・targetAt(目標日時)・importance(重要度)は元々API・
+  // カレンダービュー(hardDeadlineAt優先)は対応済みだったが、編集するUIが一つも
+  // 無かったため設定できなかった。datetime-local入力は秒未満を持たないため、
+  // 保存時にISO文字列へ変換する。
+  const [editHardDeadline, setEditHardDeadline] = useState("");
+  const [editTargetAt, setEditTargetAt] = useState("");
+  const [editImportance, setEditImportance] = useState<number>(0);
   const [savingEdit, setSavingEdit] = useState(false);
   const [newTagName, setNewTagName] = useState("");
   const [savingTag, setSavingTag] = useState(false);
@@ -321,10 +329,21 @@ export function ResponsibilitiesClient() {
     }
   }, [searchParams]);
 
+  /** ISO文字列 → <input type="datetime-local">の値(タイムゾーンはブラウザのローカル)。 */
+  function toDatetimeLocalValue(iso: string | null): string {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   function startEditing() {
     if (!detail) return;
     setEditTitle(detail.title);
     setEditDescription(detail.description ?? "");
+    setEditHardDeadline(toDatetimeLocalValue(detail.hardDeadlineAt));
+    setEditTargetAt(toDatetimeLocalValue(detail.targetAt));
+    setEditImportance(detail.importance ?? 0);
     setEditing(true);
   }
 
@@ -338,6 +357,9 @@ export function ResponsibilitiesClient() {
         body: JSON.stringify({
           title: editTitle.trim(),
           description: editDescription.trim() || null,
+          hardDeadlineAt: editHardDeadline ? new Date(editHardDeadline).toISOString() : null,
+          targetAt: editTargetAt ? new Date(editTargetAt).toISOString() : null,
+          importance: editImportance > 0 ? editImportance : null,
           version: detail.version,
         }),
       });
@@ -818,6 +840,41 @@ export function ResponsibilitiesClient() {
                         rows={4}
                         className="w-full text-sm border border-line rounded-lg px-3 py-2 focus:outline-none focus:border-brand resize-y"
                       />
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[10.5px] text-faint mb-1">固定期限</label>
+                          <input
+                            type="datetime-local"
+                            value={editHardDeadline}
+                            onChange={(e) => setEditHardDeadline(e.target.value)}
+                            className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10.5px] text-faint mb-1">目標日時</label>
+                          <input
+                            type="datetime-local"
+                            value={editTargetAt}
+                            onChange={(e) => setEditTargetAt(e.target.value)}
+                            className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10.5px] text-faint mb-1">重要度</label>
+                          <select
+                            value={editImportance}
+                            onChange={(e) => setEditImportance(Number(e.target.value))}
+                            className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                          >
+                            <option value={0}>未設定</option>
+                            {[1, 2, 3, 4, 5].map((n) => (
+                              <option key={n} value={n}>
+                                {n}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
                       <div className="flex gap-2">
                         <button
                           onClick={saveEditing}
