@@ -3,7 +3,7 @@ import { debugServer } from "@/lib/debugServer";
 import { downloadImageObject } from "@/lib/storage";
 import { getActiveOcrProvider } from "@/lib/ai/config";
 import { estimateCostMicros } from "@/lib/ai/pricing";
-import type { AiOcrOutcome } from "@/lib/ai/ocrProvider";
+import type { AiOcrOutcome, AiOcrImageInput } from "@/lib/ai/ocrProvider";
 
 /**
  * jobs テーブルの OCR_IMAGE ジョブをポーリング処理する(2026-08-21新設)。
@@ -121,9 +121,18 @@ async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
   if (!capture || capture.deletedAt) {
     return { status: "SKIPPED", reason: "Captureが存在しないか削除済みです" };
   }
-  if (!capture.imageObjectKey) {
-    await markCaptureFailed(capture.id, capture.version, "imageObjectKeyが設定されていません");
-    return { status: "FAILED", reason: "imageObjectKeyが設定されていません" };
+
+  // [2026-08-21修正] 複数ページ対応。CaptureImage(新方式)を優先し、無ければ
+  // imageObjectKey単体列(旧方式・移行前データ互換)にフォールバックする。
+  const pages = await db.captureImage.findMany({
+    where: { captureId: capture.id },
+    orderBy: { pageIndex: "asc" },
+  });
+  const pageKeys: string[] =
+    pages.length > 0 ? pages.map((p: { objectKey: string }) => p.objectKey) : capture.imageObjectKey ? [capture.imageObjectKey] : [];
+  if (pageKeys.length === 0) {
+    await markCaptureFailed(capture.id, capture.version, "画像が1件も紐づいていません");
+    return { status: "FAILED", reason: "画像が1件も紐づいていません" };
   }
 
   const claimed = await db.capture.updateMany({
@@ -137,48 +146,42 @@ async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
 
   const provider = await getActiveOcrProvider(capture.workspaceId);
 
-  // [2026-08-21追加] カルキョンさんの指示「緊急性が高いのかバッチでいいのか選択させる」に対応。
-  // extract.ts側の同種の分岐と同じ方針(プロバイダー未対応時は即時実行にフォールバック)。
-  if (capture.processingPriority === "BATCH" && provider.submitOcrBatch) {
-    const imageBufferForBatch = await downloadImageObject(capture.imageObjectKey).catch((err) => {
-      debugServer.error("ocrImageJob", "MinIOからのダウンロードに失敗(Batch投入前)", err);
-      return null;
-    });
-    if (!imageBufferForBatch) {
-      await markCaptureFailed(capture.id, processingVersion, "画像ファイルの取得に失敗しました");
-      return { status: "FAILED", reason: "画像ファイルの取得に失敗しました" };
-    }
-    const fileNameForBatch = capture.imageObjectKey.split("/").pop() ?? "image";
-    const submitResult = await provider.submitOcrBatch({
-      imageBuffer: imageBufferForBatch,
-      contentType: guessImageContentType(fileNameForBatch),
-      fileName: fileNameForBatch,
-    });
-    if (!submitResult.ok) {
-      await persistOcrFailure(capture.id, processingVersion, provider, `Batch投入失敗: ${submitResult.message}`, undefined, true);
-      return { status: "FAILED", reason: `Batch投入失敗: ${submitResult.message}` };
-    }
-    debugServer.event("ocrImageJob", "BATCH_SUBMITTED", { captureId: capture.id, batchId: submitResult.batchId });
-    return { status: "BATCH_PENDING", batchId: submitResult.batchId, processingVersion };
-  }
-
-  const imageBuffer = await downloadImageObject(capture.imageObjectKey).catch((err) => {
-    debugServer.error("ocrImageJob", "MinIOからのダウンロードに失敗", err);
-    return null;
-  });
-  if (!imageBuffer) {
+  const images = await downloadAllPages(pageKeys);
+  if (!images) {
     await markCaptureFailed(capture.id, processingVersion, "画像ファイルの取得に失敗しました");
     return { status: "FAILED", reason: "画像ファイルの取得に失敗しました" };
   }
 
-  const fileName = capture.imageObjectKey.split("/").pop() ?? "image";
-  const outcome = await provider.extractText({
-    imageBuffer,
-    contentType: guessImageContentType(fileName),
-    fileName,
-  });
+  // [2026-08-21追加] カルキョンさんの指示「緊急性が高いのかバッチでいいのか選択させる」に対応。
+  // extract.ts側の同種の分岐と同じ方針(プロバイダー未対応時は即時実行にフォールバック)。
+  if (capture.processingPriority === "BATCH" && provider.submitOcrBatch) {
+    const submitResult = await provider.submitOcrBatch({ images });
+    if (!submitResult.ok) {
+      await persistOcrFailure(capture.id, processingVersion, provider, `Batch投入失敗: ${submitResult.message}`, undefined, true);
+      return { status: "FAILED", reason: `Batch投入失敗: ${submitResult.message}` };
+    }
+    debugServer.event("ocrImageJob", "BATCH_SUBMITTED", { captureId: capture.id, batchId: submitResult.batchId, pageCount: images.length });
+    return { status: "BATCH_PENDING", batchId: submitResult.batchId, processingVersion };
+  }
+
+  const outcome = await provider.extractText({ images });
 
   return applyOcrOutcome(capture.id, capture.workspaceId, processingVersion, provider, outcome, false);
+}
+
+/** ページ画像キー一覧を全てMinIOから取得し、AiOcrImageInput配列を組み立てる。1件でも失敗すればnull。 */
+async function downloadAllPages(objectKeys: string[]): Promise<AiOcrImageInput[] | null> {
+  const results: AiOcrImageInput[] = [];
+  for (const objectKey of objectKeys) {
+    const buffer = await downloadImageObject(objectKey).catch((err) => {
+      debugServer.error("ocrImageJob", "MinIOからのダウンロードに失敗", { objectKey, err });
+      return null;
+    });
+    if (!buffer) return null;
+    const fileName = objectKey.split("/").pop() ?? "image";
+    results.push({ buffer, contentType: guessImageContentType(fileName), fileName });
+  }
+  return results;
 }
 
 /**

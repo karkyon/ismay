@@ -10,16 +10,21 @@ import { uploadImageObject, buildImageObjectKey } from "@/lib/storage";
  * POST /api/v1/captures/image(2026-08-21新設。FR-CAP-02将来項目「画像」の前倒し実装)。
  * 「Inboxに写真や図などイメージデータからのOCR文字起こし機能」の要望に対応。
  *
- * POST /captures/audio(2026-08-21新設)と対称的な設計。処理の骨格
- * (EventLog/OutboxEvent発行、冪等性、MinIOアップロードをトランザクション外で先行実施)は揃えている。
+ * [2026-08-21修正] 複数ページ結合対応。カルキョンさんの指示「画像OCRの複数ページ結合」に
+ * 対応するため、単一ファイル("file")ではなく複数ファイル("files")を受け付ける形へ変更した。
+ * ノート数枚を1回の会議メモとして撮影した場合、1つのCaptureへまとめて紐づけ、
+ * OCR時に1回のVision API呼び出しでページ順を保った1本の書き起こしにする
+ * (ocrImageJob.ts参照。ページごとに個別OCRしてから連結する方式より高精度と判断)。
  *
  * 対応形式: jpg / jpeg / png / gif / webp(Claude API Visionの対応形式に準拠)。
- * ファイルサイズ上限7MB(Claude API直接利用時の上限「10MB(base64エンコード後)」に対し、
- * base64エンコードで約1.33倍に膨らむことを踏まえた安全マージン。2026-08-21 web検索で
- * 公式Vision仕様を確認のうえ設定。想像で決めていない)。
+ * ファイルサイズ上限は1枚あたり7MB(Claude API直接利用時の上限「10MB(base64エンコード後)」に
+ * 対し、base64エンコードで約1.33倍に膨らむことを踏まえた安全マージン。2026-08-21 web検索で
+ * 公式Vision仕様を確認のうえ設定)。1回のアップロードで最大20枚まで
+ * (Anthropic Messages APIの1リクエストあたり画像上限を踏まえた安全な上限)。
  */
 
 const MAX_FILE_SIZE_BYTES = 7 * 1024 * 1024; // 7MB(base64後 約9.3MB、Claude API上限10MB以内)
+const MAX_PAGES = 20;
 const ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
 const ALLOWED_PRIORITIES = ["REALTIME", "BATCH"];
 const EXTENSION_TO_CONTENT_TYPE: Record<string, string> = {
@@ -40,22 +45,38 @@ export async function POST(req: NextRequest) {
   }
 
   const formData = await req.formData().catch(() => null);
-  const file = formData?.get("file");
-  if (!formData || !(file instanceof File)) {
-    return apiError("VALIDATION_FAILED", "画像ファイル(file)を指定してください");
+  if (!formData) {
+    return apiError("VALIDATION_FAILED", "リクエストの形式が不正です");
   }
-  debugServer.input("POST /captures/image", "requestBody", { fileName: file.name, size: file.size, type: file.type });
+  // [2026-08-21修正] "files"(複数)を主とし、旧クライアント互換のため単数"file"も拾う。
+  const files = [...formData.getAll("files"), ...formData.getAll("file")].filter(
+    (f): f is File => f instanceof File,
+  );
+  if (files.length === 0) {
+    return apiError("VALIDATION_FAILED", "画像ファイル(files)を指定してください");
+  }
+  if (files.length > MAX_PAGES) {
+    return apiError("VALIDATION_FAILED", `一度にアップロードできるのは${MAX_PAGES}枚までです`, {
+      fieldErrors: { files: `${MAX_PAGES}枚以下にしてください` },
+    });
+  }
+  debugServer.input("POST /captures/image", "requestBody", {
+    fileCount: files.length,
+    files: files.map((f) => ({ fileName: f.name, size: f.size, type: f.type })),
+  });
 
-  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-  if (!ALLOWED_EXTENSIONS.includes(ext)) {
-    return apiError("VALIDATION_FAILED", `対応していない形式です(対応: ${ALLOWED_EXTENSIONS.join("/")})`, {
-      fieldErrors: { file: "対応形式のファイルを選択してください" },
-    });
-  }
-  if (file.size > MAX_FILE_SIZE_BYTES) {
-    return apiError("VALIDATION_FAILED", "ファイルサイズが7MBを超えています", {
-      fieldErrors: { file: "7MB以下のファイルを選択してください" },
-    });
+  for (const file of files) {
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      return apiError("VALIDATION_FAILED", `対応していない形式です(対応: ${ALLOWED_EXTENSIONS.join("/")}): ${file.name}`, {
+        fieldErrors: { files: "対応形式のファイルを選択してください" },
+      });
+    }
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      return apiError("VALIDATION_FAILED", `ファイルサイズが7MBを超えています: ${file.name}`, {
+        fieldErrors: { files: "7MB以下のファイルを選択してください" },
+      });
+    }
   }
 
   const clientDraftId = (formData.get("clientDraftId") as string | null) ?? crypto.randomUUID();
@@ -74,7 +95,6 @@ export async function POST(req: NextRequest) {
     return apiOk({ id: existing.id, processingStatus: "QUEUED" }, { status: 200 });
   }
 
-  const buffer = Buffer.from(await file.arrayBuffer());
   const tempCapture = await db.capture.create({
     data: {
       workspaceId,
@@ -87,10 +107,19 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  const objectKey = buildImageObjectKey(workspaceId, tempCapture.id, file.name);
-  const contentType = EXTENSION_TO_CONTENT_TYPE[ext] ?? file.type ?? "application/octet-stream";
+  // MinIOアップロードはトランザクションの外(副作用のあるI/O)で先に済ませ、
+  // 全ページ成功後にDBへ確定させる方針にする(既存の音声/単一画像実装と同じ方針)。
+  const uploadedKeys: string[] = [];
   try {
-    await uploadImageObject({ objectKey, buffer, contentType });
+    for (let pageIndex = 0; pageIndex < files.length; pageIndex++) {
+      const file = files[pageIndex];
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+      const objectKey = buildImageObjectKey(workspaceId, tempCapture.id, pageIndex, file.name);
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const contentType = EXTENSION_TO_CONTENT_TYPE[ext] ?? file.type ?? "application/octet-stream";
+      await uploadImageObject({ objectKey, buffer, contentType });
+      uploadedKeys.push(objectKey);
+    }
   } catch (err) {
     debugServer.error("POST /captures/image", "MinIOアップロード失敗", err);
     await db.capture.update({ where: { id: tempCapture.id }, data: { processingStatus: "FAILED" } });
@@ -98,9 +127,17 @@ export async function POST(req: NextRequest) {
   }
 
   const created = await db.$transaction(async (tx) => {
+    for (let pageIndex = 0; pageIndex < uploadedKeys.length; pageIndex++) {
+      await tx.captureImage.create({
+        data: { captureId: tempCapture.id, objectKey: uploadedKeys[pageIndex], pageIndex },
+      });
+    }
+
     const updated = await tx.capture.update({
       where: { id: tempCapture.id },
-      data: { imageObjectKey: objectKey, processingStatus: "QUEUED", version: { increment: 1 } },
+      // 旧単一列imageObjectKeyには先頭ページのキーだけ入れておく(過去コード・レポート等が
+      // 参照していても壊れないようにするための互換目的。読み出し側はCaptureImageを優先する)。
+      data: { imageObjectKey: uploadedKeys[0], processingStatus: "QUEUED", version: { increment: 1 } },
     });
 
     await tx.eventLog.create({
@@ -108,7 +145,7 @@ export async function POST(req: NextRequest) {
         aggregateType: "Capture",
         aggregateId: tempCapture.id,
         eventType: "CAPTURE_SAVED",
-        afterJson: { sourceType: "IMAGE", processingStatus: "QUEUED", objectKey },
+        afterJson: { sourceType: "IMAGE", processingStatus: "QUEUED", pageCount: uploadedKeys.length },
         actorType: "USER",
         actorId: auth.user.userId,
       },
@@ -123,10 +160,13 @@ export async function POST(req: NextRequest) {
         payload: { captureId: tempCapture.id, workspaceId },
       },
     });
-    debugServer.event("POST /captures/image", "ImageOcrRequested.v1", { aggregateId: tempCapture.id });
+    debugServer.event("POST /captures/image", "ImageOcrRequested.v1", {
+      aggregateId: tempCapture.id,
+      pageCount: uploadedKeys.length,
+    });
 
     return updated;
   });
 
-  return apiOk({ id: created.id, processingStatus: created.processingStatus }, { status: 201 });
+  return apiOk({ id: created.id, processingStatus: created.processingStatus, pageCount: uploadedKeys.length }, { status: 201 });
 }

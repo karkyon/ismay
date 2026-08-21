@@ -96,7 +96,12 @@ export async function downloadImageObject(objectKey: string): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-export function buildImageObjectKey(workspaceId: string, captureId: string, originalFileName: string): string {
+/**
+ * [2026-08-21修正] 複数ページ(CaptureImage)対応のためpageIndexを必須引数に追加。
+ * 同名ファイル(例: 全ページ"IMG_0001.jpg"のような連番リセットされたファイル名)が
+ * 複数ページで衝突しMinIO上で上書きされる事故を防ぐ。
+ */
+export function buildImageObjectKey(workspaceId: string, captureId: string, pageIndex: number, originalFileName: string): string {
   const safeName = originalFileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80);
-  return `${workspaceId}/${captureId}/${safeName}`;
+  return `${workspaceId}/${captureId}/p${pageIndex}_${safeName}`;
 }

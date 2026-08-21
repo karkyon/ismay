@@ -109,6 +109,7 @@ const CAPABILITY_LABEL: Record<string, string> = {
   EMBEDDING: "意味照合・類似度計算(FN-GR-01)",
   TRANSCRIPTION: "音声文字起こし(API-CAP-02)",
   OCR: "画像文字起こし(FR-CAP-02)",
+  SEGMENTATION: "音声テーマ自動分割",
 };
 
 /**

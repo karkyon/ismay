@@ -7,6 +7,7 @@ import {
   resolveEmbeddingProvider,
   resolveTranscriptionProvider,
   resolveOcrProvider,
+  resolveSegmentProvider,
   type AiCapability,
 } from "@/lib/ai/registry";
 import { decryptApiKey } from "@/lib/ai/credentialCrypto";
@@ -14,6 +15,7 @@ import type { AiExtractionProvider } from "@/lib/ai/provider";
 import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
 import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
 import type { AiOcrProvider } from "@/lib/ai/ocrProvider";
+import type { AiSegmentProvider } from "@/lib/ai/segmentProvider";
 
 /**
  * Workspaceに設定された有効プロバイダーキー・モデル名を返す。未設定・不明なキーの場合は
@@ -83,4 +85,10 @@ export async function getActiveOcrProvider(workspaceId: string): Promise<AiOcrPr
   const { providerKey, modelName } = await getActiveProviderSelection(workspaceId, "OCR");
   const apiKey = await getDecryptedApiKey(workspaceId, providerKey);
   return resolveOcrProvider(providerKey, { apiKey, model: modelName });
+}
+
+export async function getActiveSegmentProvider(workspaceId: string): Promise<AiSegmentProvider> {
+  const { providerKey, modelName } = await getActiveProviderSelection(workspaceId, "SEGMENTATION");
+  const apiKey = await getDecryptedApiKey(workspaceId, providerKey);
+  return resolveSegmentProvider(providerKey, { apiKey, model: modelName });
 }

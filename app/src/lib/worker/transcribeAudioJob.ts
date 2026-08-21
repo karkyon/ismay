@@ -1,8 +1,10 @@
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
 import { downloadAudioObject } from "@/lib/storage";
-import { getActiveTranscriptionProvider } from "@/lib/ai/config";
+import { getActiveTranscriptionProvider, getActiveSegmentProvider } from "@/lib/ai/config";
 import { estimateTranscriptionCostMicros } from "@/lib/ai/openaiTranscriptionProvider";
+import { estimateCostMicros } from "@/lib/ai/pricing";
+import type { AiTextSegment } from "@/lib/ai/segmentProvider";
 
 /**
  * jobs テーブルの TRANSCRIBE_AUDIO ジョブをポーリング処理する(2026-08-21新設)。
@@ -19,6 +21,13 @@ import { estimateTranscriptionCostMicros } from "@/lib/ai/openaiTranscriptionPro
  * 簡易スタブでの検証では検出できなかった不備であり、schema.prismaを直接再確認した
  * うえで両フィールドを追加した。
  *
+ * [2026-08-21追加] 話題自動分割(カルキョンさんの指示「音声のテーマ切り替わりでの
+ * 複数Capture自動分割」に対応)。文字起こし成功後、原文が一定の長さ以上
+ * (SEGMENT_MIN_TEXT_LENGTH)の場合のみ話題分割AIを呼び、明確な話題の切れ目が
+ * あれば複数Captureへ分割する。短いメモは呼ばない(コスト・誤分割リスクの両面で
+ * 割に合わないため)。分割AI自体が失敗しても文字起こし結果は失わない
+ * (分割なしの従来どおり1件のCaptureとして扱うようフォールバックする)。
+ *
  * aiExtractJob.tsと同じ設計方針: プロバイダー呼び出し自体の失敗はJobを成功扱いで終える
  * (Capture側をFAILEDにするのみ)。Jobレベル再試行はDB接続断など無関係の例外にのみ適用。
  */
@@ -27,6 +36,10 @@ const JOB_BATCH_SIZE = 2; // 音声ファイルは処理が重いため抽出よ
 const BASE_BACKOFF_SECONDS = 30;
 const PROMPT_VERSION = "voice-transcribe-v1";
 const SCHEMA_VERSION = "n/a"; // 文字起こしは構造化出力ではないため、抽出プロンプトと違いスキーマバージョンの概念が無い
+/** [2026-08-21追加] この文字数未満の文字起こし結果は話題分割AIを呼ばない(短いメモは分割不要)。 */
+const SEGMENT_MIN_TEXT_LENGTH = 1200;
+/** [2026-08-21追加] この文字数未満のセグメントは前のセグメントへ統合する(過剰分割対策)。 */
+const SEGMENT_MIN_CHUNK_LENGTH = 150;
 
 export async function processTranscribeAudioJobs(): Promise<{ processed: number }> {
   const now = new Date();
@@ -157,19 +170,76 @@ async function runTranscriptionForCapture(captureId: string): Promise<Transcript
     return { status: "FAILED", reason: outcome.message };
   }
 
-  // 文字起こし成功: rawTextへ書き込み、QUEUEDへ進めたうえで即AI抽出キューへ自動投入する
-  // (POST /captures同様の「保存→自動解析」チェーンを、音声でも実現する)。
+  // 文字起こし成功: 話題分割を試みたうえで、rawTextへの書き込み・AI抽出キューへの
+  // 自動投入を行う(processCompletedTranscription側で分割有無を判定する)。
+  await processCompletedTranscription(capture, outcome.text);
+
+  return { status: "READY" };
+}
+
+/**
+ * [2026-08-21追加] 文字起こし完了後の後処理。原文が十分長い場合のみ話題分割AIを呼び、
+ * 明確な話題の切れ目があれば複数Captureへ分割する。分割しない場合(短文・分割AI失敗・
+ * 単一セグメント判定)は、従来どおり1件のCaptureとして扱う。
+ */
+async function processCompletedTranscription(
+  capture: { id: string; workspaceId: string; domainId: string | null; createdById: string; processingPriority: string; sourceCapturedAt: Date | null; consentId: string | null },
+  rawText: string,
+): Promise<void> {
+  let segments: AiTextSegment[] | null = null;
+
+  if (rawText.length >= SEGMENT_MIN_TEXT_LENGTH) {
+    segments = await trySegmentText(capture.id, capture.workspaceId, rawText);
+  }
+
+  if (!segments || segments.length <= 1) {
+    // 分割なし: 従来どおり1件のCaptureとして進める。
+    await db.$transaction(async (tx) => {
+      const updated = await tx.capture.update({
+        where: { id: capture.id },
+        data: { rawText, processingStatus: "QUEUED", version: { increment: 1 } },
+      });
+      await tx.eventLog.create({
+        data: {
+          aggregateType: "Capture",
+          aggregateId: capture.id,
+          eventType: "CAPTURE_TRANSCRIBED",
+          afterJson: { textLength: rawText.length },
+          actorType: "SYSTEM",
+        },
+      });
+      await tx.outboxEvent.create({
+        data: {
+          eventName: "CaptureAnalysisRequested.v1",
+          eventVersion: "1",
+          aggregateId: capture.id,
+          aggregateVersion: updated.version,
+          payload: { captureId: capture.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
+        },
+      });
+    });
+    debugServer.event("transcribeAudioJob", "文字起こし完了・AI抽出キューへ自動投入(分割なし)", { captureId: capture.id });
+    return;
+  }
+
+  // 分割あり: 1件目は既存Captureのrawtextを差し替え、2件目以降は新規Captureを作成する。
+  // それぞれ独立にQUEUED→AI抽出キューへ投入する(1件失敗しても他へ影響しない)。
   await db.$transaction(async (tx) => {
+    const firstSegment = segments![0];
     const updated = await tx.capture.update({
       where: { id: capture.id },
-      data: { rawText: outcome.text, processingStatus: "QUEUED", version: { increment: 1 } },
+      data: {
+        rawText: rawText.slice(firstSegment.startChar, firstSegment.endChar),
+        processingStatus: "QUEUED",
+        version: { increment: 1 },
+      },
     });
     await tx.eventLog.create({
       data: {
         aggregateType: "Capture",
         aggregateId: capture.id,
         eventType: "CAPTURE_TRANSCRIBED",
-        afterJson: { textLength: outcome.text.length },
+        afterJson: { textLength: firstSegment.endChar - firstSegment.startChar, splitIntoCount: segments!.length, title: firstSegment.title },
         actorType: "SYSTEM",
       },
     });
@@ -182,10 +252,120 @@ async function runTranscriptionForCapture(captureId: string): Promise<Transcript
         payload: { captureId: capture.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
       },
     });
-  });
-  debugServer.event("transcribeAudioJob", "文字起こし完了・AI抽出キューへ自動投入", { captureId: capture.id });
 
-  return { status: "READY" };
+    for (const segment of segments!.slice(1)) {
+      const child = await tx.capture.create({
+        data: {
+          workspaceId: capture.workspaceId,
+          domainId: capture.domainId,
+          createdById: capture.createdById,
+          sourceType: "VOICE",
+          rawText: rawText.slice(segment.startChar, segment.endChar),
+          processingStatus: "QUEUED",
+          processingPriority: capture.processingPriority,
+          sourceCapturedAt: capture.sourceCapturedAt,
+          consentId: capture.consentId,
+          splitFromCaptureId: capture.id,
+        },
+      });
+      await tx.eventLog.create({
+        data: {
+          aggregateType: "Capture",
+          aggregateId: child.id,
+          eventType: "CAPTURE_SAVED",
+          afterJson: { sourceType: "VOICE", processingStatus: "QUEUED", splitFromCaptureId: capture.id, title: segment.title },
+          actorType: "SYSTEM",
+        },
+      });
+      await tx.outboxEvent.create({
+        data: {
+          eventName: "CaptureAnalysisRequested.v1",
+          eventVersion: "1",
+          aggregateId: child.id,
+          aggregateVersion: child.version,
+          payload: { captureId: child.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
+        },
+      });
+    }
+  });
+  debugServer.event("transcribeAudioJob", "文字起こし完了・話題分割してAI抽出キューへ自動投入", {
+    captureId: capture.id,
+    splitIntoCount: segments.length,
+  });
+}
+
+/** 話題分割AIを呼び、検証済みセグメント配列を返す。呼び出し自体の失敗やAI判定「分割不要」はnullで返す。 */
+async function trySegmentText(captureId: string, workspaceId: string, rawText: string): Promise<AiTextSegment[] | null> {
+  const provider = await getActiveSegmentProvider(workspaceId);
+  const outcome = await provider.segmentText({ rawText, nowIso: new Date().toISOString() });
+
+  await db.aiRun.create({
+    data: {
+      captureId,
+      provider: provider.providerName,
+      model: provider.modelName,
+      promptVersion: provider.promptVersion,
+      schemaVersion: provider.schemaVersion,
+      status: outcome.ok ? "SUCCEEDED" : "FAILED",
+      inputTokens: outcome.ok ? outcome.usage.inputTokens : (outcome.usage?.inputTokens ?? null),
+      outputTokens: outcome.ok ? outcome.usage.outputTokens : (outcome.usage?.outputTokens ?? null),
+      latencyMs: outcome.ok ? outcome.usage.latencyMs : (outcome.usage?.latencyMs ?? null),
+      costMicros: outcome.ok ? estimateCostMicros(provider.modelName, outcome.usage.inputTokens, outcome.usage.outputTokens) : null,
+      errorCode: outcome.ok ? null : outcome.message,
+      startedAt: new Date(),
+      finishedAt: new Date(),
+    },
+  });
+
+  if (!outcome.ok) {
+    debugServer.error("transcribeAudioJob", "話題分割AI失敗(分割なしにフォールバック)", { captureId, message: outcome.message });
+    return null;
+  }
+
+  const validated = validateSegments(rawText, outcome.segments);
+  debugServer.event("transcribeAudioJob", "話題分割結果", { captureId, segmentCount: validated.length });
+  return validated;
+}
+
+/**
+ * モデルが返したセグメント境界を検証・正規化する。
+ * - 範囲外・逆転(end<=start)のセグメントは除去
+ * - startChar昇順に並べ替え
+ * - 重複区間は前のセグメントへ吸収
+ * - SEGMENT_MIN_CHUNK_LENGTH未満の短いセグメントは前のセグメントへ統合
+ * - 先頭は0、末尾はrawText.lengthに強制し、原文全体を過不足なく覆うようにする
+ */
+function validateSegments(rawText: string, rawSegments: AiTextSegment[]): AiTextSegment[] {
+  const clamped = rawSegments
+    .map((s) => ({
+      title: (s.title ?? "").trim() || "（無題）",
+      startChar: Math.max(0, Math.min(Math.trunc(s.startChar ?? 0), rawText.length)),
+      endChar: Math.max(0, Math.min(Math.trunc(s.endChar ?? 0), rawText.length)),
+    }))
+    .filter((s) => s.endChar > s.startChar)
+    .sort((a, b) => a.startChar - b.startChar);
+
+  if (clamped.length === 0) return [];
+
+  const merged: AiTextSegment[] = [];
+  for (const seg of clamped) {
+    const last = merged[merged.length - 1];
+    if (last && seg.startChar < last.endChar) {
+      // 前のセグメントと重複: 前のセグメントを拡張して吸収する
+      last.endChar = Math.max(last.endChar, seg.endChar);
+      continue;
+    }
+    if (last && seg.endChar - seg.startChar < SEGMENT_MIN_CHUNK_LENGTH) {
+      // 短すぎるセグメント: 前のセグメントへ統合する
+      last.endChar = seg.endChar;
+      continue;
+    }
+    merged.push({ ...seg });
+  }
+
+  merged[0].startChar = 0;
+  merged[merged.length - 1].endChar = rawText.length;
+  return merged;
 }
 
 async function markCaptureFailed(captureId: string, expectedVersion: number, reason: string): Promise<void> {

@@ -39,7 +39,18 @@ const SYSTEM_PROMPT = `あなたはISMAYという個人参謀アプリの画像O
 - 前置きや後書きのコメントは付けず、書き起こした本文のみを返してください。`;
 
 function buildRequestParams(model: string, input: AiOcrInput): Record<string, unknown> {
-  const mediaType = SUPPORTED_MEDIA_TYPES.has(input.contentType) ? input.contentType : "image/jpeg";
+  // [2026-08-21修正] 複数ページ対応。各画像の直後に「n枚目」の見出しテキストを挟み、
+  // モデルがページ境界を認識しやすくする(1本の書き起こしとして自然に連結させるため)。
+  const imageContent = input.images.flatMap((img, idx) => {
+    const mediaType = SUPPORTED_MEDIA_TYPES.has(img.contentType) ? img.contentType : "image/jpeg";
+    return [
+      { type: "text", text: `--- ${idx + 1}枚目(${img.fileName}) ---` },
+      {
+        type: "image",
+        source: { type: "base64", media_type: mediaType, data: img.buffer.toString("base64") },
+      },
+    ];
+  });
   return {
     model,
     max_tokens: MAX_OUTPUT_TOKENS,
@@ -49,11 +60,15 @@ function buildRequestParams(model: string, input: AiOcrInput): Record<string, un
       {
         role: "user",
         content: [
+          ...imageContent,
           {
-            type: "image",
-            source: { type: "base64", media_type: mediaType, data: input.imageBuffer.toString("base64") },
+            type: "text",
+            text:
+              input.images.length > 1
+                ? `以上${input.images.length}枚は同じノート/メモの連続したページです。ページ番号の見出しは無視し、` +
+                  "全ページを1つの連続した書き起こしとして結合してください(ページの切れ目に余計な区切り線等は入れないでください)。"
+                : "上記画像の文字起こしをお願いします。",
           },
-          { type: "text", text: `ファイル名: ${input.fileName}\n上記画像の文字起こしをお願いします。` },
         ],
       },
     ],

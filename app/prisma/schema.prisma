@@ -186,6 +186,12 @@ model Capture {
   consent            Consent?  @relation(fields: [consentId], references: [id])
   /// API-CAP-01冪等キー(API・イベント設計書v1.1 4.1節: 「clientDraftId+userで冪等」)。[新設]
   clientDraftId      String?   @map("client_draft_id")
+  /// 新設: このCaptureが音声の話題自動分割で生成された場合、分割元(1件目)のCapture.idを保持する。
+  /// 1件目自体はこの列がnullのまま(rawTextが1つ目のセグメントに差し替えられる)。
+  /// UI側で「分割された関連メモ」を辿るために使う(FN-CAP-01拡張、2026-08-21追加)。
+  splitFromCaptureId String?   @map("split_from_capture_id")
+  splitFromCapture   Capture?  @relation("CaptureSplit", fields: [splitFromCaptureId], references: [id])
+  splitChildren      Capture[] @relation("CaptureSplit")
   version            Int       @default(0)
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
@@ -194,11 +200,30 @@ model Capture {
   responsibilities Responsibility[]
   aiInferences     AiInference[]
   aiRuns           AiRun[]
+  /// 新設: 画像OCRの複数ページ結合用(2026-08-21追加)。1枚のみの場合も1件作成する
+  /// (imageObjectKey単体列は旧データ互換のためのみ残す。新規アップロードは常にこちら経由)。
+  images           CaptureImage[]
 
   @@index([workspaceId, createdAt(sort: Desc)])
   @@index([processingStatus, updatedAt])
   @@unique([workspaceId, createdById, clientDraftId], name: "captures_idempotency_key")
   @@map("captures")
+}
+
+/// 新設(2026-08-21): 画像OCRの複数ページ結合。TBL番号未採番。
+/// 会議メモ・ノートを複数枚撮影した場合に、1つのCaptureへまとめて紐づける。
+model CaptureImage {
+  id         String   @id @default(uuid())
+  captureId  String   @map("capture_id")
+  capture    Capture  @relation(fields: [captureId], references: [id])
+  objectKey  String   @map("object_key")
+  /// 0始まり。OCR時にこの順でAnthropic Vision APIへ渡し、ページ順を保った
+  /// 一つの書き起こしにまとめる。
+  pageIndex  Int      @map("page_index")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([captureId, pageIndex])
+  @@map("capture_images")
 }
 
 // =====================================================================

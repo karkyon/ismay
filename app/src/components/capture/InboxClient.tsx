@@ -26,6 +26,10 @@ interface CaptureDetail extends CaptureListItem {
   imageObjectKey: string | null;
   consentId: string | null;
   updatedAt: string;
+  /** 新設(2026-08-21): 画像複数ページ結合の枚数。 */
+  imagePageCount: number;
+  /** 新設(2026-08-21): 音声話題自動分割で生成された場合、分割元CaptureのID。 */
+  splitFromCaptureId: string | null;
 }
 
 interface CandidateDateMention {
@@ -521,6 +525,10 @@ export function InboxClient() {
                         {SOURCE_TYPE_LABEL[detail.sourceType] ?? detail.sourceType}
                       </span>
                       <span className="text-xs text-muted">{new Date(detail.createdAt).toLocaleString("ja-JP")}</span>
+                      {/* [2026-08-21追加] 音声話題自動分割で生成されたCaptureであることを示す。 */}
+                      {detail.splitFromCaptureId && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-canvas text-faint">🔀 話題分割で生成</span>
+                      )}
                     </div>
                   </div>
                   <span
@@ -544,7 +552,7 @@ export function InboxClient() {
                       (detail.sourceType === "VOICE"
                         ? "🎧 音声ファイル(文字起こし待ち、または本文なし)"
                         : detail.sourceType === "IMAGE"
-                          ? "🖼️ 画像ファイル(文字認識待ち、または本文なし)"
+                          ? `🖼️ 画像ファイル${detail.imagePageCount > 1 ? `${detail.imagePageCount}枚` : ""}(文字認識待ち、または本文なし)`
                           : "(本文なし)")}
                   </p>
                 </div>

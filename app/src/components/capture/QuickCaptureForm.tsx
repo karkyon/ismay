@@ -14,6 +14,9 @@ import { FOCUS_CAPTURE_EVENT } from "@/components/app/AppShell";
 const ACCEPTED_AUDIO_EXTENSIONS = ["mp3", "mp4", "m4a", "wav", "webm", "ogg"];
 // [2026-08-21追加] 画像OCR(会議メモ写真等)。音声タブと同じ横並びタブ構成に揃える。
 const ACCEPTED_IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
+// [2026-08-21追加] 複数ページ結合(ノート数枚を1メモとして取り込む)。
+// API側の上限(captures/image/route.ts MAX_PAGES)と揃える。
+const MAX_IMAGE_PAGES = 20;
 
 type Mode = "text" | "audio" | "image";
 type Priority = "REALTIME" | "BATCH";
@@ -141,18 +144,30 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
     if (file) void uploadAudioFile(file);
   }
 
-  async function uploadImageFile(file: File) {
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    if (!ACCEPTED_IMAGE_EXTENSIONS.includes(ext)) {
-      setError(`対応していない形式です(対応: ${ACCEPTED_IMAGE_EXTENSIONS.join(" / ")})`);
+  async function uploadImageFiles(files: File[]) {
+    if (files.length === 0) return;
+    if (files.length > MAX_IMAGE_PAGES) {
+      setError(`一度にアップロードできるのは${MAX_IMAGE_PAGES}枚までです(${files.length}枚選択されています)`);
       return;
     }
-    debugLog.event("QuickCaptureForm", "image upload start", { fileName: file.name, size: file.size });
+    for (const file of files) {
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+      if (!ACCEPTED_IMAGE_EXTENSIONS.includes(ext)) {
+        setError(`対応していない形式です(対応: ${ACCEPTED_IMAGE_EXTENSIONS.join(" / ")}): ${file.name}`);
+        return;
+      }
+    }
+    debugLog.event("QuickCaptureForm", "image upload start", {
+      fileCount: files.length,
+      files: files.map((f) => ({ fileName: f.name, size: f.size })),
+    });
     setUploadingImage(true);
     setError("");
     try {
       const form = new FormData();
-      form.append("file", file);
+      for (const file of files) {
+        form.append("files", file);
+      }
       form.append("clientDraftId", generateClientId());
       form.append("processingPriority", imagePriority);
       const res = await apiFetch("/api/v1/captures/image", { method: "POST", body: form });
@@ -174,16 +189,16 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
   }
 
   function handleImageFileInput(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (file) void uploadImageFile(file);
+    if (files.length > 0) void uploadImageFiles(files);
   }
 
   function handleImageDrop(e: React.DragEvent) {
     e.preventDefault();
     setImageDragActive(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) void uploadImageFile(file);
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length > 0) void uploadImageFiles(files);
   }
 
   return (
@@ -288,6 +303,7 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
             <input
               ref={imageInputRef}
               type="file"
+              multiple
               accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
               onChange={handleImageFileInput}
               className="hidden"
@@ -306,12 +322,13 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
             >
               <span className="text-2xl">{uploadingImage ? "⏳" : "📷"}</span>
               <p className="text-sm font-medium text-ink">
-                {uploadingImage ? "アップロード中..." : "写真をドラッグ＆ドロップ、またはクリックして選択"}
+                {uploadingImage ? "アップロード中..." : "写真をドラッグ＆ドロップ、またはクリックして選択(複数選択可)"}
               </p>
-              <p className="text-[11px] text-faint">対応形式: jpg / png / gif / webp(7MBまで)</p>
+              <p className="text-[11px] text-faint">対応形式: jpg / png / gif / webp(1枚7MBまで、最大{MAX_IMAGE_PAGES}枚)</p>
             </div>
             <p className="text-[11px] text-faint mt-2">
               会議メモやホワイトボードの写真から文字を自動で読み取り、通常のメモと同じようにAIがタスク候補を抽出します。
+              複数枚選択すると、ページ順に1つのメモとして結合されます(ノートを数ページ撮影した場合など)。
             </p>
           </div>
         )}

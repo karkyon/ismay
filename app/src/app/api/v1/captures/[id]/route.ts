@@ -37,6 +37,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       version: true,
       createdAt: true,
       updatedAt: true,
+      /// 新設(2026-08-21): 画像複数ページ結合。件数のみ返す(URLはまだUI側で使わないため)。
+      _count: { select: { images: true } },
+      /// 新設(2026-08-21): 音声話題自動分割。分割元Captureのidがあれば返す。
+      splitFromCaptureId: true,
       aiRuns: {
         orderBy: { startedAt: "desc" },
         take: 1,
@@ -61,6 +65,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     return apiError("RESOURCE_NOT_FOUND", "指定されたCaptureが見つかりません");
   }
 
-  const { aiRuns, ...captureFields } = capture;
-  return apiOk({ capture: captureFields, latestAiRun: aiRuns[0] ?? null });
+  const { aiRuns, _count, ...captureFields } = capture;
+  return apiOk({ capture: { ...captureFields, imagePageCount: _count.images }, latestAiRun: aiRuns[0] ?? null });
 }

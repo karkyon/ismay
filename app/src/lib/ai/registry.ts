@@ -16,12 +16,14 @@ import type { AiExtractionProvider } from "@/lib/ai/provider";
 import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
 import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
 import type { AiOcrProvider } from "@/lib/ai/ocrProvider";
+import type { AiSegmentProvider } from "@/lib/ai/segmentProvider";
 import { createAnthropicExtractionProvider } from "@/lib/ai/anthropicProvider";
 import { createOpenAiEmbeddingProvider } from "@/lib/ai/openaiEmbeddingProvider";
 import { createOpenAiTranscriptionProvider } from "@/lib/ai/openaiTranscriptionProvider";
 import { createAnthropicOcrProvider } from "@/lib/ai/anthropicOcrProvider";
+import { createAnthropicSegmentProvider } from "@/lib/ai/anthropicSegmentProvider";
 
-export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION", "OCR"] as const;
+export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION", "OCR", "SEGMENTATION"] as const;
 export type AiCapability = (typeof AI_CAPABILITIES)[number];
 
 export interface ProviderFactoryOpts {
@@ -55,6 +57,12 @@ export const OCR_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) 
   anthropic: createAnthropicOcrProvider,
 };
 
+// [2026-08-21追加] 音声テーマ自動分割。抽出と同じAnthropic Claude Haiku 4.5を使う
+// (segmentProvider.ts冒頭コメント参照)。
+export const SEGMENTATION_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => AiSegmentProvider> = {
+  anthropic: createAnthropicSegmentProvider,
+};
+
 /** 管理画面でモデル名を選べるようにするための一覧(価格根拠はlib/ai/pricing.ts)。 */
 export const AVAILABLE_MODELS: Record<string, AvailableModel[]> = {
   anthropic: [{ modelName: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5($1/$5 per Mtok)" }],
@@ -73,13 +81,16 @@ export const DEFAULT_PROVIDER_KEY: Record<AiCapability, string> = {
   TRANSCRIPTION: "openai",
   // 2026-08-21合意: 画像OCRはAnthropic Claude(Vision)。専用OCR事業者は用意しない
   OCR: "anthropic",
+  // 2026-08-21合意: 音声テーマ自動分割は抽出と同じAnthropic Claude Haiku 4.5
+  SEGMENTATION: "anthropic",
 };
 
 function registryFor(capability: AiCapability): Record<string, unknown> {
   if (capability === "EXTRACTION") return EXTRACTION_PROVIDER_REGISTRY;
   if (capability === "EMBEDDING") return EMBEDDING_PROVIDER_REGISTRY;
   if (capability === "TRANSCRIPTION") return TRANSCRIPTION_PROVIDER_REGISTRY;
-  return OCR_PROVIDER_REGISTRY;
+  if (capability === "OCR") return OCR_PROVIDER_REGISTRY;
+  return SEGMENTATION_PROVIDER_REGISTRY;
 }
 
 export function listAvailableProviderKeys(capability: AiCapability): string[] {
@@ -122,6 +133,14 @@ export function resolveOcrProvider(providerKey: string, opts?: ProviderFactoryOp
   const factory = OCR_PROVIDER_REGISTRY[providerKey];
   if (!factory) {
     throw new Error(`未登録のOCRプロバイダーです: ${providerKey}`);
+  }
+  return factory(opts);
+}
+
+export function resolveSegmentProvider(providerKey: string, opts?: ProviderFactoryOpts): AiSegmentProvider {
+  const factory = SEGMENTATION_PROVIDER_REGISTRY[providerKey];
+  if (!factory) {
+    throw new Error(`未登録の話題分割プロバイダーです: ${providerKey}`);
   }
   return factory(opts);
 }
