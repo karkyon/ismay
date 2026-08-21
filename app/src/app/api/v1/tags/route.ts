@@ -19,7 +19,7 @@ const CreateSchema = z.object({
     .optional(),
 });
 
-/** GET /api/v1/tags: このWorkspaceの全タグを返す。 */
+/** GET /api/v1/tags: このWorkspaceの全タグを返す(使用件数付き)。 */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
   if (!auth.authenticated) {
@@ -30,10 +30,13 @@ export async function GET(req: NextRequest) {
   const tags = await db.tag.findMany({
     where: { workspaceId, deletedAt: null },
     orderBy: { name: "asc" },
-    select: { id: true, name: true, color: true },
+    select: { id: true, name: true, color: true, _count: { select: { responsibilities: true } } },
   });
 
-  return apiOk({ tags });
+  type TagRow = { id: string; name: string; color: string; _count: { responsibilities: number } };
+  return apiOk({
+    tags: (tags as TagRow[]).map((t) => ({ id: t.id, name: t.name, color: t.color, usageCount: t._count.responsibilities })),
+  });
 }
 
 /** POST /api/v1/tags: 新規タグを作成する(既存の同名タグがあれば流用してそのまま返す)。 */

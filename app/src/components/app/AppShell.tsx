@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { href: "/inbox", label: "Inbox", icon: InboxIcon },
   { href: "/responsibilities", label: "今後", icon: CalendarIcon },
   { href: "/relations", label: "関係図", icon: CalendarIcon },
+  { href: "/tags", label: "タグ", icon: SettingsIcon },
   { href: "/admin/ai-providers", label: "AIプロバイダー", icon: SettingsIcon },
 ] as const;
 
