@@ -36,10 +36,17 @@ interface DependencyItem {
   type: string;
 }
 
+interface ResponsibilityTagRef {
+  id: string;
+  name: string;
+  color: string;
+}
+
 interface ResponsibilityDetail extends ResponsibilityListItem {
   description: string | null;
   sourceKind: string;
   originCaptureId: string | null;
+  tags: ResponsibilityTagRef[];
 }
 
 interface RelatedItem {
@@ -183,6 +190,15 @@ export function ResponsibilitiesClient() {
   const [sortBy, setSortBy] = useState<"targetAt" | "importance" | "related">("targetAt");
   const [view, setView] = useState<"list" | "calendar">("list");
 
+  // [2026-08-21追加] タイトル/詳細のインライン編集、タグ管理
+  const [allTags, setAllTags] = useState<ResponsibilityTagRef[]>([]);
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [newTagName, setNewTagName] = useState("");
+  const [savingTag, setSavingTag] = useState(false);
+
   const [showCreate, setShowCreate] = useState(false);
   const [newType, setNewType] = useState<string>("TASK");
   const [newTitle, setNewTitle] = useState("");
@@ -231,12 +247,22 @@ export function ResponsibilitiesClient() {
     setLoadingDetail(false);
   }, []);
 
+  const loadTags = useCallback(async () => {
+    const res = await debugFetch("/api/v1/tags");
+    if (res.ok) {
+      const body = await res.json();
+      setAllTags(body.data.tags);
+    }
+  }, []);
+
   useEffect(() => {
     loadList();
-  }, [loadList]);
+    loadTags();
+  }, [loadList, loadTags]);
 
   useEffect(() => {
     if (selectedId) loadDetail(selectedId);
+    setEditing(false);
   }, [selectedId, loadDetail]);
 
   // [2026-08-20追加] /relationsの関係図からノードをクリックした際、「今後TOPに
@@ -251,6 +277,73 @@ export function ResponsibilitiesClient() {
       });
     }
   }, [searchParams]);
+
+  function startEditing() {
+    if (!detail) return;
+    setEditTitle(detail.title);
+    setEditDescription(detail.description ?? "");
+    setEditing(true);
+  }
+
+  async function saveEditing() {
+    if (!detail || !editTitle.trim()) return;
+    setSavingEdit(true);
+    try {
+      const res = await apiFetch(`/api/v1/responsibilities/${detail.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: editTitle.trim(),
+          description: editDescription.trim() || null,
+          version: detail.version,
+        }),
+      });
+      if (res.ok) {
+        setEditing(false);
+        await Promise.all([loadDetail(detail.id), loadList()]);
+      } else {
+        const body = await res.json().catch(() => null);
+        setError(body?.error?.message ?? "更新に失敗しました");
+      }
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
+  /** タグの付け外し。押した瞬間に即PATCHで反映する(保存ボタンを別途設けない)。 */
+  async function toggleTag(tagId: string) {
+    if (!detail) return;
+    const current = detail.tags.map((t) => t.id);
+    const nextTagIds = current.includes(tagId) ? current.filter((id) => id !== tagId) : [...current, tagId];
+    const res = await apiFetch(`/api/v1/responsibilities/${detail.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tagIds: nextTagIds, version: detail.version }),
+    });
+    if (res.ok) {
+      await Promise.all([loadDetail(detail.id), loadList()]);
+    }
+  }
+
+  async function createAndAttachTag() {
+    if (!detail || !newTagName.trim()) return;
+    setSavingTag(true);
+    try {
+      const createRes = await apiFetch("/api/v1/tags", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newTagName.trim() }),
+      });
+      if (!createRes.ok) return;
+      const createBody = await createRes.json();
+      const tagId = createBody.data.tag.id as string;
+      setNewTagName("");
+      await loadTags();
+      await toggleTag(tagId);
+    } finally {
+      setSavingTag(false);
+    }
+  }
 
   function selectItem(id: string) {
     debugLog.event("ResponsibilitiesClient", "select item", { id });
@@ -701,9 +794,50 @@ export function ResponsibilitiesClient() {
                 </div>
 
                 <div className="px-5 py-5 space-y-3">
-                  <p className="text-base font-serif leading-relaxed">{detail.title}</p>
-                  {detail.description && (
-                    <p className="text-sm text-muted whitespace-pre-wrap">{detail.description}</p>
+                  {editing ? (
+                    <div className="space-y-2">
+                      <input
+                        value={editTitle}
+                        onChange={(e) => setEditTitle(e.target.value)}
+                        className="w-full text-base font-serif border border-line rounded-lg px-3 py-2 focus:outline-none focus:border-brand"
+                        autoFocus
+                      />
+                      <textarea
+                        value={editDescription}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        placeholder="詳細・備考メモ(任意)"
+                        rows={4}
+                        className="w-full text-sm border border-line rounded-lg px-3 py-2 focus:outline-none focus:border-brand resize-y"
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          onClick={saveEditing}
+                          disabled={savingEdit || !editTitle.trim()}
+                          className="text-xs bg-ink text-white rounded-lg px-3 py-1.5 disabled:opacity-40"
+                        >
+                          {savingEdit ? "保存中..." : "保存する"}
+                        </button>
+                        <button
+                          onClick={() => setEditing(false)}
+                          className="text-xs border border-line rounded-lg px-3 py-1.5 text-muted"
+                        >
+                          キャンセル
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="group relative">
+                      <p className="text-base font-serif leading-relaxed">{detail.title}</p>
+                      {detail.description && (
+                        <p className="text-sm text-muted whitespace-pre-wrap mt-1">{detail.description}</p>
+                      )}
+                      <button
+                        onClick={startEditing}
+                        className="absolute top-0 right-0 text-[11px] text-faint opacity-0 group-hover:opacity-100 border border-line rounded-md px-2 py-1 hover:text-ink hover:border-ink transition"
+                      >
+                        編集する
+                      </button>
+                    </div>
                   )}
                   <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted">
                     {detail.hardDeadlineAt && (
@@ -714,6 +848,46 @@ export function ResponsibilitiesClient() {
                       <span>開始可能: {new Date(detail.startAfterAt).toLocaleString("ja-JP")}</span>
                     )}
                     {detail.importance && <span>重要度: {detail.importance}/5</span>}
+                  </div>
+
+                  {/* [2026-08-21追加] タグ管理。既存タグはクリックで付け外し、新規はその場で作成できる。 */}
+                  <div className="pt-2 border-t border-line">
+                    <p className="text-[10.5px] font-semibold text-faint uppercase tracking-wide mb-1.5">タグ</p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {allTags.map((tag) => {
+                        const attached = detail.tags.some((t) => t.id === tag.id);
+                        return (
+                          <button
+                            key={tag.id}
+                            onClick={() => toggleTag(tag.id)}
+                            className="text-[10.5px] px-2 py-1 rounded-full font-medium border transition"
+                            style={
+                              attached
+                                ? { background: tag.color, color: "#fff", borderColor: tag.color }
+                                : { background: "transparent", color: tag.color, borderColor: tag.color }
+                            }
+                          >
+                            {tag.name}
+                          </button>
+                        );
+                      })}
+                      <input
+                        value={newTagName}
+                        onChange={(e) => setNewTagName(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && createAndAttachTag()}
+                        placeholder="+ 新規タグ"
+                        className="text-[11px] border border-dashed border-line rounded-full px-2.5 py-1 w-24 focus:outline-none focus:border-brand"
+                      />
+                      {newTagName.trim() && (
+                        <button
+                          onClick={createAndAttachTag}
+                          disabled={savingTag}
+                          className="text-[10.5px] bg-ink text-white rounded-full px-2.5 py-1 disabled:opacity-40"
+                        >
+                          追加
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
 

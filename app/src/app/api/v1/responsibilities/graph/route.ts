@@ -22,6 +22,9 @@ interface NodeRow {
   status: string;
   importance: number | null;
   hardDeadlineAt: Date | null;
+  graphX: number | null;
+  graphY: number | null;
+  version: number;
 }
 
 interface EdgeRow {
@@ -60,7 +63,17 @@ export async function GET(req: NextRequest) {
 
   const nodes = await db.responsibility.findMany({
     where: { id: { in: Array.from(nodeIds) } },
-    select: { id: true, title: true, type: true, status: true, importance: true, hardDeadlineAt: true },
+    select: {
+      id: true,
+      title: true,
+      type: true,
+      status: true,
+      importance: true,
+      hardDeadlineAt: true,
+      graphX: true,
+      graphY: true,
+      version: true,
+    },
   });
 
   // トポロジカル層(layer)を計算する: BLOCKS(from=ブロック元, to=ブロックされる側)を
@@ -117,6 +130,9 @@ export async function GET(req: NextRequest) {
     importance: n.importance,
     hardDeadlineAt: n.hardDeadlineAt,
     layer: layer.get(n.id) ?? 0,
+    graphX: n.graphX,
+    graphY: n.graphY,
+    version: n.version,
   }));
 
   const edgesOut = (relations as EdgeRow[]).map((r) => ({

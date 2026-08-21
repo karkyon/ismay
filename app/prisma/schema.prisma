@@ -106,6 +106,7 @@ model Workspace {
   integrations  Integration[]
   aiProviderConfigs AiProviderConfig[]
   aiProviderCredentials AiProviderCredential[]
+  tags Tag[]
 
   @@map("workspaces")
 }
@@ -204,6 +205,10 @@ model Responsibility {
   /// 同一Capture内の候補間依存関係(blockedByCandidateIds)をResponsibilityRelationへ
   /// 変換する際、「どの候補がどのResponsibilityになったか」を突き合わせるために使う。
   originInferenceId String?   @map("origin_inference_id")
+  /// 新設(2026-08-21): PERT図でのノード位置(ドラッグして手動配置した場合に保存)。
+  /// null時はフロント側の自動レイアウト(トポロジカル層)に従う。
+  graphX           Float?    @map("graph_x")
+  graphY           Float?    @map("graph_y")
   /// TASK/COMMITMENT/DECISION/WAITING/EVENT/RISK/CONCERN/HABIT/IDEA
   /// (v1.1注記: Constraintは含まない。Goalは本テーブルに現れない)
   type             String
@@ -238,9 +243,39 @@ model Responsibility {
   relationsTo      ResponsibilityRelation[] @relation("RelationTo")
   evidences        Evidence[]
   embedding        ResponsibilityEmbedding?
+  tags             ResponsibilityTag[]
 
   @@index([workspaceId, id])
   @@map("responsibilities")
+}
+
+/// 新設(2026-08-21): タグ。Workspace単位。責任の分類・検索・PERT図での色分けに使う。
+model Tag {
+  id          String    @id @default(uuid())
+  workspaceId String    @map("workspace_id")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  name        String
+  /// 表示色(hex等)。UI側の既定色一覧から選ぶ想定。
+  color       String    @default("#6b7280")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  responsibilities ResponsibilityTag[]
+
+  @@unique([workspaceId, name])
+  @@map("tags")
+}
+
+/// 新設(2026-08-21): Responsibility×Tag多対多の中間テーブル。
+model ResponsibilityTag {
+  responsibilityId String         @map("responsibility_id")
+  responsibility   Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
+  tagId            String         @map("tag_id")
+  tag              Tag            @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  createdAt        DateTime       @default(now()) @map("created_at")
+
+  @@id([responsibilityId, tagId])
+  @@map("responsibility_tags")
 }
 
 /// TBL-007 task_details - Task固有属性 [推論]

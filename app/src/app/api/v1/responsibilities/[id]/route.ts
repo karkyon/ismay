@@ -17,13 +17,18 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const responsibility = await db.responsibility.findFirst({
     where: { id, workspaceId, deletedAt: null },
+    include: { tags: { include: { tag: { select: { id: true, name: true, color: true } } } } },
   });
   if (!responsibility) {
     // 他Workspaceの responsibility IDを推測されても存在有無を漏らさない(IDOR対策)
     return apiError("RESOURCE_NOT_FOUND", "指定された責任が見つかりません");
   }
 
-  return apiOk({ responsibility });
+  type WithTags = typeof responsibility & { tags: { tag: { id: string; name: string; color: string } }[] };
+  const { tags, ...fields } = responsibility as WithTags;
+  return apiOk({
+    responsibility: { ...fields, tags: tags.map((t: { tag: { id: string; name: string; color: string } }) => t.tag) },
+  });
 }
 
 const UpdateSchema = z.object({
@@ -34,6 +39,10 @@ const UpdateSchema = z.object({
   hardDeadlineAt: z.string().datetime().nullable().optional(),
   targetAt: z.string().datetime().nullable().optional(),
   startAfterAt: z.string().datetime().nullable().optional(),
+  // [2026-08-21追加] タグ編集・PERT図でのノード位置保存(ドラッグ移動)に対応。
+  tagIds: z.array(z.string().uuid()).max(20).optional(),
+  graphX: z.number().nullable().optional(),
+  graphY: z.number().nullable().optional(),
   version: z.number().int(),
 });
 
@@ -57,7 +66,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       ),
     });
   }
-  const { version, domainId, ...rest } = parsed.data;
+  const { version, domainId, tagIds, ...rest } = parsed.data;
 
   const { id } = await ctx.params;
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
@@ -81,6 +90,20 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     resolvedDomainId = domain.id;
   }
 
+  // [2026-08-21追加] タグはWorkspace内に実在するものだけを許可する(他Workspaceのタグを
+  // 紐付けられるIDOR的な穴を防ぐ)。
+  if (tagIds) {
+    const validTags = await db.tag.findMany({
+      where: { id: { in: tagIds }, workspaceId, deletedAt: null },
+      select: { id: true },
+    });
+    if (validTags.length !== tagIds.length) {
+      return apiError("VALIDATION_FAILED", "存在しないタグが含まれています", {
+        fieldErrors: { tagIds: "このWorkspaceに存在するタグのみ指定できます" },
+      });
+    }
+  }
+
   const updateResult = await db.responsibility.updateMany({
     where: { id, version },
     data: {
@@ -94,6 +117,8 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       ...(rest.startAfterAt !== undefined
         ? { startAfterAt: rest.startAfterAt ? new Date(rest.startAfterAt) : null }
         : {}),
+      ...(rest.graphX !== undefined ? { graphX: rest.graphX } : {}),
+      ...(rest.graphY !== undefined ? { graphY: rest.graphY } : {}),
       ...(resolvedDomainId ? { domainId: resolvedDomainId } : {}),
       updatedById: auth.user.userId,
       version: { increment: 1 },
@@ -109,7 +134,24 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     });
   }
 
-  const updated = await db.responsibility.findUniqueOrThrow({ where: { id } });
+  if (tagIds) {
+    await db.$transaction([
+      db.responsibilityTag.deleteMany({ where: { responsibilityId: id } }),
+      ...(tagIds.length > 0
+        ? [
+            db.responsibilityTag.createMany({
+              data: tagIds.map((tagId) => ({ responsibilityId: id, tagId })),
+            }),
+          ]
+        : []),
+    ]);
+    debugServer.event("PATCH /responsibilities/[id]", "TAGS_UPDATED", { id, tagIds });
+  }
+
+  const updated = await db.responsibility.findUniqueOrThrow({
+    where: { id },
+    include: { tags: { include: { tag: { select: { id: true, name: true, color: true } } } } },
+  });
   debugServer.state("PATCH /responsibilities/[id]", "Responsibility", { id, status: updated.status });
 
   await db.eventLog.create({
@@ -125,7 +167,15 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   });
   debugServer.event("PATCH /responsibilities/[id]", "RESPONSIBILITY_CHANGED", { aggregateId: id });
 
-  return apiOk({ responsibility: updated });
+  const { tags: updatedTags, ...updatedFields } = updated as typeof updated & {
+    tags: { tag: { id: string; name: string; color: string } }[];
+  };
+  return apiOk({
+    responsibility: {
+      ...updatedFields,
+      tags: updatedTags.map((t: { tag: { id: string; name: string; color: string } }) => t.tag),
+    },
+  });
 }
 
 /** API-RESP-04: DELETE /responsibilities/{id} 論理削除。30日以内は復元可能(復元APIは別スコープ)。 */
