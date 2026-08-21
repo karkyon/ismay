@@ -112,67 +112,21 @@ export function AppShell({ children }: { children: ReactNode }) {
     // ブラウザのウィンドウスクロールがaside(サイドバー)ごと動かしてしまい
     // 「サイドバーが固定されない」不備の原因になっていた。h-screen(ビューポート高さに固定)
     // にしたうえで、main側だけがoverflow-y-autoで内部スクロールするようにする。
-    <div className="flex h-screen bg-canvas text-ink overflow-hidden">
-      <aside className="w-[240px] shrink-0 bg-surface border-r border-line hidden md:flex md:flex-col">
-        <div className="h-16 flex items-center gap-2 px-5 border-b border-line">
+    //
+    // [2026-08-22修正] カルキョンさんの指摘「ヘッダ左端がずれてる、下端の線の高さを合わせろ、
+    // 左端から1本のバーで表示しろ」に対応。従来はサイドバー側のロゴ枠(h-16=64px)と
+    // ヘッダー側(h-14=56px)の高さが一致しておらず、境界線が左右でズレていた。
+    // ロゴをヘッダー側へ統合し、画面最上部に「左端から右端まで高さの揃った1本のバー」を
+    // 敷いたうえで、その下にサイドバー+メインを配置する構成に変更した。
+    <div className="flex flex-col h-screen bg-canvas text-ink overflow-hidden">
+      <header className="h-14 shrink-0 border-b border-line bg-surface flex items-stretch">
+        <div className="w-[240px] shrink-0 hidden md:flex items-center gap-2 px-5 border-r border-line">
           <div className="w-7 h-7 rounded-lg bg-brand flex items-center justify-center">
             <span className="text-white font-serif text-sm italic">i</span>
           </div>
           <span className="font-serif italic text-lg text-ink">Ismay</span>
         </div>
-
-        <button
-          onClick={() => {
-            debugLog.event("AppShell", "quick capture button clicked");
-            if (pathname === "/today" || pathname === "/inbox") {
-              window.dispatchEvent(new CustomEvent(FOCUS_CAPTURE_EVENT));
-            } else {
-              router.push("/inbox");
-            }
-          }}
-          className="mx-4 mt-4 mb-2 px-3 py-2.5 rounded-xl bg-ink text-white text-sm font-medium flex items-center gap-2 hover:bg-black transition"
-        >
-          <MicIcon width={15} height={15} />
-          話す・メモする
-          <span className="ml-auto text-[10px] font-mono border border-white/25 text-white/60 rounded px-1.5 py-0.5">
-            C
-          </span>
-        </button>
-
-        <nav className="flex-1 px-3 py-2 space-y-0.5 text-sm overflow-y-auto">
-          {NAV_ITEMS.map((item) => {
-            const active = pathname === item.href;
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.href}
-                onClick={() => router.push(item.href)}
-                className={`w-full text-left px-3 py-2 rounded-lg transition flex items-center gap-2.5 ${
-                  active ? "bg-brand-50 text-brand-700 font-semibold" : "text-ink hover:bg-canvas"
-                }`}
-              >
-                <Icon width={16} height={16} className={active ? "text-brand-700" : "text-faint"} />
-                {item.label}
-              </button>
-            );
-          })}
-        </nav>
-
-        <div className="px-3 py-4 border-t border-line">
-          <button
-            onClick={() => router.push("/dashboard")}
-            className="w-full text-left px-3 py-2 rounded-lg text-sm text-muted hover:bg-canvas flex items-center gap-2.5"
-          >
-            <SettingsIcon width={16} height={16} className="text-faint" />
-            アカウント設定
-          </button>
-        </div>
-      </aside>
-
-      <div className="flex-1 min-w-0 flex flex-col h-full">
-        {/* [2026-08-21新設] ヘッダーバー。カルキョンさんの指示「右端にログインユーザ名、
-            一般的な機能(ユーザ情報、パス変更、ログアウト)メニュー実装」に対応。 */}
-        <header className="h-14 shrink-0 border-b border-line bg-surface flex items-center justify-between px-5 md:px-8">
+        <div className="flex-1 min-w-0 flex items-center justify-between px-5 md:px-8">
           <p className="text-sm font-semibold text-ink">{PAGE_TITLE[pathname] ?? ""}</p>
           <div className="relative">
             <button
@@ -211,7 +165,58 @@ export function AppShell({ children }: { children: ReactNode }) {
               </div>
             )}
           </div>
-        </header>
+        </div>
+      </header>
+
+      <div className="flex flex-1 min-h-0">
+        <aside className="w-[240px] shrink-0 bg-surface border-r border-line hidden md:flex md:flex-col">
+          <button
+            onClick={() => {
+              debugLog.event("AppShell", "quick capture button clicked");
+              if (pathname === "/today" || pathname === "/inbox") {
+                window.dispatchEvent(new CustomEvent(FOCUS_CAPTURE_EVENT));
+              } else {
+                router.push("/inbox");
+              }
+            }}
+            className="mx-4 mt-4 mb-2 px-3 py-2.5 rounded-xl bg-ink text-white text-sm font-medium flex items-center gap-2 hover:bg-black transition"
+          >
+            <MicIcon width={15} height={15} />
+            話す・メモする
+            <span className="ml-auto text-[10px] font-mono border border-white/25 text-white/60 rounded px-1.5 py-0.5">
+              C
+            </span>
+          </button>
+
+          <nav className="flex-1 px-3 py-2 space-y-0.5 text-sm overflow-y-auto">
+            {NAV_ITEMS.map((item) => {
+              const active = pathname === item.href;
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.href}
+                  onClick={() => router.push(item.href)}
+                  className={`w-full text-left px-3 py-2 rounded-lg transition flex items-center gap-2.5 ${
+                    active ? "bg-brand-50 text-brand-700 font-semibold" : "text-ink hover:bg-canvas"
+                  }`}
+                >
+                  <Icon width={16} height={16} className={active ? "text-brand-700" : "text-faint"} />
+                  {item.label}
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="px-3 py-4 border-t border-line">
+            <button
+              onClick={() => router.push("/dashboard")}
+              className="w-full text-left px-3 py-2 rounded-lg text-sm text-muted hover:bg-canvas flex items-center gap-2.5"
+            >
+              <SettingsIcon width={16} height={16} className="text-faint" />
+              アカウント設定
+            </button>
+          </div>
+        </aside>
 
         <main className="flex-1 min-w-0 overflow-y-auto">
           <div className="max-w-5xl mx-auto px-5 py-8 md:px-8">{children}</div>
