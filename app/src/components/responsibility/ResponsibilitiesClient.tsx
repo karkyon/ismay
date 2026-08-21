@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { formatRelativeTime } from "@/lib/format";
+import { PertMiniPanel } from "@/components/responsibility/PertMiniPanel";
 import {
   RESPONSIBILITY_TYPES,
   transitionsForType,
@@ -34,6 +35,15 @@ interface DependencyItem {
   title: string;
   status: string;
   type: string;
+}
+
+interface PertNodeItem {
+  id: string;
+  title: string;
+  status: string;
+  type: string;
+  importance: number | null;
+  layer: number;
 }
 
 interface ResponsibilityTagRef {
@@ -145,6 +155,34 @@ const ACTION_LABEL: Record<TransitionAction, string> = {
   CLOSE: "終了する",
 };
 
+/**
+ * [2026-08-21追加] ワイヤーフレームv2で承認済みのボタン色体系を実装へ反映。
+ * 従来は全ボタンが黒塗り(bg-ink)で「どれも同じで見分けづらい」との指摘があった。
+ * 操作の意味(開始=前進/完了=ゴール/中断・延期=一時停止/不要=否定)ごとに色を変える。
+ */
+const ACTION_BUTTON_STYLE: Record<TransitionAction, string> = {
+  START: "bg-blue-600 text-white hover:bg-blue-700",
+  RESUME: "bg-blue-600 text-white hover:bg-blue-700",
+  START_GATHERING: "bg-blue-600 text-white hover:bg-blue-700",
+  START_MONITORING: "bg-blue-600 text-white hover:bg-blue-700",
+  COMPLETE: "bg-safe text-white hover:opacity-90",
+  FULFILL: "bg-safe text-white hover:opacity-90",
+  RESOLVE: "bg-safe text-white hover:opacity-90",
+  DECIDE: "bg-safe text-white hover:opacity-90",
+  MITIGATE: "bg-safe text-white hover:opacity-90",
+  CLOSE: "bg-safe text-white hover:opacity-90",
+  MARK_ACTIVE: "bg-safe text-white hover:opacity-90",
+  PARTIAL_COMPLETE: "bg-brand-50 text-brand-700 border border-brand hover:bg-brand-100",
+  DEFER: "bg-warn-50 text-warn border border-warn/40 hover:bg-warn-50/70",
+  MARK_FOLLOW_UP_DUE: "bg-warn-50 text-warn border border-warn/40 hover:bg-warn-50/70",
+  INTERRUPT: "bg-canvas text-muted border border-line hover:bg-line/40",
+  MARK_AT_RISK: "bg-red-50 text-red-700 border border-red-200 hover:bg-red-100",
+  OCCUR: "bg-red-50 text-red-700 border border-red-200 hover:bg-red-100",
+  BREAK: "bg-red-50 text-red-700 border border-red-200 hover:bg-red-100",
+  MARK_NOT_NEEDED: "bg-transparent text-muted border border-line hover:bg-canvas",
+  REOPEN: "bg-transparent text-muted border border-line hover:bg-canvas",
+};
+
 const STATUS_DOT_STYLE: Record<string, string> = {
   COMPLETED: "bg-safe",
   FULFILLED: "bg-safe",
@@ -177,8 +215,11 @@ export function ResponsibilitiesClient() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ResponsibilityDetail | null>(null);
   const [related, setRelated] = useState<RelatedItem[]>([]);
-  const [parents, setParents] = useState<DependencyItem[]>([]);
-  const [children, setChildren] = useState<DependencyItem[]>([]);
+  // parents/childrenはPertMiniPanel導入により画面には出さなくなったが、APIは後方互換で
+  // 返し続けるため受け皿として残す(将来の別用途やデバッグ確認用)。
+  const [, setParents] = useState<DependencyItem[]>([]);
+  const [, setChildren] = useState<DependencyItem[]>([]);
+  const [pertNodes, setPertNodes] = useState<PertNodeItem[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [quickActingId, setQuickActingId] = useState<string | null>(null);
@@ -240,9 +281,11 @@ export function ResponsibilitiesClient() {
       const body = await depsRes.json();
       setParents(body.data.parents);
       setChildren(body.data.children);
+      setPertNodes(body.data.nodes ?? []);
     } else {
       setParents([]);
       setChildren([]);
+      setPertNodes([]);
     }
     setLoadingDetail(false);
   }, []);
@@ -726,40 +769,6 @@ export function ResponsibilitiesClient() {
                         </button>
                       )}
                     </div>
-                    {selected && (parents.length > 0 || children.length > 0) && (
-                      <div className="ml-4 mb-1 pl-3 border-l-2 border-line space-y-1.5 py-2">
-                        {parents.length > 0 && (
-                          <div>
-                            <p className="text-[10px] font-semibold text-decide mb-1">↥ この完了に必要な前提({parents.length})</p>
-                            {parents.map((p) => (
-                              <button
-                                key={p.id}
-                                onClick={() => selectItem(p.id)}
-                                className="block w-full text-left text-[11px] text-muted hover:text-ink truncate py-0.5"
-                              >
-                                • {p.title}
-                                <span className="text-faint ml-1">({STATUS_LABEL[p.status] ?? p.status})</span>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        {children.length > 0 && (
-                          <div>
-                            <p className="text-[10px] font-semibold text-ai mb-1">↧ これの完了を待っている後続({children.length})</p>
-                            {children.map((c) => (
-                              <button
-                                key={c.id}
-                                onClick={() => selectItem(c.id)}
-                                className="block w-full text-left text-[11px] text-muted hover:text-ink truncate py-0.5"
-                              >
-                                • {c.title}
-                                <span className="text-faint ml-1">({STATUS_LABEL[c.status] ?? c.status})</span>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -891,6 +900,24 @@ export function ResponsibilitiesClient() {
                   </div>
                 </div>
 
+                {/* [2026-08-21追加] 先行・後続タスクを右側パネル内にPERT図として表示。
+                    従来リスト側にテキストで展開していたが「使いづらい」との指摘を受け撤去し、
+                    ここへ統合した(ワイヤーフレームv2で合意済みの配置)。 */}
+                {pertNodes.length > 1 && (
+                  <div className="border-t border-line px-5 py-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs font-semibold text-ink">前提・後続関係(PERT図)</p>
+                      <button
+                        onClick={() => router.push(`/relations?focus=${detail.id}`)}
+                        className="text-[10.5px] text-brand-700 hover:underline"
+                      >
+                        全体を編集 →
+                      </button>
+                    </div>
+                    <PertMiniPanel centerId={detail.id} nodes={pertNodes} onSelect={selectItem} />
+                  </div>
+                )}
+
                 {related.length > 0 && (
                   <div className="border-t border-line bg-ai-50/60 px-5 py-4">
                     <p className="text-xs font-semibold text-ink mb-2">関連する可能性がある責任</p>
@@ -925,7 +952,7 @@ export function ResponsibilitiesClient() {
                         key={action}
                         onClick={() => runTransition(action)}
                         disabled={transitioning}
-                        className="text-xs bg-ink text-white rounded-lg px-3 py-2 disabled:opacity-40 hover:bg-black transition"
+                        className={`text-xs font-semibold rounded-lg px-3 py-2 disabled:opacity-40 transition ${ACTION_BUTTON_STYLE[action] ?? "bg-ink text-white hover:bg-black"}`}
                       >
                         {ACTION_LABEL[action]}
                       </button>
