@@ -16,6 +16,7 @@ const ACCEPTED_AUDIO_EXTENSIONS = ["mp3", "mp4", "m4a", "wav", "webm", "ogg"];
 const ACCEPTED_IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
 
 type Mode = "text" | "audio" | "image";
+type Priority = "REALTIME" | "BATCH";
 
 /**
  * UX原則「Capture First」: 分類・期限なしで10秒以内に保存できる入口。
@@ -35,6 +36,10 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
   const [uploadingImage, setUploadingImage] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [imageDragActive, setImageDragActive] = useState(false);
+  // [2026-08-21追加] カルキョンさんの指示「緊急性が高いのかバッチでいいのか選択させる」に対応。
+  // 音声・画像それぞれ独立して選択できるようにする(タブ切替で選択が保持される)。
+  const [audioPriority, setAudioPriority] = useState<Priority>("REALTIME");
+  const [imagePriority, setImagePriority] = useState<Priority>("REALTIME");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -104,6 +109,7 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
       const form = new FormData();
       form.append("file", file);
       form.append("clientDraftId", generateClientId());
+      form.append("processingPriority", audioPriority);
       const res = await apiFetch("/api/v1/captures/audio", { method: "POST", body: form });
       const body = await res.json().catch(() => null);
       if (!res.ok) {
@@ -148,6 +154,7 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
       const form = new FormData();
       form.append("file", file);
       form.append("clientDraftId", generateClientId());
+      form.append("processingPriority", imagePriority);
       const res = await apiFetch("/api/v1/captures/image", { method: "POST", body: form });
       const body = await res.json().catch(() => null);
       if (!res.ok) {
@@ -240,6 +247,10 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
           </form>
         ) : mode === "audio" ? (
           <div className="p-4">
+            {/* [2026-08-21追加] 緊急度選択。音声は文字起こし(OpenAI)がBatch API非対応のため、
+                節約効果は「AI抽出のみ約50%引き」に限られる旨を明記する(想像で「お得」とだけ
+                書くと誤解を招くため)。 */}
+            <PriorityToggle value={audioPriority} onChange={setAudioPriority} savingsNote="AI抽出のみ約50%引き(文字起こしはバッチ非対応のため変わりません)" />
             <input
               ref={audioInputRef}
               type="file"
@@ -272,6 +283,8 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
         ) : (
           // [2026-08-21追加] 画像OCR取り込みパネル。音声パネルと対称的な構成。
           <div className="p-4">
+            {/* 画像はOCR・AI抽出とも対応(Anthropic)のため、バッチ選択で工程全体が約50%引きになる。 */}
+            <PriorityToggle value={imagePriority} onChange={setImagePriority} savingsNote="OCR・AI抽出の両方が約50%引き(完了まで数分〜最大24時間)" />
             <input
               ref={imageInputRef}
               type="file"
@@ -316,6 +329,49 @@ export function QuickCaptureForm({ onCreated }: { onCreated?: () => void }) {
           保存しました
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * [2026-08-21新設] 緊急度(即時/バッチ)選択トグル。カルキョンさんの指示
+ * 「緊急性が高いのかバッチでいいのか選択させる。試算コストを提示」に対応。
+ * savingsNoteは呼び出し元(音声/画像パネル)ごとに異なる節約率を明示する
+ * (音声はAI抽出のみ約50%引き、画像はOCR・AI抽出とも約50%引き、と実装の非対称性が
+ * あるため、一律「最大50%お得」と表示すると誤解を招く)。
+ */
+function PriorityToggle({
+  value,
+  onChange,
+  savingsNote,
+}: {
+  value: Priority;
+  onChange: (v: Priority) => void;
+  savingsNote: string;
+}) {
+  return (
+    <div className="mb-3">
+      <div className="flex rounded-lg border border-line overflow-hidden text-xs">
+        <button
+          type="button"
+          onClick={() => onChange("REALTIME")}
+          className={`flex-1 py-1.5 font-medium transition ${
+            value === "REALTIME" ? "bg-ink text-white" : "bg-canvas text-muted hover:text-ink"
+          }`}
+        >
+          🚀 急ぎ(即時)
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange("BATCH")}
+          className={`flex-1 py-1.5 font-medium transition border-l border-line ${
+            value === "BATCH" ? "bg-ink text-white" : "bg-canvas text-muted hover:text-ink"
+          }`}
+        >
+          💤 あとでいい(お得)
+        </button>
+      </div>
+      {value === "BATCH" && <p className="text-[11px] text-safe mt-1">{savingsNote}。結果が届くまで数分〜最大24時間かかります。</p>}
     </div>
   );
 }

@@ -13,6 +13,8 @@ interface CaptureListItem {
   rawText: string | null;
   aiSummary: string | null;
   processingStatus: string;
+  /** [2026-08-21追加] REALTIME/BATCH。バッチ待ち中のInbox表示に使う。 */
+  processingPriority: string;
   domainId: string | null;
   sourceCapturedAt: string | null;
   version: number;
@@ -476,6 +478,11 @@ export function InboxClient() {
                           >
                             {SOURCE_TYPE_LABEL[c.sourceType] ?? c.sourceType}
                           </span>
+                          {/* [2026-08-21追加] バッチ選択・未完了時のみ表示。完了(READY/FAILED)後は
+                              通常表示に戻る(バッチだったことを恒久的に主張する情報ではないため)。 */}
+                          {c.processingPriority === "BATCH" && (c.processingStatus === "QUEUED" || c.processingStatus === "PROCESSING") && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-canvas text-faint">💤 バッチ待ち</span>
+                          )}
                           <span className="text-[11px] text-faint">{formatRelativeTime(c.createdAt)}</span>
                         </div>
                       </div>

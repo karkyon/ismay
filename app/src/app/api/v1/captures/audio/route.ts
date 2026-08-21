@@ -20,6 +20,7 @@ import { uploadAudioObject, buildAudioObjectKey } from "@/lib/storage";
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25MB
 const ALLOWED_EXTENSIONS = ["mp3", "mp4", "m4a", "wav", "webm", "ogg"];
+const ALLOWED_PRIORITIES = ["REALTIME", "BATCH"];
 
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
@@ -50,6 +51,11 @@ export async function POST(req: NextRequest) {
   }
 
   const clientDraftId = (formData.get("clientDraftId") as string | null) ?? crypto.randomUUID();
+  // [2026-08-21追加] カルキョンさんの指示「緊急性が高いのかバッチでいいのか選択させる」に対応。
+  // 音声の文字起こし自体(OpenAI)はBatch API非対応のため、この値はAI抽出ステップにのみ
+  // 効果がある(transcribeAudioJob.tsは常に即時実行する)。不正値は黙ってREALTIMEへ丸める。
+  const rawPriority = formData.get("processingPriority") as string | null;
+  const processingPriority = ALLOWED_PRIORITIES.includes(rawPriority ?? "") ? (rawPriority as string) : "REALTIME";
   const { workspaceId, domainId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
 
   // 冪等性(clientDraftId+userで重複投稿防止)。POST /capturesの既存方針と揃える。
@@ -71,6 +77,7 @@ export async function POST(req: NextRequest) {
       createdById: auth.user.userId,
       sourceType: "VOICE",
       processingStatus: "SAVED",
+      processingPriority,
       clientDraftId,
     },
   });

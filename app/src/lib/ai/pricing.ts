@@ -30,22 +30,27 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 };
 
 const MICROS_PER_USD = 1_000_000;
+/** Anthropic/OpenAI共通: Batch APIは標準料金の50%引き(2026-08-21確認、両社共通の仕様)。 */
+const BATCH_DISCOUNT_FACTOR = 0.5;
 
 /**
  * トークン使用量からコスト(costMicros = USD × 1,000,000の整数)を算出する。
  * 未登録モデルの場合はnullを返す(料金表の更新漏れをコスト0円と誤表示しないため)。
+ * @param batch true指定時はBatch API割引(50%引き)を適用する(2026-08-21追加)。
  */
 export function estimateCostMicros(
   modelName: string,
   inputTokens: number | null | undefined,
   outputTokens: number | null | undefined,
+  batch = false,
 ): bigint | null {
   const pricing = MODEL_PRICING[modelName];
   if (!pricing) return null;
   const usd =
     ((inputTokens ?? 0) / 1_000_000) * pricing.inputPerMillionUsd +
     ((outputTokens ?? 0) / 1_000_000) * pricing.outputPerMillionUsd;
-  return BigInt(Math.round(usd * MICROS_PER_USD));
+  const discounted = batch ? usd * BATCH_DISCOUNT_FACTOR : usd;
+  return BigInt(Math.round(discounted * MICROS_PER_USD));
 }
 
 export function microsToUsd(micros: bigint | number | null | undefined): number {

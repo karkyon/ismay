@@ -40,10 +40,27 @@ export interface AiExtractionFailure {
 
 export type AiExtractionOutcome = AiExtractionSuccess | AiExtractionFailure;
 
+/**
+ * [2026-08-21追加] Batch API対応(Anthropic Message Batches、50%引き・完了まで最大24時間)。
+ * すべてのプロバイダーが対応するとは限らないため任意メソッドとする(現状Anthropicのみ実装)。
+ * 呼び出し元(extract.ts)は `ai.submitExtractionBatch` の有無で対応可否を判定する。
+ */
+export type AiBatchSubmitResult = { ok: true; batchId: string } | { ok: false; kind: "TRANSIENT" | "FATAL"; message: string };
+export type AiBatchProcessingStatus = "IN_PROGRESS" | "ENDED" | "CANCELING";
+export type AiBatchCheckResult =
+  | { ok: true; status: AiBatchProcessingStatus; resultsUrl: string | null }
+  | { ok: false; kind: "TRANSIENT" | "FATAL"; message: string };
+
 export interface AiExtractionProvider {
   readonly providerName: string;
   readonly modelName: string;
   readonly promptVersion: string;
   readonly schemaVersion: string;
   extractCandidates(input: AiExtractionInput): Promise<AiExtractionOutcome>;
+  /** Batch APIでの投入。対応プロバイダーのみ実装する。 */
+  submitExtractionBatch?(input: AiExtractionInput): Promise<AiBatchSubmitResult>;
+  /** Batchの進捗確認。 */
+  checkBatch?(batchId: string): Promise<AiBatchCheckResult>;
+  /** Batch完了後の結果取得・パース(extractCandidatesと同じ形のOutcomeを返す)。 */
+  fetchExtractionBatchResult?(resultsUrl: string): Promise<AiExtractionOutcome>;
 }

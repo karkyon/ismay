@@ -30,6 +30,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       audioObjectKey: true,
       imageObjectKey: true,
       processingStatus: true,
+      processingPriority: true,
       domainId: true,
       consentId: true,
       sourceCapturedAt: true,

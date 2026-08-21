@@ -3,7 +3,7 @@ import { debugServer } from "@/lib/debugServer";
 import { ExtractionResultSchema } from "@/lib/ai/schema";
 import { getActiveExtractionProvider } from "@/lib/ai/config";
 import { estimateCostMicros } from "@/lib/ai/pricing";
-import type { AiExtractionProvider, AiExtractionUsage } from "@/lib/ai/provider";
+import type { AiExtractionProvider, AiExtractionOutcome, AiExtractionUsage } from "@/lib/ai/provider";
 
 /**
  * FN-AI-01 責任候補抽出(機能別詳細設計書v1.1 3章「Worker手順」1〜7に対応)。
@@ -21,7 +21,10 @@ const DEFAULT_TIMEZONE = "Asia/Tokyo"; // TBD-10(日本初期提供前提)に対
 export type ExtractionRunResult =
   | { status: "READY"; inferenceCount: number }
   | { status: "FAILED"; reason: string }
-  | { status: "SKIPPED"; reason: string };
+  | { status: "SKIPPED"; reason: string }
+  /** [2026-08-21追加] processingPriority=BATCHのCapture。Anthropic Batchへ投入済みで、
+   *  結果はまだ届いていない。呼び出し元(aiExtractJob.ts)はJobをAWAITING_BATCHへ遷移させる。 */
+  | { status: "BATCH_PENDING"; batchId: string; processingVersion: number };
 
 export async function runExtractionForCapture(captureId: string): Promise<ExtractionRunResult> {
   const capture = await db.capture.findUnique({
@@ -69,6 +72,32 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
     providerName: ai.providerName,
     modelName: ai.modelName,
   });
+
+  // [2026-08-21追加] カルキョンさんの指示「緊急性が高いのかバッチでいいのか選択させる」に対応。
+  // processingPriority=BATCHかつプロバイダーがBatch APIに対応している場合のみバッチ投入する。
+  // 対応していない場合(プロバイダー未対応)は、想定外の課金体系にならないよう黙って
+  // 通常フローへフォールバックせず、REALTIME同様に即時実行する(現状Anthropicのみ登録されて
+  // おり常に対応しているため、実運用でこの分岐に来ることは無い想定)。
+  if (capture.processingPriority === "BATCH" && ai.submitExtractionBatch) {
+    const existingTagsForBatch = await db.tag.findMany({
+      where: { workspaceId: capture.workspaceId, deletedAt: null },
+      select: { name: true },
+      take: 50,
+    });
+    const submitResult = await ai.submitExtractionBatch({
+      rawText: capture.rawText,
+      nowIso: new Date().toISOString(),
+      timezone: DEFAULT_TIMEZONE,
+      existingTagNames: (existingTagsForBatch as { name: string }[]).map((t) => t.name),
+    });
+    if (!submitResult.ok) {
+      await persistFailure(capture.id, processingVersion, ai, `Batch投入失敗: ${submitResult.message}`, undefined, true);
+      return { status: "FAILED", reason: `Batch投入失敗: ${submitResult.message}` };
+    }
+    debugServer.event("extract/runExtractionForCapture", "BATCH_SUBMITTED", { captureId: capture.id, batchId: submitResult.batchId });
+    return { status: "BATCH_PENDING", batchId: submitResult.batchId, processingVersion };
+  }
+
   let lastFailureReason = "";
   let lastUsage: AiExtractionUsage | undefined;
 
@@ -113,6 +142,49 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
   return { status: "FAILED", reason: lastFailureReason };
 }
 
+/**
+ * [2026-08-21追加] processingPriority=BATCHのCaptureについて、Anthropic Batchが
+ * 完了した(processing_status=ended)後に呼ばれる。runExtractionForCaptureの
+ * ループ内で行っていたschema検証〜永続化を、Batch結果1件に対して1回だけ行う
+ * (Batchは再送コストが高いため、同期パスのような複数回リトライは行わない)。
+ *
+ * 呼び出し元(worker/batchPollJob.ts)は、Job.payloadに保存しておいたcaptureIdと
+ * resultsUrlを渡す。Capture.versionのCAS等はrunExtractionForCapture側で既に
+ * PROCESSINGへ遷移済みのため、ここでは行わない(processingVersionを直接渡してもらう)。
+ */
+export async function finalizeBatchExtraction(
+  captureId: string,
+  processingVersion: number,
+  resultsUrl: string,
+): Promise<ExtractionRunResult> {
+  const capture = await db.capture.findUnique({ where: { id: captureId } });
+  if (!capture || capture.deletedAt) {
+    return { status: "SKIPPED", reason: "Captureが存在しないか削除済みです" };
+  }
+
+  const ai = await getActiveExtractionProvider(capture.workspaceId);
+  if (!ai.fetchExtractionBatchResult) {
+    await persistFailure(capture.id, processingVersion, ai, "プロバイダーがBatch結果取得に対応していません", undefined, true);
+    return { status: "FAILED", reason: "プロバイダーがBatch結果取得に対応していません" };
+  }
+
+  const outcome: AiExtractionOutcome = await ai.fetchExtractionBatchResult(resultsUrl);
+  if (!outcome.ok) {
+    await persistFailure(capture.id, processingVersion, ai, outcome.message, outcome.usage, true);
+    return { status: "FAILED", reason: outcome.message };
+  }
+
+  const parsed = ExtractionResultSchema.safeParse(outcome.rawJson);
+  if (!parsed.success) {
+    const reason = `AI_SCHEMA_INVALID: ${parsed.error.issues.map((i) => i.message).join("; ").slice(0, 500)}`;
+    await persistFailure(capture.id, processingVersion, ai, reason, outcome.usage, true);
+    return { status: "FAILED", reason };
+  }
+
+  const inferenceCount = await persistSuccess(capture.id, processingVersion, ai, parsed.data, outcome.usage, true);
+  return { status: "READY", inferenceCount };
+}
+
 interface PolicyCheckResult {
   allowed: boolean;
   reason: string;
@@ -153,6 +225,7 @@ async function persistSuccess(
   ai: AiExtractionProvider,
   result: { candidates: import("@/lib/ai/schema").ResponsibilityCandidate[]; captureSummary?: string },
   usage: AiExtractionUsage,
+  batch = false,
 ): Promise<number> {
   return db.$transaction(async (tx) => {
     const run = await tx.aiRun.create({
@@ -164,9 +237,10 @@ async function persistSuccess(
         schemaVersion: ai.schemaVersion,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
-        costMicros: estimateCostMicros(ai.modelName, usage.inputTokens, usage.outputTokens),
+        costMicros: estimateCostMicros(ai.modelName, usage.inputTokens, usage.outputTokens, batch),
         latencyMs: usage.latencyMs,
         status: "SUCCEEDED",
+        batch,
         finishedAt: new Date(),
       },
     });
@@ -226,6 +300,7 @@ async function persistFailure(
   ai: AiExtractionProvider,
   reason: string,
   usage: AiExtractionUsage | undefined,
+  batch = false,
 ): Promise<void> {
   await db.$transaction(async (tx) => {
     await tx.aiRun.create({
@@ -237,9 +312,10 @@ async function persistFailure(
         schemaVersion: ai.schemaVersion,
         inputTokens: usage?.inputTokens,
         outputTokens: usage?.outputTokens,
-        costMicros: usage ? estimateCostMicros(ai.modelName, usage.inputTokens, usage.outputTokens) : null,
+        costMicros: usage ? estimateCostMicros(ai.modelName, usage.inputTokens, usage.outputTokens, batch) : null,
         latencyMs: usage?.latencyMs,
         status: "FAILED",
+        batch,
         errorCode: reason.slice(0, 200),
         finishedAt: new Date(),
       },

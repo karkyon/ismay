@@ -13,6 +13,8 @@ import { runExtractionForCapture } from "@/lib/ai/extract";
 
 const JOB_BATCH_SIZE = 3;
 const BASE_BACKOFF_SECONDS = 30;
+/** [2026-08-21追加] Anthropic Batch結果のポーリング間隔。batchPollJob.tsと共通の値。 */
+const BATCH_POLL_INTERVAL_MS = 2 * 60 * 1000;
 
 export async function processAiExtractJobs(): Promise<{ processed: number }> {
   const now = new Date();
@@ -53,6 +55,21 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
         captureId,
         status: result.status,
       });
+      if (result.status === "BATCH_PENDING") {
+        // [2026-08-21追加] Anthropic Batchへ投入済み。Jobを完了扱いにせず、
+        // AWAITING_BATCHへ遷移させてbatchPollJob.tsのポーリング対象にする。
+        await db.job.update({
+          where: { id: job.id },
+          data: {
+            status: "AWAITING_BATCH",
+            payload: { captureId, batchId: result.batchId, processingVersion: result.processingVersion },
+            nextRunAt: new Date(Date.now() + BATCH_POLL_INTERVAL_MS),
+          },
+        });
+        debugServer.state("Worker/aiExtractJob", "Job.status", { jobId: job.id, status: "AWAITING_BATCH" });
+        processed++;
+        continue;
+      }
       await db.job.update({
         where: { id: job.id },
         data: {

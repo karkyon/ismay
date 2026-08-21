@@ -3,6 +3,7 @@ import { debugServer } from "@/lib/debugServer";
 import { downloadImageObject } from "@/lib/storage";
 import { getActiveOcrProvider } from "@/lib/ai/config";
 import { estimateCostMicros } from "@/lib/ai/pricing";
+import type { AiOcrOutcome } from "@/lib/ai/ocrProvider";
 
 /**
  * jobs テーブルの OCR_IMAGE ジョブをポーリング処理する(2026-08-21新設)。
@@ -24,6 +25,8 @@ const JOB_BATCH_SIZE = 2; // 画像も文字起こしと同様に処理が重い
 const BASE_BACKOFF_SECONDS = 30;
 const PROMPT_VERSION = "image-ocr-v1";
 const SCHEMA_VERSION = "n/a"; // OCRは構造化出力ではないため、抽出プロンプトと違いスキーマバージョンの概念が無い
+/** [2026-08-21追加] Anthropic Batch結果のポーリング間隔。batchPollJob.tsと共通の値。 */
+const BATCH_POLL_INTERVAL_MS = 2 * 60 * 1000;
 
 export async function processOcrImageJobs(): Promise<{ processed: number }> {
   const now = new Date();
@@ -63,6 +66,21 @@ export async function processOcrImageJobs(): Promise<{ processed: number }> {
         captureId,
         status: result.status,
       });
+      if (result.status === "BATCH_PENDING") {
+        // [2026-08-21追加] Anthropic Batchへ投入済み。Jobを完了扱いにせず、
+        // AWAITING_BATCHへ遷移させてbatchPollJob.tsのポーリング対象にする。
+        await db.job.update({
+          where: { id: job.id },
+          data: {
+            status: "AWAITING_BATCH",
+            payload: { captureId, batchId: result.batchId, processingVersion: result.processingVersion },
+            nextRunAt: new Date(Date.now() + BATCH_POLL_INTERVAL_MS),
+          },
+        });
+        debugServer.state("Worker/ocrImageJob", "Job.status", { jobId: job.id, status: "AWAITING_BATCH" });
+        processed++;
+        continue;
+      }
       await db.job.update({
         where: { id: job.id },
         data: {
@@ -91,7 +109,12 @@ export async function processOcrImageJobs(): Promise<{ processed: number }> {
   return { processed };
 }
 
-type OcrRunResult = { status: "READY" } | { status: "FAILED"; reason: string } | { status: "SKIPPED"; reason: string };
+type OcrRunResult =
+  | { status: "READY" }
+  | { status: "FAILED"; reason: string }
+  | { status: "SKIPPED"; reason: string }
+  /** [2026-08-21追加] processingPriority=BATCHのCapture。Anthropic Batchへ投入済み。 */
+  | { status: "BATCH_PENDING"; batchId: string; processingVersion: number };
 
 async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
   const capture = await db.capture.findUnique({ where: { id: captureId } });
@@ -113,6 +136,32 @@ async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
   const processingVersion = capture.version + 1;
 
   const provider = await getActiveOcrProvider(capture.workspaceId);
+
+  // [2026-08-21追加] カルキョンさんの指示「緊急性が高いのかバッチでいいのか選択させる」に対応。
+  // extract.ts側の同種の分岐と同じ方針(プロバイダー未対応時は即時実行にフォールバック)。
+  if (capture.processingPriority === "BATCH" && provider.submitOcrBatch) {
+    const imageBufferForBatch = await downloadImageObject(capture.imageObjectKey).catch((err) => {
+      debugServer.error("ocrImageJob", "MinIOからのダウンロードに失敗(Batch投入前)", err);
+      return null;
+    });
+    if (!imageBufferForBatch) {
+      await markCaptureFailed(capture.id, processingVersion, "画像ファイルの取得に失敗しました");
+      return { status: "FAILED", reason: "画像ファイルの取得に失敗しました" };
+    }
+    const fileNameForBatch = capture.imageObjectKey.split("/").pop() ?? "image";
+    const submitResult = await provider.submitOcrBatch({
+      imageBuffer: imageBufferForBatch,
+      contentType: guessImageContentType(fileNameForBatch),
+      fileName: fileNameForBatch,
+    });
+    if (!submitResult.ok) {
+      await persistOcrFailure(capture.id, processingVersion, provider, `Batch投入失敗: ${submitResult.message}`, undefined, true);
+      return { status: "FAILED", reason: `Batch投入失敗: ${submitResult.message}` };
+    }
+    debugServer.event("ocrImageJob", "BATCH_SUBMITTED", { captureId: capture.id, batchId: submitResult.batchId });
+    return { status: "BATCH_PENDING", batchId: submitResult.batchId, processingVersion };
+  }
+
   const imageBuffer = await downloadImageObject(capture.imageObjectKey).catch((err) => {
     debugServer.error("ocrImageJob", "MinIOからのダウンロードに失敗", err);
     return null;
@@ -129,12 +178,43 @@ async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
     fileName,
   });
 
+  return applyOcrOutcome(capture.id, capture.workspaceId, processingVersion, provider, outcome, false);
+}
+
+/**
+ * [2026-08-21追加] processingPriority=BATCHのCaptureについて、Anthropic Batchが
+ * 完了した後に呼ばれる。extract.tsのfinalizeBatchExtractionと対称的な設計。
+ */
+export async function finalizeOcrBatchResult(
+  captureId: string,
+  workspaceId: string,
+  processingVersion: number,
+  resultsUrl: string,
+): Promise<OcrRunResult> {
+  const provider = await getActiveOcrProvider(workspaceId);
+  if (!provider.fetchOcrBatchResult) {
+    await persistOcrFailure(captureId, processingVersion, provider, "プロバイダーがBatch結果取得に対応していません", undefined, true);
+    return { status: "FAILED", reason: "プロバイダーがBatch結果取得に対応していません" };
+  }
+  const outcome = await provider.fetchOcrBatchResult(resultsUrl);
+  return applyOcrOutcome(captureId, workspaceId, processingVersion, provider, outcome, true);
+}
+
+/** OCR結果(同期・Batch共通)をAiRunへ記録し、成功時はCapture更新+AI抽出キューへの自動投入まで行う。 */
+async function applyOcrOutcome(
+  captureId: string,
+  workspaceId: string,
+  processingVersion: number,
+  provider: { providerName: string; modelName: string },
+  outcome: AiOcrOutcome,
+  batch: boolean,
+): Promise<OcrRunResult> {
   // AiRun.promptVersion/schemaVersionはschema.prisma上NOT NULL。
   // transcribeAudioJob.tsで実サーバーのtscにより発覚した不備(2026-08-21修正)を
   // 踏まえ、ここでも必ず設定する。
   const aiRun = await db.aiRun.create({
     data: {
-      captureId: capture.id,
+      captureId,
       provider: provider.providerName,
       model: provider.modelName,
       promptVersion: PROMPT_VERSION,
@@ -143,16 +223,19 @@ async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
       inputTokens: outcome.ok ? outcome.usage.inputTokens : (outcome.usage?.inputTokens ?? null),
       outputTokens: outcome.ok ? outcome.usage.outputTokens : (outcome.usage?.outputTokens ?? null),
       latencyMs: outcome.ok ? outcome.usage.latencyMs : (outcome.usage?.latencyMs ?? null),
-      costMicros: outcome.ok ? estimateCostMicros(provider.modelName, outcome.usage.inputTokens, outcome.usage.outputTokens) : null,
+      costMicros: outcome.ok
+        ? estimateCostMicros(provider.modelName, outcome.usage.inputTokens, outcome.usage.outputTokens, batch)
+        : null,
       errorCode: outcome.ok ? null : outcome.message,
+      batch,
       startedAt: new Date(),
       finishedAt: new Date(),
     },
   });
-  debugServer.event("ocrImageJob", "AiRun記録", { aiRunId: aiRun.id, ok: outcome.ok });
+  debugServer.event("ocrImageJob", "AiRun記録", { aiRunId: aiRun.id, ok: outcome.ok, batch });
 
   if (!outcome.ok) {
-    await markCaptureFailed(capture.id, processingVersion, outcome.message);
+    await markCaptureFailed(captureId, processingVersion, outcome.message);
     return { status: "FAILED", reason: outcome.message };
   }
 
@@ -160,15 +243,15 @@ async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
   // (transcribeAudioJob.tsと同じ「保存→自動解析」チェーンを画像でも実現する)。
   await db.$transaction(async (tx) => {
     const updated = await tx.capture.update({
-      where: { id: capture.id },
+      where: { id: captureId },
       data: { rawText: outcome.text, processingStatus: "QUEUED", version: { increment: 1 } },
     });
     await tx.eventLog.create({
       data: {
         aggregateType: "Capture",
-        aggregateId: capture.id,
+        aggregateId: captureId,
         eventType: "CAPTURE_OCR_COMPLETED",
-        afterJson: { textLength: outcome.text.length },
+        afterJson: { textLength: outcome.text.length, batch },
         actorType: "SYSTEM",
       },
     });
@@ -176,15 +259,45 @@ async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
       data: {
         eventName: "CaptureAnalysisRequested.v1",
         eventVersion: "1",
-        aggregateId: capture.id,
+        aggregateId: captureId,
         aggregateVersion: updated.version,
-        payload: { captureId: capture.id, workspaceId: capture.workspaceId, sourceType: "IMAGE" },
+        payload: { captureId, workspaceId, sourceType: "IMAGE" },
       },
     });
   });
-  debugServer.event("ocrImageJob", "OCR完了・AI抽出キューへ自動投入", { captureId: capture.id });
+  debugServer.event("ocrImageJob", "OCR完了・AI抽出キューへ自動投入", { captureId });
 
   return { status: "READY" };
+}
+
+/** Batch投入自体が失敗した場合など、outcomeを経由しない失敗をAiRunへ記録しCaptureをFAILEDにする。 */
+async function persistOcrFailure(
+  captureId: string,
+  processingVersion: number,
+  provider: { providerName: string; modelName: string },
+  reason: string,
+  usage: { inputTokens: number; outputTokens: number; latencyMs: number } | undefined,
+  batch: boolean,
+): Promise<void> {
+  await db.aiRun.create({
+    data: {
+      captureId,
+      provider: provider.providerName,
+      model: provider.modelName,
+      promptVersion: PROMPT_VERSION,
+      schemaVersion: SCHEMA_VERSION,
+      status: "FAILED",
+      inputTokens: usage?.inputTokens ?? null,
+      outputTokens: usage?.outputTokens ?? null,
+      latencyMs: usage?.latencyMs ?? null,
+      costMicros: usage ? estimateCostMicros(provider.modelName, usage.inputTokens, usage.outputTokens, batch) : null,
+      errorCode: reason.slice(0, 200),
+      batch,
+      startedAt: new Date(),
+      finishedAt: new Date(),
+    },
+  });
+  await markCaptureFailed(captureId, processingVersion, reason);
 }
 
 async function markCaptureFailed(captureId: string, expectedVersion: number, reason: string): Promise<void> {

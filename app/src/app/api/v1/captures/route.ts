@@ -219,6 +219,7 @@ export async function GET(req: NextRequest) {
       rawText: true,
       aiSummary: true,
       processingStatus: true,
+      processingPriority: true,
       domainId: true,
       sourceCapturedAt: true,
       version: true,

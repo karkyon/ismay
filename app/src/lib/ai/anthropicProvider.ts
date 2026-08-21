@@ -3,7 +3,10 @@ import type {
   AiExtractionInput,
   AiExtractionOutcome,
   AiExtractionProvider,
+  AiBatchSubmitResult,
+  AiBatchCheckResult,
 } from "@/lib/ai/provider";
+import { submitAnthropicBatch, checkAnthropicBatchStatus, fetchAnthropicBatchResult } from "@/lib/ai/anthropicBatch";
 
 // TBD-05(2026-08-18解消): AI提供事業者はAnthropic Claudeに確定。
 // システム基本設計書v1.2 9.1節: 責任候補抽出(FN-AI-01)はHaiku 4.5階層を使用。
@@ -59,6 +62,48 @@ function buildUserMessage(input: AiExtractionInput): string {
   return lines.join("\n");
 }
 
+function buildRequestParams(model: string, input: AiExtractionInput): Record<string, unknown> {
+  return {
+    model,
+    max_tokens: 4096,
+    temperature: 0,
+    system: SYSTEM_PROMPT,
+    messages: [{ role: "user", content: buildUserMessage(input) }],
+    tools: [
+      {
+        name: TOOL_NAME,
+        description: "抽出した責任候補一覧を構造化して返す",
+        input_schema: EXTRACTION_TOOL_JSON_SCHEMA,
+      },
+    ],
+    tool_choice: { type: "tool", name: TOOL_NAME },
+  };
+}
+
+/** Messages API応答(同期呼び出し・Batch結果の両方で同じ形)をAiExtractionOutcomeへ変換する。 */
+function parseMessageBody(
+  body: { content?: Array<{ type: string; name?: string; input?: unknown }>; usage?: { input_tokens?: number; output_tokens?: number }; stop_reason?: string },
+  latencyMs: number,
+): AiExtractionOutcome {
+  const toolUseBlock = body.content?.find((b) => b.type === "tool_use" && b.name === TOOL_NAME);
+  const usage = {
+    inputTokens: body.usage?.input_tokens ?? 0,
+    outputTokens: body.usage?.output_tokens ?? 0,
+    latencyMs,
+  };
+
+  if (!toolUseBlock) {
+    return {
+      kind: "STRUCTURAL",
+      ok: false,
+      message: `モデルが${TOOL_NAME}ツールを使用しませんでした(stop_reason=${body.stop_reason ?? "unknown"})`,
+      usage,
+    };
+  }
+
+  return { ok: true, rawJson: toolUseBlock.input, usage };
+}
+
 export function createAnthropicExtractionProvider(opts?: {
   apiKey?: string;
   model?: string;
@@ -94,21 +139,7 @@ export function createAnthropicExtractionProvider(opts?: {
             "x-api-key": apiKey,
             "anthropic-version": ANTHROPIC_VERSION,
           },
-          body: JSON.stringify({
-            model,
-            max_tokens: 4096,
-            temperature: 0,
-            system: SYSTEM_PROMPT,
-            messages: [{ role: "user", content: buildUserMessage(input) }],
-            tools: [
-              {
-                name: TOOL_NAME,
-                description: "抽出した責任候補一覧を構造化して返す",
-                input_schema: EXTRACTION_TOOL_JSON_SCHEMA,
-              },
-            ],
-            tool_choice: { type: "tool", name: TOOL_NAME },
-          }),
+          body: JSON.stringify(buildRequestParams(model, input)),
           signal: controller.signal,
         });
       } catch (err) {
@@ -140,25 +171,49 @@ export function createAnthropicExtractionProvider(opts?: {
         usage?: { input_tokens?: number; output_tokens?: number };
         stop_reason?: string;
       };
+      return parseMessageBody(body, latencyMs);
+    },
 
-      const toolUseBlock = body.content?.find((b) => b.type === "tool_use" && b.name === TOOL_NAME);
-      const usage: import("@/lib/ai/provider").AiExtractionUsage = {
-        inputTokens: body.usage?.input_tokens ?? 0,
-        outputTokens: body.usage?.output_tokens ?? 0,
-        latencyMs,
-      };
+    // ---- Batch API対応(2026-08-21追加) ----
 
-      if (!toolUseBlock) {
-        // モデルがtool_useを使わなかった: 同一プロンプトでの再試行に価値がある構造的失敗
-        return {
-          kind: "STRUCTURAL",
-          ok: false,
-          message: `モデルが${TOOL_NAME}ツールを使用しませんでした(stop_reason=${body.stop_reason ?? "unknown"})`,
-          usage,
-        };
+    async submitExtractionBatch(input: AiExtractionInput): Promise<AiBatchSubmitResult> {
+      if (!apiKey) {
+        return { ok: false, kind: "FATAL", message: "ANTHROPIC_API_KEYが未設定です" };
       }
+      return submitAnthropicBatch(apiKey, buildRequestParams(model, input));
+    },
 
-      return { ok: true, rawJson: toolUseBlock.input, usage };
+    async checkBatch(batchId: string): Promise<AiBatchCheckResult> {
+      if (!apiKey) {
+        return { ok: false, kind: "FATAL", message: "ANTHROPIC_API_KEYが未設定です" };
+      }
+      const result = await checkAnthropicBatchStatus(apiKey, batchId);
+      if (!result.ok) return result;
+      const statusMap: Record<string, "IN_PROGRESS" | "ENDED" | "CANCELING"> = {
+        in_progress: "IN_PROGRESS",
+        ended: "ENDED",
+        canceling: "CANCELING",
+      };
+      return { ok: true, status: statusMap[result.processingStatus] ?? "IN_PROGRESS", resultsUrl: result.resultsUrl };
+    },
+
+    async fetchExtractionBatchResult(resultsUrl: string): Promise<AiExtractionOutcome> {
+      if (!apiKey) {
+        return { ok: false, kind: "FATAL", message: "ANTHROPIC_API_KEYが未設定です" };
+      }
+      const fetched = await fetchAnthropicBatchResult(apiKey, resultsUrl);
+      if (!fetched.ok) {
+        return { ok: false, kind: fetched.kind, message: fetched.message };
+      }
+      const { result } = fetched.line;
+      if (result.type === "succeeded") {
+        // Batch結果にはリクエスト単位のlatencyが含まれないため0とする(レポート上の目安値)。
+        return parseMessageBody(result.message, 0);
+      }
+      if (result.type === "errored") {
+        return { ok: false, kind: "FATAL", message: `Batch内エラー: ${result.error.message}` };
+      }
+      return { ok: false, kind: "FATAL", message: `Batchリクエストが${result.type}になりました` };
     },
   };
 }

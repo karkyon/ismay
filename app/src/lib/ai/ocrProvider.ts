@@ -28,4 +28,8 @@ export interface AiOcrProvider {
   providerName: string;
   modelName: string;
   extractText(input: AiOcrInput): Promise<AiOcrOutcome>;
+  /** [2026-08-21追加] Batch API対応。対応プロバイダーのみ実装する(現状Anthropicのみ)。 */
+  submitOcrBatch?(input: AiOcrInput): Promise<import("@/lib/ai/provider").AiBatchSubmitResult>;
+  checkBatch?(batchId: string): Promise<import("@/lib/ai/provider").AiBatchCheckResult>;
+  fetchOcrBatchResult?(resultsUrl: string): Promise<AiOcrOutcome>;
 }

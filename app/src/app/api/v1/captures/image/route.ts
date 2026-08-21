@@ -21,6 +21,7 @@ import { uploadImageObject, buildImageObjectKey } from "@/lib/storage";
 
 const MAX_FILE_SIZE_BYTES = 7 * 1024 * 1024; // 7MB(base64後 約9.3MB、Claude API上限10MB以内)
 const ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
+const ALLOWED_PRIORITIES = ["REALTIME", "BATCH"];
 const EXTENSION_TO_CONTENT_TYPE: Record<string, string> = {
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -58,6 +59,10 @@ export async function POST(req: NextRequest) {
   }
 
   const clientDraftId = (formData.get("clientDraftId") as string | null) ?? crypto.randomUUID();
+  // [2026-08-21追加] カルキョンさんの指示「緊急性が高いのかバッチでいいのか選択させる」に対応。
+  // 画像はOCR・AI抽出の両方がAnthropicのため、BATCH選択時は両ステップとも50%引きが効く。
+  const rawPriority = formData.get("processingPriority") as string | null;
+  const processingPriority = ALLOWED_PRIORITIES.includes(rawPriority ?? "") ? (rawPriority as string) : "REALTIME";
   const { workspaceId, domainId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
 
   // 冪等性(clientDraftId+userで重複投稿防止)。POST /captures/audioと同じ方針。
@@ -77,6 +82,7 @@ export async function POST(req: NextRequest) {
       createdById: auth.user.userId,
       sourceType: "IMAGE",
       processingStatus: "SAVED",
+      processingPriority,
       clientDraftId,
     },
   });

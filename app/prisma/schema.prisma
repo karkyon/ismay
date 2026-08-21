@@ -176,6 +176,11 @@ model Capture {
   language           String    @default("ja-JP")
   /// SAVED/QUEUED/PROCESSING/READY/FAILED
   processingStatus   String    @default("SAVED") @map("processing_status")
+  /// 新設(2026-08-21): REALTIME(即時)/BATCH(Anthropic Batch API、最大50%引き・完了まで
+  /// 最大24時間)。ユーザーが取り込み時点で選択する(カルキョンさんの指示「緊急性の
+  /// 高いのかバッチでいいのか選択させる」に対応)。音声の文字起こし(OpenAI)はBatch API
+  /// 非対応のため、この列の値に関わらず常に即時実行する(OCR・AI抽出のみが対象)。
+  processingPriority String    @default("REALTIME") @map("processing_priority")
   sourceCapturedAt   DateTime? @map("source_captured_at")
   consentId          String?   @map("consent_id")
   consent            Consent?  @relation(fields: [consentId], references: [id])
@@ -494,6 +499,9 @@ model AiRun {
   /// PENDING/SUCCEEDED/FAILED [推論]
   status         String    @default("PENDING")
   errorCode      String?   @map("error_code")
+  /// 新設(2026-08-21): Anthropic Batch API経由の実行はtrue(料金は50%引きで
+  /// costMicros算出済み)。レポート・監査用に区別できるようにする。
+  batch          Boolean   @default(false)
   startedAt      DateTime  @default(now()) @map("started_at")
   finishedAt     DateTime? @map("finished_at")
 
