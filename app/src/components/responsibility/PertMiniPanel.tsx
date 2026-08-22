@@ -52,7 +52,7 @@ export function PertMiniPanel({
   if (nodes.length <= 1) {
     return (
       <p className="text-xs text-faint px-1 py-3">
-        前提・後続関係が設定されていません。「関係図」ページでドラッグして関係を作成できます。
+        前提・後続関係が設定されていません。上の「+ 関連タスクを追加」からこの画面で追加するか、「関係図」ページでドラッグして作成できます。
       </p>
     );
   }

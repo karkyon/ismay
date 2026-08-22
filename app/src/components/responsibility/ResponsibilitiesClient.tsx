@@ -240,6 +240,12 @@ export function ResponsibilitiesClient() {
   const [, setParents] = useState<DependencyItem[]>([]);
   const [, setChildren] = useState<DependencyItem[]>([]);
   const [pertNodes, setPertNodes] = useState<PertNodeItem[]>([]);
+  // [2026-08-22追加] カルキョンさんの指摘「関連性の無い独立したタスクでもPERT図を編集し
+  // 関連性を後から編集できるようにしろ」に対応。従来はpertNodes.length<=1(=関連ゼロ)の
+  // 場合、PERT図セクション自体が非表示になり、この画面から一切関係を追加できなかった。
+  const [addRelationOpen, setAddRelationOpen] = useState(false);
+  const [addingRelation, setAddingRelation] = useState(false);
+  const [addRelationError, setAddRelationError] = useState("");
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [quickActingId, setQuickActingId] = useState<string | null>(null);
@@ -442,6 +448,58 @@ export function ResponsibilitiesClient() {
     return counts;
   }, [items]);
   const availableTypes = RESPONSIBILITY_TYPES.filter((t) => (typeCounts[t] ?? 0) > 0);
+
+  // [2026-08-22新設] フローティング「関連タスクを追加」メニュー用。現在のPERT図に
+  // 既に含まれる(=関連済みの)タスクと自分自身を除外し、残りを元メモ(Capture)ごとに
+  // グルーピングする。RelationGraphClient.tsxのaddableGroupsと同じ考え方。
+  const addableGroups = useMemo(() => {
+    if (!detail) return [];
+    const excludeIds = new Set<string>([detail.id, ...pertNodes.map((n) => n.id)]);
+    const map = new Map<string, { label: string; items: ResponsibilityListItem[] }>();
+    for (const it of items) {
+      if (excludeIds.has(it.id)) continue;
+      const key = it.originCaptureId ?? "__none__";
+      const label = it.originCapture
+        ? it.originCapture.aiSummary ||
+          it.originCapture.rawText?.slice(0, 24) ||
+          SOURCE_TYPE_LABEL_SHORT[it.originCapture.sourceType] ||
+          "メモ"
+        : "手動作成(元メモなし)";
+      const existing = map.get(key);
+      if (existing) {
+        existing.items.push(it);
+      } else {
+        map.set(key, { label, items: [it] });
+      }
+    }
+    return Array.from(map.entries()).map(([key, v]) => ({ key, ...v }));
+  }, [items, pertNodes, detail]);
+
+  async function addRelation(otherId: string, direction: "prerequisite" | "successor") {
+    if (!detail) return;
+    setAddingRelation(true);
+    setAddRelationError("");
+    // direction="prerequisite": otherIdがこのタスクの前提(先に完了させる側)。
+    // direction="successor": このタスクがotherIdの前提になる(このタスクが先)。
+    // fromId=前提側、toId=後続側というAPIの向きに合わせる(responsibility-relations/route.ts参照)。
+    const body =
+      direction === "prerequisite" ? { fromId: otherId, toId: detail.id } : { fromId: detail.id, toId: otherId };
+    try {
+      const res = await apiFetch("/api/v1/responsibility-relations", { method: "POST", body: JSON.stringify(body) });
+      if (res.ok) {
+        await loadDetail(detail.id);
+        await loadList();
+        setAddRelationOpen(false);
+      } else {
+        const b = await res.json().catch(() => null);
+        setAddRelationError(b?.error?.message ?? "関連付けに失敗しました");
+      }
+    } catch {
+      setAddRelationError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
+    } finally {
+      setAddingRelation(false);
+    }
+  }
 
   const visibleItems = useMemo(() => {
     const filtered = items.filter((i) => {
@@ -1016,11 +1074,25 @@ export function ResponsibilitiesClient() {
 
                 {/* [2026-08-21追加] 先行・後続タスクを右側パネル内にPERT図として表示。
                     従来リスト側にテキストで展開していたが「使いづらい」との指摘を受け撤去し、
-                    ここへ統合した(ワイヤーフレームv2で合意済みの配置)。 */}
-                {pertNodes.length > 1 && (
-                  <div className="border-t border-line px-5 py-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs font-semibold text-ink">前提・後続関係(PERT図)</p>
+                    ここへ統合した(ワイヤーフレームv2で合意済みの配置)。
+                    [2026-08-22修正] 従来pertNodes.length>1の場合のみこのセクション自体を
+                    表示していたため、関連が一件も無い(孤立した)タスクではPERT図欄が
+                    画面に一切現れず、この画面から関係を追加する手段が無かった。
+                    カルキョンさんの指摘「一つの関連性もないタスクでもPERT図を編集し
+                    関連性を後から編集できるようにしろ」に対応し、常時表示に変更した。 */}
+                <div className="border-t border-line px-5 py-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-semibold text-ink">前提・後続関係(PERT図)</p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setAddRelationError("");
+                          setAddRelationOpen(true);
+                        }}
+                        className="text-[10.5px] text-ink border border-line rounded-lg px-2.5 py-1 hover:bg-canvas"
+                      >
+                        + 関連タスクを追加
+                      </button>
                       <button
                         onClick={() => router.push(`/relations?focus=${detail.id}`)}
                         className="text-[10.5px] text-brand-700 hover:underline"
@@ -1028,7 +1100,66 @@ export function ResponsibilitiesClient() {
                         全体を編集 →
                       </button>
                     </div>
-                    <PertMiniPanel centerId={detail.id} nodes={pertNodes} onSelect={selectItem} />
+                  </div>
+                  <PertMiniPanel centerId={detail.id} nodes={pertNodes} onSelect={selectItem} />
+                </div>
+
+                {/* [2026-08-22新設] フローティング「関連タスクを追加」メニュー。元メモ(Capture)
+                    ごとにグルーピングして一覧し、前提/後続のどちらとして追加するか選べる。 */}
+                {addRelationOpen && (
+                  <div
+                    className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-6"
+                    onClick={() => setAddRelationOpen(false)}
+                  >
+                    <div
+                      className="bg-surface rounded-2xl shadow-2xl w-full max-w-lg max-h-[75vh] flex flex-col p-5"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-center justify-between mb-3 shrink-0">
+                        <p className="text-sm font-semibold text-ink">関連タスクを追加</p>
+                        <button
+                          onClick={() => setAddRelationOpen(false)}
+                          className="text-xs border border-line rounded-lg px-3 py-1.5 hover:bg-canvas"
+                        >
+                          閉じる ✕
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-faint mb-3">
+                        元メモごとに一覧しています。「前提」はこのタスクより先に完了させる作業、「後続」はこのタスクの後に行う作業として関連付けます。
+                      </p>
+                      <div className="flex-1 min-h-0 overflow-y-auto space-y-4">
+                        {addableGroups.length === 0 && <p className="text-xs text-faint">追加できるタスクがありません。</p>}
+                        {addableGroups.map((g) => (
+                          <div key={g.key}>
+                            <p className="text-[10px] text-faint font-mono uppercase tracking-wide mb-1">{g.label}</p>
+                            <div className="space-y-1">
+                              {g.items.map((item) => (
+                                <div key={item.id} className="flex items-center gap-1.5">
+                                  <span className="flex-1 text-xs px-2.5 py-1.5 rounded-lg border border-line truncate">
+                                    {item.title}
+                                  </span>
+                                  <button
+                                    onClick={() => addRelation(item.id, "prerequisite")}
+                                    disabled={addingRelation}
+                                    className="text-[10px] border border-line rounded-lg px-2 py-1.5 hover:bg-canvas shrink-0 disabled:opacity-40"
+                                  >
+                                    前提にする
+                                  </button>
+                                  <button
+                                    onClick={() => addRelation(item.id, "successor")}
+                                    disabled={addingRelation}
+                                    className="text-[10px] border border-line rounded-lg px-2 py-1.5 hover:bg-canvas shrink-0 disabled:opacity-40"
+                                  >
+                                    後続にする
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      {addRelationError && <p className="text-xs text-red-600 mt-2 shrink-0">{addRelationError}</p>}
+                    </div>
                   </div>
                 )}
 
