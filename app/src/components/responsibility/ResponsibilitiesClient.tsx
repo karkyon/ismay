@@ -1268,16 +1268,22 @@ export function ResponsibilitiesClient() {
                       </div>
                     </div>
                   ) : (
-                    <div className="group relative">
-                      <p className="text-base font-serif leading-relaxed">{detail.title}</p>
-                      {detail.description && (
-                        <p className="text-sm text-muted whitespace-pre-wrap mt-1">{detail.description}</p>
-                      )}
+                    // [2026-08-22修正] カルキョンさんの指摘「これらのパラメータはどこで編集するんじゃ」に対応。
+                    // 従来は`opacity-0 group-hover:opacity-100`でマウスホバー時のみ編集ボタンが
+                    // 現れる実装になっており、ホバーしない限り編集ボタンの存在自体が画面から
+                    // 一切見えない(発見不可能な)UIになっていた。常時表示のボタンに変更する。
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-base font-serif leading-relaxed">{detail.title}</p>
+                        {detail.description && (
+                          <p className="text-sm text-muted whitespace-pre-wrap mt-1">{detail.description}</p>
+                        )}
+                      </div>
                       <button
                         onClick={startEditing}
-                        className="absolute top-0 right-0 text-[11px] text-faint opacity-0 group-hover:opacity-100 border border-line rounded-md px-2 py-1 hover:text-ink hover:border-ink transition"
+                        className="shrink-0 text-[11px] text-muted border border-line rounded-md px-2.5 py-1.5 hover:text-ink hover:border-ink hover:bg-canvas transition"
                       >
-                        編集する
+                        ✎ 編集する
                       </button>
                     </div>
                   )}
