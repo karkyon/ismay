@@ -118,6 +118,7 @@ model Workspace {
   aiProviderConfigs AiProviderConfig[]
   aiProviderCredentials AiProviderCredential[]
   tags Tag[]
+  cycles Cycle[]
 
   @@map("workspaces")
 }
@@ -297,6 +298,7 @@ model Responsibility {
   evidences        Evidence[]
   embedding        ResponsibilityEmbedding?
   tags             ResponsibilityTag[]
+  cycleItems       CycleItem[]
 
   @@index([workspaceId, id])
   @@map("responsibilities")
@@ -431,6 +433,44 @@ model RecurrenceRule {
   version           Int            @default(0)
 
   @@map("recurrence_rules")
+}
+
+/// TBL-027 cycles - 週次サイクル(2026-08-22新設・カルキョンさんの依頼で参考記事
+/// [note.com/bingo10/n/n6ae59c33be8b「個人のタスク管理こそLinear」]の「Cycles」機能を
+/// 参考に設計。設計書に既存記載が無いため新規TBDとして扱う)。
+/// 月曜開始・日曜終了の固定週区切りで自動生成され、未完了の責任は次サイクルへ
+/// 自動持ち越しされる("罪悪感を感じる間もなくシステムが繋いでくれる"という
+/// 記事内の知見を、dedupeの効いた自動繰越ジョブとして実装)。
+model Cycle {
+  id          String    @id @default(uuid())
+  workspaceId String    @map("workspace_id")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  startAt     DateTime  @map("start_at")
+  endAt       DateTime  @map("end_at")
+  /// ACTIVE/CLOSED [推論]
+  status      String    @default("ACTIVE")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  items CycleItem[]
+
+  @@unique([workspaceId, startAt])
+  @@map("cycles")
+}
+
+/// TBL-028 cycle_items - サイクルへコミットした責任(2026-08-22新設)。
+/// carriedFromCycleIdは、直前のサイクルで未完了だったために自動持ち越しされた
+/// 場合の出典サイクルを指す(UIで「先週から持ち越し」バッジを出すために使う)。
+model CycleItem {
+  id                 String    @id @default(uuid())
+  cycleId            String    @map("cycle_id")
+  cycle              Cycle     @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  responsibilityId   String    @map("responsibility_id")
+  responsibility     Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
+  carriedFromCycleId String?   @map("carried_from_cycle_id")
+  addedAt            DateTime  @default(now()) @map("added_at")
+
+  @@unique([cycleId, responsibilityId])
+  @@map("cycle_items")
 }
 
 // =====================================================================

@@ -54,6 +54,34 @@ interface TodaySummaryResponse {
   thisWeek: SummaryItem[];
 }
 
+/** GET /cycles/current(2026-08-22新設)。週次サイクル(参考: note.com/bingo10の
+ * Linear「Cycles」記事)のコミット済みアイテム一覧。 */
+interface CycleItemView {
+  id: string;
+  responsibilityId: string;
+  carriedOver: boolean;
+  type: string;
+  title: string;
+  status: string;
+  importance: number | null;
+  hardDeadlineAt: string | null;
+  targetAt: string | null;
+}
+
+interface CycleResponse {
+  cycle: { id: string; startAt: string; endAt: string; status: string };
+  items: CycleItemView[];
+  doneCount: number;
+  totalCount: number;
+}
+
+/** サイクルへ追加するバックログ候補(簡易ピッカー用)。 */
+interface BacklogCandidate {
+  id: string;
+  title: string;
+  type: string;
+}
+
 /** reasonCodes(lib/planning.ts)の表示ラベル。UIはreasonCodesの値そのものを表示しない。 */
 const REASON_LABEL: Record<string, string> = {
   HARD_DEADLINE_OVERDUE: "締切超過",
@@ -76,6 +104,13 @@ function formatEffectiveAt(iso: string): string {
   return new Date(iso).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function formatCycleRange(startAtIso: string, endAtIso: string): string {
+  const start = new Date(startAtIso);
+  const end = new Date(new Date(endAtIso).getTime() - 1); // endAtは排他的な次週月曜0:00のため表示上は-1ms
+  const fmt = (d: Date) => d.toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" });
+  return `${fmt(start)} 〜 ${fmt(end)}`;
+}
+
 /**
  * UI-03 ホーム／今日。
  * API-PLAN-01(GET /planning/now)による「今やる一つ」(FN-WK-02、依存関係・PEM補正なしの
@@ -91,6 +126,15 @@ export function TodayClient() {
   const [summary, setSummary] = useState<TodaySummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [pinBusy, setPinBusy] = useState<string | null>(null);
+  // [2026-08-22追加] 週次サイクル(参考: note.com/bingo10「個人のタスク管理こそLinear」の
+  // Cycles機能)。今週コミットしたタスクの一覧と、バックログからの追加ピッカー。
+  const [cycle, setCycle] = useState<CycleResponse | null>(null);
+  const [cycleLoading, setCycleLoading] = useState(true);
+  const [cycleItemBusy, setCycleItemBusy] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState("");
+  const [backlog, setBacklog] = useState<BacklogCandidate[]>([]);
+  const [backlogLoading, setBacklogLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -124,17 +168,29 @@ export function TodayClient() {
     setSummaryLoading(false);
   }, []);
 
+  const loadCycle = useCallback(async () => {
+    setCycleLoading(true);
+    const res = await debugFetch("/api/v1/cycles/current");
+    if (res.ok) {
+      const body = await res.json();
+      setCycle(body.data);
+    }
+    setCycleLoading(false);
+  }, []);
+
   const reload = useCallback(() => {
     load();
     loadPlanning();
     loadSummary();
-  }, [load, loadPlanning, loadSummary]);
+    loadCycle();
+  }, [load, loadPlanning, loadSummary, loadCycle]);
 
   useEffect(() => {
     load();
     loadPlanning();
     loadSummary();
-  }, [load, loadPlanning, loadSummary]);
+    loadCycle();
+  }, [load, loadPlanning, loadSummary, loadCycle]);
 
   /** ピン留め切替(FN-WK-03、最大3件はAPI側で強制)。versionを都度取得してから送る。 */
   async function togglePin(item: SummaryItem, nextPinned: boolean) {
@@ -159,6 +215,52 @@ export function TodayClient() {
       }
     } finally {
       setPinBusy(null);
+    }
+  }
+
+  /** サイクルからアイテムを外す(バックログへ戻すだけで責任自体は削除しない)。 */
+  async function removeFromCycle(responsibilityId: string) {
+    setCycleItemBusy(responsibilityId);
+    try {
+      const res = await apiFetch(`/api/v1/cycles/current/items/${responsibilityId}`, { method: "DELETE" });
+      if (res.ok) await loadCycle();
+    } finally {
+      setCycleItemBusy(null);
+    }
+  }
+
+  /** バックログ選択ピッカーを開く。未完了の責任を取得し、クライアント側でタイトル絞り込みする
+   * (全文検索APIは未実装のため簡易実装。FR-GR-01の残課題として別途対応予定)。 */
+  async function openPicker() {
+    setPickerOpen(true);
+    setPickerQuery("");
+    setBacklogLoading(true);
+    const res = await apiFetch("/api/v1/responsibilities?limit=100&sort=updatedAt");
+    if (res.ok) {
+      const body = await res.json();
+      const existingIds = new Set((cycle?.items ?? []).map((i) => i.responsibilityId));
+      type RespRow = { id: string; title: string; type: string; status: string; completedAt: string | null };
+      const candidates: BacklogCandidate[] = (body.data.responsibilities as RespRow[])
+        .filter((r) => !r.completedAt && !existingIds.has(r.id))
+        .map((r) => ({ id: r.id, title: r.title, type: r.type }));
+      setBacklog(candidates);
+    }
+    setBacklogLoading(false);
+  }
+
+  async function addToCycle(responsibilityId: string) {
+    setCycleItemBusy(responsibilityId);
+    try {
+      const res = await apiFetch("/api/v1/cycles/current/items", {
+        method: "POST",
+        body: JSON.stringify({ responsibilityId }),
+      });
+      if (res.ok) {
+        setBacklog((prev) => prev.filter((b) => b.id !== responsibilityId));
+        await loadCycle();
+      }
+    } finally {
+      setCycleItemBusy(null);
     }
   }
 
@@ -223,6 +325,131 @@ export function TodayClient() {
           )}
         </div>
       </div>
+
+      {/* [2026-08-22新設] 週次サイクル(参考: note.com/bingo10「個人のタスク管理こそLinear」)。
+          月曜〜日曜の固定週で自動生成され、未完了アイテムは自動で翌週へ持ち越される
+          ("罪悪感を感じる間もなくシステムが繋いでくれる"という記事の知見を踏襲)。 */}
+      <div className="bg-surface border border-line rounded-2xl shadow-card overflow-hidden">
+        <div className="px-5 pt-4 pb-3 border-b border-line flex items-center justify-between">
+          <div>
+            <span className="text-xs font-mono tracking-wide text-faint">今週のサイクル</span>
+            {cycle && (
+              <p className="text-[11px] text-faint mt-0.5">{formatCycleRange(cycle.cycle.startAt, cycle.cycle.endAt)}</p>
+            )}
+          </div>
+          {cycle && cycle.totalCount > 0 && (
+            <span className="text-xs text-muted">
+              {cycle.doneCount}/{cycle.totalCount}完了
+            </span>
+          )}
+        </div>
+        <div className="p-5">
+          {cycleLoading ? (
+            <p className="text-sm text-faint">読み込み中...</p>
+          ) : (
+            <div className="space-y-3">
+              {cycle && cycle.totalCount > 0 && (
+                <div className="w-full h-1.5 bg-canvas rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-brand-600 transition-all"
+                    style={{ width: `${Math.round((cycle.doneCount / cycle.totalCount) * 100)}%` }}
+                  />
+                </div>
+              )}
+              {cycle && cycle.items.length === 0 ? (
+                <p className="text-sm text-muted">
+                  今週コミットしたタスクはまだありません。バックログから今週やることを選びましょう。
+                </p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {cycle?.items.map((item) => (
+                    <li key={item.id} className="flex items-center justify-between text-sm gap-2">
+                      <Link
+                        href={`/responsibilities?focus=${item.responsibilityId}`}
+                        className="text-ink hover:underline truncate flex items-center gap-1.5"
+                      >
+                        {item.carriedOver && (
+                          <span
+                            className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 shrink-0"
+                            title="先週から持ち越し"
+                          >
+                            持ち越し
+                          </span>
+                        )}
+                        <span className="truncate">{item.title}</span>
+                      </Link>
+                      <button
+                        onClick={() => removeFromCycle(item.responsibilityId)}
+                        disabled={cycleItemBusy === item.responsibilityId}
+                        className="shrink-0 text-[11px] text-faint hover:text-red-600 disabled:opacity-40"
+                      >
+                        外す
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <button
+                onClick={openPicker}
+                className="text-sm text-brand-700 font-medium hover:underline"
+              >
+                ＋ バックログから今週に追加
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {pickerOpen && (
+        <div
+          className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-surface rounded-2xl shadow-pop w-full max-w-md max-h-[70vh] flex flex-col overflow-hidden"
+          >
+            <div className="px-4 py-3 border-b border-line">
+              <input
+                autoFocus
+                type="text"
+                value={pickerQuery}
+                onChange={(e) => setPickerQuery(e.target.value)}
+                placeholder="タイトルで絞り込み..."
+                className="w-full text-sm border border-line rounded-lg px-3 py-2 focus:outline-none focus:border-brand"
+              />
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {backlogLoading ? (
+                <p className="px-4 py-6 text-center text-xs text-faint">読み込み中...</p>
+              ) : (
+                backlog
+                  .filter((b) => b.title.toLowerCase().includes(pickerQuery.toLowerCase()))
+                  .slice(0, 30)
+                  .map((b) => (
+                    <button
+                      key={b.id}
+                      onClick={() => addToCycle(b.id)}
+                      disabled={cycleItemBusy === b.id}
+                      className="w-full text-left px-4 py-2.5 hover:bg-canvas transition text-sm border-b border-line/60 last:border-b-0 disabled:opacity-40"
+                    >
+                      {b.title}
+                    </button>
+                  ))
+              )}
+              {!backlogLoading &&
+                backlog.filter((b) => b.title.toLowerCase().includes(pickerQuery.toLowerCase())).length === 0 && (
+                  <p className="px-4 py-6 text-center text-xs text-faint">該当する候補がありません</p>
+                )}
+            </div>
+            <div className="px-4 py-2.5 border-t border-line text-right">
+              <button onClick={() => setPickerOpen(false)} className="text-xs text-faint hover:underline">
+                閉じる
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* [2026-08-22追加] Todoist「今日/近日中/今後」・Things 3のセクション分けに相当する
           階層バケット表示。pinnedはFN-WK-03「今日の最低ライン」(最大3件)。 */}

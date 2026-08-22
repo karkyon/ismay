@@ -4,6 +4,7 @@ import { processTranscribeAudioJobs } from "@/lib/worker/transcribeAudioJob";
 import { processOcrImageJobs } from "@/lib/worker/ocrImageJob";
 import { processAwaitingBatchJobs } from "@/lib/worker/batchPollJob";
 import { processNotificationScan } from "@/lib/worker/notificationScanJob";
+import { processCycleRotation } from "@/lib/worker/cycleRotationJob";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -36,13 +37,16 @@ async function tick(): Promise<void> {
     // FN-NTF-01(2026-08-22新設): 通知スキャンは60秒間隔の自己スロットリングを
     // 内部で持つため、5秒tickの中で毎回呼び出しても実処理は間引かれる。
     const notificationResult = await processNotificationScan();
+    // 週次サイクル(2026-08-22新設): 1時間間隔の自己スロットリング(cycleRotationJob.ts参照)。
+    const cycleResult = await processCycleRotation();
     if (
       relayResult.relayed > 0 ||
       jobResult.processed > 0 ||
       transcribeResult.processed > 0 ||
       ocrResult.processed > 0 ||
       batchResult.processed > 0 ||
-      notificationResult.processed > 0
+      notificationResult.processed > 0 ||
+      cycleResult.processed > 0
     ) {
       debugServer.event("Worker/tick", "tick完了", {
         ...relayResult,
@@ -51,6 +55,7 @@ async function tick(): Promise<void> {
         ocrProcessed: ocrResult.processed,
         batchProcessed: batchResult.processed,
         notificationProcessed: notificationResult.processed,
+        cycleProcessed: cycleResult.processed,
       });
     }
   } catch (err) {
