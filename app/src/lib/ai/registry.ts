@@ -35,6 +35,9 @@ export interface ProviderFactoryOpts {
 export interface AvailableModel {
   modelName: string;
   label: string;
+  /** [2026-08-22追加] カルキョンさんの指示「モデル選択でどのような特徴なのか費用目安など
+   *  切り替え時に余白スペースに表示しろ」に対応。選択時にUI側の余白へ表示する説明文。 */
+  description: string;
 }
 
 export const EXTRACTION_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => AiExtractionProvider> = {
@@ -65,10 +68,28 @@ export const SEGMENTATION_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFact
 
 /** 管理画面でモデル名を選べるようにするための一覧(価格根拠はlib/ai/pricing.ts)。 */
 export const AVAILABLE_MODELS: Record<string, AvailableModel[]> = {
-  anthropic: [{ modelName: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5($1/$5 per Mtok)" }],
+  anthropic: [
+    {
+      modelName: "claude-haiku-4-5-20251001",
+      label: "Claude Haiku 4.5($1/$5 per Mtok)",
+      description:
+        "高速・低コストな小型モデル。責任抽出・OCR・話題分割等、高頻度で呼ばれる処理向け。" +
+        "入力$1.00/出力$5.00(100万トークンあたり)。Vision(画像入力)対応。",
+    },
+  ],
   openai: [
-    { modelName: "text-embedding-3-small", label: "text-embedding-3-small($0.02 per Mtok)" },
-    { modelName: "gpt-transcribe", label: "gpt-transcribe($0.0045/分)" },
+    {
+      modelName: "text-embedding-3-small",
+      label: "text-embedding-3-small($0.02 per Mtok)",
+      description:
+        "文章の意味を数値ベクトルに変換する埋め込み専用モデル。意味照合・類似度計算(FN-GR-01)用途。" +
+        "入力$0.02(100万トークンあたり)、出力課金なし。",
+    },
+    {
+      modelName: "gpt-transcribe",
+      label: "gpt-transcribe($0.0045/分)",
+      description: "音声からテキストへの文字起こし専用モデル。1分あたり$0.0045。Batch API非対応(常に即時実行)。",
+    },
   ],
 };
 

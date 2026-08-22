@@ -8,6 +8,93 @@ import { microsToUsd, formatUsd } from "@/lib/ai/pricing";
 interface AvailableModel {
   modelName: string;
   label: string;
+  /** [2026-08-22追加] モデル切替時に表示する特徴・費用目安。 */
+  description: string;
+}
+
+/**
+ * [2026-08-22新設] カルキョンさんの指示「anthropicやopenaiなどそれぞれのマークを
+ * リストに追加して、マーク＋事業者名のリストにしろ」に対応。
+ * 実際の商標ロゴ画像は著作権上使用せず、事業者ごとに色分けした頭文字バッジで代替する。
+ */
+const PROVIDER_META: Record<string, { label: string; color: string; initial: string }> = {
+  anthropic: { label: "Anthropic", color: "#D97757", initial: "A" },
+  openai: { label: "OpenAI", color: "#10A37F", initial: "O" },
+};
+
+function providerMeta(providerKey: string) {
+  return PROVIDER_META[providerKey] ?? { label: providerKey, color: "#6b7280", initial: providerKey.slice(0, 1).toUpperCase() };
+}
+
+function ProviderBadge({ providerKey, size = 18 }: { providerKey: string; size?: number }) {
+  const meta = providerMeta(providerKey);
+  return (
+    <span
+      className="rounded-full flex items-center justify-center text-white font-bold shrink-0"
+      style={{ background: meta.color, width: size, height: size, fontSize: size * 0.5 }}
+    >
+      {meta.initial}
+    </span>
+  );
+}
+
+/**
+ * [2026-08-22新設] ネイティブ<select>はoption内にアイコンを描画できないため、
+ * 「マーク＋事業者名のリスト」を実現するための簡易カスタムドロップダウン。
+ */
+function ProviderDropdown({
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  options: string[];
+  disabled?: boolean;
+  onChange: (key: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const meta = providerMeta(value);
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className="flex items-center gap-2 border border-line rounded-lg px-3 py-2 text-sm bg-canvas disabled:opacity-50 hover:border-brand/50 transition min-w-[150px]"
+      >
+        <ProviderBadge providerKey={value} />
+        <span className="flex-1 text-left">{meta.label}</span>
+        <span className="text-faint text-xs">▾</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 mt-1 w-full min-w-[180px] bg-surface border border-line rounded-xl shadow-pop py-1 z-20">
+            {options.map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => {
+                  onChange(key);
+                  setOpen(false);
+                }}
+                className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-canvas transition ${
+                  key === value ? "bg-brand-50" : ""
+                }`}
+              >
+                <ProviderBadge providerKey={key} />
+                <span>{providerMeta(key).label}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 interface CapabilityConfig {
@@ -238,6 +325,12 @@ export function AiProvidersAdminClient() {
           <div className="space-y-4">
             {capabilities.map((c) => {
               const models = c.availableModelsByProvider[c.activeProviderKey] ?? [];
+              const activeModel = models.find((m) => m.modelName === c.modelName) ?? models[0];
+              // [2026-08-22追加] カルキョンさんの指摘「APIキーは登録されているなら
+              // 一般的な表示にしろ、登録されているのか判別つかない」に対応。
+              // 従来はページ下部の別セクションでしか確認できず、このカード単体では
+              // 現在選択中の事業者のキーが登録済みかどうか分からなかった。
+              const activeCred = credentials.find((cred) => cred.providerKey === c.activeProviderKey);
               return (
                 <div key={c.capability} className="bg-surface border border-line rounded-2xl shadow-card p-5">
                   <div className="flex items-center justify-between mb-3">
@@ -245,28 +338,33 @@ export function AiProvidersAdminClient() {
                       <p className="font-medium text-ink">{CAPABILITY_LABEL[c.capability] ?? c.capability}</p>
                       <p className="text-xs text-faint font-mono mt-0.5">{c.capability}</p>
                     </div>
-                    {savedFlash === c.capability && (
-                      <span className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-full px-2.5 py-1">
-                        保存しました
-                      </span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {activeCred?.registered ? (
+                        <span className="text-[11px] text-safe bg-safe-50 border border-safe/30 rounded-full px-2.5 py-1 flex items-center gap-1">
+                          🔑 APIキー登録済み
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-muted bg-canvas border border-line rounded-full px-2.5 py-1 flex items-center gap-1">
+                          🔑 .envのキーを使用中
+                        </span>
+                      )}
+                      {savedFlash === c.capability && (
+                        <span className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-full px-2.5 py-1">
+                          保存しました
+                        </span>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex flex-wrap items-start gap-3">
                     <div>
                       <label className="block text-xs text-faint mb-1">事業者</label>
-                      <select
+                      <ProviderDropdown
                         value={c.activeProviderKey}
+                        options={c.availableProviderKeys}
                         disabled={savingCapability === c.capability}
-                        onChange={(e) => handleSwitch(c.capability, e.target.value)}
-                        className="border border-line rounded-lg px-3 py-2 text-sm bg-canvas disabled:opacity-50"
-                      >
-                        {c.availableProviderKeys.map((key) => (
-                          <option key={key} value={key}>
-                            {key}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={(key) => handleSwitch(c.capability, key)}
+                      />
                     </div>
 
                     {models.length > 0 && (
@@ -287,7 +385,16 @@ export function AiProvidersAdminClient() {
                       </div>
                     )}
 
-                    {c.isDefault && <span className="text-xs text-faint self-end pb-2">(未設定のため既定値を使用中)</span>}
+                    {c.isDefault && <span className="text-xs text-faint self-center pt-5">(未設定のため既定値を使用中)</span>}
+
+                    {/* [2026-08-22新設] カルキョンさんの指示「モデル選択でどのような特徴なのか
+                        費用目安など切り替え時に余白スペースに表示しろ」に対応。 */}
+                    {activeModel && (
+                      <div className="flex-1 min-w-[220px] bg-canvas rounded-lg px-3 py-2 self-stretch">
+                        <p className="text-[10px] font-semibold text-faint uppercase tracking-wide mb-0.5">この機能の特徴</p>
+                        <p className="text-[11.5px] text-muted leading-snug">{activeModel.description}</p>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -304,12 +411,13 @@ export function AiProvidersAdminClient() {
               {allProviderKeys.map((providerKey) => {
                 const cred = credentials.find((c) => c.providerKey === providerKey);
                 return (
-                  <div key={providerKey} className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-mono w-24">{providerKey}</span>
+                  <div key={providerKey} className="flex flex-wrap items-center gap-2 border border-line rounded-xl px-3 py-2.5">
+                    <ProviderBadge providerKey={providerKey} />
+                    <span className="text-sm font-medium w-24">{providerMeta(providerKey).label}</span>
                     {cred?.registered ? (
                       <>
-                        <span className="text-xs text-ink bg-canvas border border-line rounded-full px-2.5 py-1">
-                          登録済み(末尾: {cred.last4})
+                        <span className="text-xs text-safe bg-safe-50 border border-safe/30 rounded-full px-2.5 py-1 flex items-center gap-1">
+                          ✓ 登録済み(末尾: {cred.last4})
                         </span>
                         <button
                           onClick={() => handleDeleteKey(providerKey)}
@@ -320,7 +428,9 @@ export function AiProvidersAdminClient() {
                         </button>
                       </>
                     ) : (
-                      <span className="text-xs text-faint">未登録(.envのキーを使用中)</span>
+                      <span className="text-xs text-muted bg-canvas border border-line rounded-full px-2.5 py-1">
+                        未登録(.envのキーを使用中)
+                      </span>
                     )}
                     <input
                       type="password"

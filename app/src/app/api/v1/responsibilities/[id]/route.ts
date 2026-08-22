@@ -1,6 +1,12 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+// [2026-08-22追加] Json?列(requiredTools/options)へnullを設定する際、
+// 実サーバーのtsc(実際に生成されたPrisma Client型)で発覚した不備を修正するため
+// Prisma.DbNullが必要。プレーンなnullはPrismaのJson入力型として受け付けられない
+// (「値が無い(SQLのNULL)」と「JSON値としてのnull」をPrismaは区別するため、
+// 前者の意図(準備物・選択肢が未設定)にはPrisma.DbNullを使う)。
+import { Prisma } from "@/generated/prisma/client";
 import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
@@ -22,6 +28,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       // 新設(2026-08-21): 元Captureのタイトル・作成日・種別を同梱し、
       // 「もともとどんな文書・音声・画像で抽出したものか」を画面から辿れるようにする。
       originCapture: { select: { id: true, sourceType: true, aiSummary: true, rawText: true, createdAt: true } },
+      // 新設(2026-08-22): 種別固有詳細情報(TBL-007〜010)。schema.prismaにはテーブルが
+      // 存在したが、GET/PATCHとも一度も配線されていなかった(カルキョンさんの指摘で発覚)。
+      taskDetail: { select: { estimatedMinutesMin: true, estimatedMinutesMax: true, location: true, requiredTools: true } },
+      commitmentDetail: { select: { counterpartyName: true, counterpartyContact: true, promiseText: true } },
+      decisionDetail: { select: { options: true, chosenOption: true, rationale: true, decidedAt: true } },
+      waitingDetail: { select: { waitingOn: true, expectedReplyBy: true, followUpAt: true } },
     },
   });
   if (!responsibility) {
@@ -36,6 +48,32 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   });
 }
 
+// [2026-08-22新設] 種別固有詳細情報(TBL-007〜010)。カルキョンさんの指摘
+// 「各タスクについてもっと情報を登録できるように指示しなかったか」で発覚した
+// 未配線を解消する。detail.typeと一致するキーのみクライアントから送られる想定。
+const TaskDetailSchema = z.object({
+  estimatedMinutesMin: z.number().int().min(0).max(100000).nullable().optional(),
+  estimatedMinutesMax: z.number().int().min(0).max(100000).nullable().optional(),
+  location: z.string().max(200).nullable().optional(),
+  requiredTools: z.array(z.string().max(100)).max(30).nullable().optional(),
+});
+const CommitmentDetailSchema = z.object({
+  counterpartyName: z.string().max(200).nullable().optional(),
+  counterpartyContact: z.string().max(300).nullable().optional(),
+  promiseText: z.string().max(2000).nullable().optional(),
+});
+const DecisionDetailSchema = z.object({
+  options: z.array(z.string().max(200)).max(20).nullable().optional(),
+  chosenOption: z.string().max(200).nullable().optional(),
+  rationale: z.string().max(2000).nullable().optional(),
+  decidedAt: z.string().datetime().nullable().optional(),
+});
+const WaitingDetailSchema = z.object({
+  waitingOn: z.string().max(300).nullable().optional(),
+  expectedReplyBy: z.string().datetime().nullable().optional(),
+  followUpAt: z.string().datetime().nullable().optional(),
+});
+
 const UpdateSchema = z.object({
   title: z.string().min(1).max(300).optional(),
   description: z.string().max(20000).nullable().optional(),
@@ -48,6 +86,10 @@ const UpdateSchema = z.object({
   tagIds: z.array(z.string().uuid()).max(20).optional(),
   graphX: z.number().nullable().optional(),
   graphY: z.number().nullable().optional(),
+  taskDetail: TaskDetailSchema.optional(),
+  commitmentDetail: CommitmentDetailSchema.optional(),
+  decisionDetail: DecisionDetailSchema.optional(),
+  waitingDetail: WaitingDetailSchema.optional(),
   version: z.number().int(),
 });
 
@@ -71,7 +113,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       ),
     });
   }
-  const { version, domainId, tagIds, ...rest } = parsed.data;
+  const { version, domainId, tagIds, taskDetail, commitmentDetail, decisionDetail, waitingDetail, ...rest } = parsed.data;
 
   const { id } = await ctx.params;
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
@@ -107,6 +149,21 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         fieldErrors: { tagIds: "このWorkspaceに存在するタグのみ指定できます" },
       });
     }
+  }
+
+  // [2026-08-22追加] 種別固有詳細情報は、existing.type(現在の責任の種別)と一致する
+  // キーのみ許可する。他種別のdetailを混入させるとデータ不整合になるため拒否する。
+  if (taskDetail && existing.type !== "TASK") {
+    return apiError("VALIDATION_FAILED", "taskDetailはtype=TASKの責任にのみ設定できます");
+  }
+  if (commitmentDetail && existing.type !== "COMMITMENT") {
+    return apiError("VALIDATION_FAILED", "commitmentDetailはtype=COMMITMENTの責任にのみ設定できます");
+  }
+  if (decisionDetail && existing.type !== "DECISION") {
+    return apiError("VALIDATION_FAILED", "decisionDetailはtype=DECISIONの責任にのみ設定できます");
+  }
+  if (waitingDetail && existing.type !== "WAITING") {
+    return apiError("VALIDATION_FAILED", "waitingDetailはtype=WAITINGの責任にのみ設定できます");
   }
 
   const updateResult = await db.responsibility.updateMany({
@@ -153,9 +210,79 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     debugServer.event("PATCH /responsibilities/[id]", "TAGS_UPDATED", { id, tagIds });
   }
 
+  // [2026-08-22新設] 種別固有詳細情報(TBL-007〜010)のupsert。responsibilityId主キーの
+  // 1:1テーブルのため、無ければ作成・あれば更新する(既存行の欠落フィールドはnull初期化)。
+  //
+  // [2026-08-22修正] requiredTools/optionsはJson?列のため、TypeScript上のnullを
+  // そのまま渡すと実サーバーのtsc(実際に生成されたPrisma Client型)で型エラーになる
+  // (発覚: 「Type 'null' is not assignable to type 'NullableJsonNullValueInput |
+  // InputJsonValue | undefined'」)。本サンドボックスの簡易スタブはPrisma固有の
+  // Json型を再現できず検出できなかった不備。
+  // Prisma.JsonNull(JSON値としてのnullを列に書き込む)ではなく、
+  // Prisma.DbNull(列自体をSQLのNULLにする、「値が無い」という意図に一致)を使う。
+  // 一度JsonNullで実装しかけたが、Prisma公式ドキュメントで意味を再確認し訂正した
+  // (「準備物なし」は列が空であるべきで、JSON文字列"null"が入っているのは誤り)。
+  if (taskDetail) {
+    const { requiredTools, ...taskRest } = taskDetail;
+    const requiredToolsValue = requiredTools === null ? Prisma.DbNull : requiredTools;
+    await db.taskDetail.upsert({
+      where: { responsibilityId: id },
+      create: { responsibilityId: id, ...taskRest, requiredTools: requiredToolsValue },
+      update: { ...taskRest, requiredTools: requiredToolsValue },
+    });
+    debugServer.event("PATCH /responsibilities/[id]", "TASK_DETAIL_UPDATED", { id });
+  }
+  if (commitmentDetail) {
+    await db.commitmentDetail.upsert({
+      where: { responsibilityId: id },
+      create: { responsibilityId: id, ...commitmentDetail },
+      update: { ...commitmentDetail },
+    });
+    debugServer.event("PATCH /responsibilities/[id]", "COMMITMENT_DETAIL_UPDATED", { id });
+  }
+  if (decisionDetail) {
+    const { decidedAt, options, ...decisionRest } = decisionDetail;
+    const optionsValue = options === null ? Prisma.DbNull : options;
+    await db.decisionDetail.upsert({
+      where: { responsibilityId: id },
+      create: {
+        responsibilityId: id,
+        ...decisionRest,
+        options: optionsValue,
+        decidedAt: decidedAt ? new Date(decidedAt) : null,
+      },
+      update: { ...decisionRest, options: optionsValue, decidedAt: decidedAt ? new Date(decidedAt) : null },
+    });
+    debugServer.event("PATCH /responsibilities/[id]", "DECISION_DETAIL_UPDATED", { id });
+  }
+  if (waitingDetail) {
+    const { expectedReplyBy, followUpAt, ...waitingRest } = waitingDetail;
+    await db.waitingDetail.upsert({
+      where: { responsibilityId: id },
+      create: {
+        responsibilityId: id,
+        ...waitingRest,
+        expectedReplyBy: expectedReplyBy ? new Date(expectedReplyBy) : null,
+        followUpAt: followUpAt ? new Date(followUpAt) : null,
+      },
+      update: {
+        ...waitingRest,
+        expectedReplyBy: expectedReplyBy ? new Date(expectedReplyBy) : null,
+        followUpAt: followUpAt ? new Date(followUpAt) : null,
+      },
+    });
+    debugServer.event("PATCH /responsibilities/[id]", "WAITING_DETAIL_UPDATED", { id });
+  }
+
   const updated = await db.responsibility.findUniqueOrThrow({
     where: { id },
-    include: { tags: { include: { tag: { select: { id: true, name: true, color: true } } } } },
+    include: {
+      tags: { include: { tag: { select: { id: true, name: true, color: true } } } },
+      taskDetail: { select: { estimatedMinutesMin: true, estimatedMinutesMax: true, location: true, requiredTools: true } },
+      commitmentDetail: { select: { counterpartyName: true, counterpartyContact: true, promiseText: true } },
+      decisionDetail: { select: { options: true, chosenOption: true, rationale: true, decidedAt: true } },
+      waitingDetail: { select: { waitingOn: true, expectedReplyBy: true, followUpAt: true } },
+    },
   });
   debugServer.state("PATCH /responsibilities/[id]", "Responsibility", { id, status: updated.status });
 

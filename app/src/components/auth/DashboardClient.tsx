@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 
@@ -23,6 +23,11 @@ type EnrollStep = "idle" | "show-qr" | "recovery-codes";
 
 export function DashboardClient() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // [2026-08-22追加] カルキョンさんの指示「ユーザー情報とパスワードは別々のメニューにしろ」
+  // に対応。AppShellのユーザーメニューから/dashboard?tab=passwordで来た場合、
+  // パスワード変更セクションへ自動スクロールする。
+  const passwordSectionRef = useRef<HTMLElement>(null);
   const [me, setMe] = useState<MeResponse["data"] | null>(null);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -64,6 +69,12 @@ export function DashboardClient() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (searchParams.get("tab") === "password" && !loading) {
+      passwordSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [searchParams, loading]);
 
   async function startEnroll() {
     setError("");
@@ -208,7 +219,12 @@ export function DashboardClient() {
       </section>
 
       {/* [2026-08-21新設] パスワード変更フォーム。成功時は全端末が再ログイン必須になる。 */}
-      <section className="bg-white border border-slate-200 rounded-xl p-5">
+      <section
+        ref={passwordSectionRef}
+        className={`bg-white border rounded-xl p-5 transition ${
+          searchParams.get("tab") === "password" ? "border-brand ring-2 ring-brand/20" : "border-slate-200"
+        }`}
+      >
         <h2 className="font-semibold text-slate-800 mb-3">パスワード変更</h2>
         <form onSubmit={changePassword} className="space-y-3 max-w-sm">
           <div>

@@ -134,9 +134,11 @@ export function AppShell({ children }: { children: ReactNode }) {
                 e.stopPropagation();
                 setMenuOpen((v) => !v);
               }}
-              className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-canvas transition"
+              className={`flex items-center gap-2 rounded-full pl-1 pr-3 py-1 transition ${
+                menuOpen ? "bg-canvas ring-1 ring-line" : "hover:bg-canvas"
+              }`}
             >
-              <span className="w-7 h-7 rounded-full bg-ink text-white text-xs font-semibold flex items-center justify-center shrink-0">
+              <span className="w-7 h-7 rounded-full bg-gradient-to-br from-ink to-ink/70 text-white text-xs font-semibold flex items-center justify-center shrink-0">
                 {(me?.displayName ?? me?.email ?? "?").slice(0, 1).toUpperCase()}
               </span>
               <span className="text-sm text-ink hidden sm:inline">{me?.displayName ?? me?.email ?? ""}</span>
@@ -144,24 +146,50 @@ export function AppShell({ children }: { children: ReactNode }) {
             {menuOpen && (
               <div
                 onClick={(e) => e.stopPropagation()}
-                className="absolute right-0 mt-2 w-56 bg-surface border border-line rounded-xl shadow-pop py-1.5 z-30 text-sm"
+                className="absolute right-0 mt-2.5 w-64 bg-surface/95 backdrop-blur-sm border border-line/70 rounded-2xl shadow-pop py-2 z-30 text-sm overflow-hidden"
               >
-                <div className="px-3.5 py-2 border-b border-line">
-                  <p className="font-medium text-ink truncate">{me?.displayName ?? "(表示名未設定)"}</p>
-                  <p className="text-xs text-faint truncate">{me?.email}</p>
+                <div className="px-4 py-3 flex items-center gap-3 bg-canvas/60">
+                  <span className="w-9 h-9 rounded-full bg-ink text-white text-sm font-semibold flex items-center justify-center shrink-0">
+                    {(me?.displayName ?? me?.email ?? "?").slice(0, 1).toUpperCase()}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="font-medium text-ink truncate">{me?.displayName ?? "(表示名未設定)"}</p>
+                    <p className="text-[11px] text-faint truncate">{me?.email}</p>
+                  </div>
                 </div>
-                <button
-                  onClick={() => {
-                    setMenuOpen(false);
-                    router.push("/dashboard");
-                  }}
-                  className="w-full text-left px-3.5 py-2 hover:bg-canvas text-ink"
-                >
-                  ユーザー情報・パスワード変更
-                </button>
-                <button onClick={logout} className="w-full text-left px-3.5 py-2 hover:bg-canvas text-red-600">
-                  ログアウト
-                </button>
+                <div className="py-1.5">
+                  {/* [2026-08-22修正] カルキョンさんの指示「ユーザー情報とパスワードは
+                      別々のメニューにしろ」に対応。従来1項目にまとめていたものを分割した。 */}
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      router.push("/dashboard");
+                    }}
+                    className="w-full text-left px-4 py-2.5 hover:bg-canvas text-ink transition flex items-center gap-2.5"
+                  >
+                    <span className="w-4 text-faint">👤</span>
+                    ユーザー情報
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      router.push("/dashboard?tab=password");
+                    }}
+                    className="w-full text-left px-4 py-2.5 hover:bg-canvas text-ink transition flex items-center gap-2.5"
+                  >
+                    <span className="w-4 text-faint">🔒</span>
+                    パスワード変更
+                  </button>
+                </div>
+                <div className="border-t border-line py-1.5">
+                  <button
+                    onClick={logout}
+                    className="w-full text-left px-4 py-2.5 hover:bg-red-50 text-red-600 transition flex items-center gap-2.5"
+                  >
+                    <span className="w-4">↪</span>
+                    ログアウト
+                  </button>
+                </div>
               </div>
             )}
           </div>

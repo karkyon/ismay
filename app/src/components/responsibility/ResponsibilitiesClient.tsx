@@ -63,11 +63,40 @@ interface ResponsibilityTagRef {
   color: string;
 }
 
+/** 新設(2026-08-22): TBL-007〜010種別固有詳細。schema.prismaには存在したが、
+ *  API/UIとも一度も配線されていなかった(カルキョンさんの指摘で発覚)。 */
+interface TaskDetailRef {
+  estimatedMinutesMin: number | null;
+  estimatedMinutesMax: number | null;
+  location: string | null;
+  requiredTools: string[] | null;
+}
+interface CommitmentDetailRef {
+  counterpartyName: string | null;
+  counterpartyContact: string | null;
+  promiseText: string | null;
+}
+interface DecisionDetailRef {
+  options: string[] | null;
+  chosenOption: string | null;
+  rationale: string | null;
+  decidedAt: string | null;
+}
+interface WaitingDetailRef {
+  waitingOn: string | null;
+  expectedReplyBy: string | null;
+  followUpAt: string | null;
+}
+
 interface ResponsibilityDetail extends ResponsibilityListItem {
   description: string | null;
   sourceKind: string;
   originCaptureId: string | null;
   tags: ResponsibilityTagRef[];
+  taskDetail: TaskDetailRef | null;
+  commitmentDetail: CommitmentDetailRef | null;
+  decisionDetail: DecisionDetailRef | null;
+  waitingDetail: WaitingDetailRef | null;
 }
 
 interface RelatedItem {
@@ -269,7 +298,27 @@ export function ResponsibilitiesClient() {
   // 保存時にISO文字列へ変換する。
   const [editHardDeadline, setEditHardDeadline] = useState("");
   const [editTargetAt, setEditTargetAt] = useState("");
+  // [2026-08-22追加] カルキョンさんの指摘「期日や着手などの日付のことを指示したはず」に
+  // 対応。startAfterAt(開始可能日時)はAPI・DBには元々あったが、編集フォームに
+  // 入力欄が一つも無く、設定する手段が存在しなかった(実コード確認で発覚)。
+  const [editStartAfterAt, setEditStartAfterAt] = useState("");
   const [editImportance, setEditImportance] = useState<number>(0);
+  // [2026-08-22新設] 種別固有詳細情報(TBL-007〜010)。schema.prismaにはテーブルが
+  // 存在したが、編集するAPI・UIが一つも配線されていなかった(実コード確認で発覚)。
+  const [editEstMinMin, setEditEstMinMin] = useState("");
+  const [editEstMinMax, setEditEstMinMax] = useState("");
+  const [editLocation, setEditLocation] = useState("");
+  const [editRequiredTools, setEditRequiredTools] = useState("");
+  const [editCounterpartyName, setEditCounterpartyName] = useState("");
+  const [editCounterpartyContact, setEditCounterpartyContact] = useState("");
+  const [editPromiseText, setEditPromiseText] = useState("");
+  const [editOptions, setEditOptions] = useState("");
+  const [editChosenOption, setEditChosenOption] = useState("");
+  const [editRationale, setEditRationale] = useState("");
+  const [editDecidedAt, setEditDecidedAt] = useState("");
+  const [editWaitingOn, setEditWaitingOn] = useState("");
+  const [editExpectedReplyBy, setEditExpectedReplyBy] = useState("");
+  const [editFollowUpAt, setEditFollowUpAt] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [newTagName, setNewTagName] = useState("");
   const [savingTag, setSavingTag] = useState(false);
@@ -369,7 +418,23 @@ export function ResponsibilitiesClient() {
     setEditDescription(detail.description ?? "");
     setEditHardDeadline(toDatetimeLocalValue(detail.hardDeadlineAt));
     setEditTargetAt(toDatetimeLocalValue(detail.targetAt));
+    setEditStartAfterAt(toDatetimeLocalValue(detail.startAfterAt));
     setEditImportance(detail.importance ?? 0);
+    // [2026-08-22新設] 種別固有詳細情報の初期値をセットする。
+    setEditEstMinMin(detail.taskDetail?.estimatedMinutesMin?.toString() ?? "");
+    setEditEstMinMax(detail.taskDetail?.estimatedMinutesMax?.toString() ?? "");
+    setEditLocation(detail.taskDetail?.location ?? "");
+    setEditRequiredTools((detail.taskDetail?.requiredTools ?? []).join("、"));
+    setEditCounterpartyName(detail.commitmentDetail?.counterpartyName ?? "");
+    setEditCounterpartyContact(detail.commitmentDetail?.counterpartyContact ?? "");
+    setEditPromiseText(detail.commitmentDetail?.promiseText ?? "");
+    setEditOptions((detail.decisionDetail?.options ?? []).join("、"));
+    setEditChosenOption(detail.decisionDetail?.chosenOption ?? "");
+    setEditRationale(detail.decisionDetail?.rationale ?? "");
+    setEditDecidedAt(toDatetimeLocalValue(detail.decisionDetail?.decidedAt ?? null));
+    setEditWaitingOn(detail.waitingDetail?.waitingOn ?? "");
+    setEditExpectedReplyBy(toDatetimeLocalValue(detail.waitingDetail?.expectedReplyBy ?? null));
+    setEditFollowUpAt(toDatetimeLocalValue(detail.waitingDetail?.followUpAt ?? null));
     setEditing(true);
   }
 
@@ -377,6 +442,39 @@ export function ResponsibilitiesClient() {
     if (!detail || !editTitle.trim()) return;
     setSavingEdit(true);
     try {
+      // [2026-08-22追加] 種別(detail.type)に応じた詳細情報を、対応するキーのみ
+      // ペイロードへ含める(他種別のdetailキーは送らない。APIも種別不一致を拒否する)。
+      const detailPayload: Record<string, unknown> = {};
+      if (detail.type === "TASK") {
+        detailPayload.taskDetail = {
+          estimatedMinutesMin: editEstMinMin ? Number(editEstMinMin) : null,
+          estimatedMinutesMax: editEstMinMax ? Number(editEstMinMax) : null,
+          location: editLocation.trim() || null,
+          requiredTools: editRequiredTools.trim()
+            ? editRequiredTools.split(/[、,]/).map((s) => s.trim()).filter(Boolean)
+            : null,
+        };
+      } else if (detail.type === "COMMITMENT") {
+        detailPayload.commitmentDetail = {
+          counterpartyName: editCounterpartyName.trim() || null,
+          counterpartyContact: editCounterpartyContact.trim() || null,
+          promiseText: editPromiseText.trim() || null,
+        };
+      } else if (detail.type === "DECISION") {
+        detailPayload.decisionDetail = {
+          options: editOptions.trim() ? editOptions.split(/[、,]/).map((s) => s.trim()).filter(Boolean) : null,
+          chosenOption: editChosenOption.trim() || null,
+          rationale: editRationale.trim() || null,
+          decidedAt: editDecidedAt ? new Date(editDecidedAt).toISOString() : null,
+        };
+      } else if (detail.type === "WAITING") {
+        detailPayload.waitingDetail = {
+          waitingOn: editWaitingOn.trim() || null,
+          expectedReplyBy: editExpectedReplyBy ? new Date(editExpectedReplyBy).toISOString() : null,
+          followUpAt: editFollowUpAt ? new Date(editFollowUpAt).toISOString() : null,
+        };
+      }
+
       const res = await apiFetch(`/api/v1/responsibilities/${detail.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -385,8 +483,10 @@ export function ResponsibilitiesClient() {
           description: editDescription.trim() || null,
           hardDeadlineAt: editHardDeadline ? new Date(editHardDeadline).toISOString() : null,
           targetAt: editTargetAt ? new Date(editTargetAt).toISOString() : null,
+          startAfterAt: editStartAfterAt ? new Date(editStartAfterAt).toISOString() : null,
           importance: editImportance > 0 ? editImportance : null,
           version: detail.version,
+          ...detailPayload,
         }),
       });
       if (res.ok) {
@@ -936,7 +1036,7 @@ export function ResponsibilitiesClient() {
                         rows={4}
                         className="w-full text-sm border border-line rounded-lg px-3 py-2 focus:outline-none focus:border-brand resize-y"
                       />
-                      <div className="grid grid-cols-3 gap-2">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                         <div>
                           <label className="block text-[10.5px] text-faint mb-1">固定期限</label>
                           <input
@@ -952,6 +1052,17 @@ export function ResponsibilitiesClient() {
                             type="datetime-local"
                             value={editTargetAt}
                             onChange={(e) => setEditTargetAt(e.target.value)}
+                            className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                          />
+                        </div>
+                        {/* [2026-08-22新設] カルキョンさんの指摘「着手などの日付」に対応。
+                            API/DBには元々あったが編集フォームに入力欄が存在しなかった。 */}
+                        <div>
+                          <label className="block text-[10.5px] text-faint mb-1">開始可能日(着手)</label>
+                          <input
+                            type="datetime-local"
+                            value={editStartAfterAt}
+                            onChange={(e) => setEditStartAfterAt(e.target.value)}
                             className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
                           />
                         </div>
@@ -971,6 +1082,175 @@ export function ResponsibilitiesClient() {
                           </select>
                         </div>
                       </div>
+
+                      {/* [2026-08-22新設] 種別固有詳細情報(TBL-007〜010)。detail.typeに応じて
+                          該当セクションのみ表示する。schema.prismaにはテーブルが存在したが、
+                          編集するUIが一つも配線されていなかった(カルキョンさんの指摘で発覚)。 */}
+                      {detail.type === "TASK" && (
+                        <div className="border-t border-line pt-3 mt-1">
+                          <p className="text-[10.5px] font-semibold text-faint uppercase tracking-wide mb-2">作業の詳細</p>
+                          <div className="grid grid-cols-2 gap-2 mb-2">
+                            <div>
+                              <label className="block text-[10.5px] text-faint mb-1">所要時間(分・最小)</label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={editEstMinMin}
+                                onChange={(e) => setEditEstMinMin(e.target.value)}
+                                className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10.5px] text-faint mb-1">所要時間(分・最大)</label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={editEstMinMax}
+                                onChange={(e) => setEditEstMinMax(e.target.value)}
+                                className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                              />
+                            </div>
+                          </div>
+                          <div className="mb-2">
+                            <label className="block text-[10.5px] text-faint mb-1">場所</label>
+                            <input
+                              type="text"
+                              value={editLocation}
+                              onChange={(e) => setEditLocation(e.target.value)}
+                              placeholder="例: 東田工場、事務所"
+                              className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10.5px] text-faint mb-1">必要な道具・準備物(読点区切り)</label>
+                            <input
+                              type="text"
+                              value={editRequiredTools}
+                              onChange={(e) => setEditRequiredTools(e.target.value)}
+                              placeholder="例: 脚立、養生シート"
+                              className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {detail.type === "COMMITMENT" && (
+                        <div className="border-t border-line pt-3 mt-1">
+                          <p className="text-[10.5px] font-semibold text-faint uppercase tracking-wide mb-2">約束の詳細</p>
+                          <div className="grid grid-cols-2 gap-2 mb-2">
+                            <div>
+                              <label className="block text-[10.5px] text-faint mb-1">相手方</label>
+                              <input
+                                type="text"
+                                value={editCounterpartyName}
+                                onChange={(e) => setEditCounterpartyName(e.target.value)}
+                                placeholder="例: 西田さん(越智製作所)"
+                                className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10.5px] text-faint mb-1">連絡先</label>
+                              <input
+                                type="text"
+                                value={editCounterpartyContact}
+                                onChange={(e) => setEditCounterpartyContact(e.target.value)}
+                                placeholder="電話・メール等"
+                                className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10.5px] text-faint mb-1">約束の内容</label>
+                            <textarea
+                              value={editPromiseText}
+                              onChange={(e) => setEditPromiseText(e.target.value)}
+                              rows={2}
+                              className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand resize-y"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {detail.type === "DECISION" && (
+                        <div className="border-t border-line pt-3 mt-1">
+                          <p className="text-[10.5px] font-semibold text-faint uppercase tracking-wide mb-2">判断の詳細</p>
+                          <div className="mb-2">
+                            <label className="block text-[10.5px] text-faint mb-1">選択肢(読点区切り)</label>
+                            <input
+                              type="text"
+                              value={editOptions}
+                              onChange={(e) => setEditOptions(e.target.value)}
+                              placeholder="例: A社に発注、B社に発注、自社対応"
+                              className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 mb-2">
+                            <div>
+                              <label className="block text-[10.5px] text-faint mb-1">選んだ選択肢</label>
+                              <input
+                                type="text"
+                                value={editChosenOption}
+                                onChange={(e) => setEditChosenOption(e.target.value)}
+                                className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10.5px] text-faint mb-1">決定日時</label>
+                              <input
+                                type="datetime-local"
+                                value={editDecidedAt}
+                                onChange={(e) => setEditDecidedAt(e.target.value)}
+                                className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10.5px] text-faint mb-1">判断理由</label>
+                            <textarea
+                              value={editRationale}
+                              onChange={(e) => setEditRationale(e.target.value)}
+                              rows={2}
+                              className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand resize-y"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {detail.type === "WAITING" && (
+                        <div className="border-t border-line pt-3 mt-1">
+                          <p className="text-[10.5px] font-semibold text-faint uppercase tracking-wide mb-2">待ちの詳細</p>
+                          <div className="mb-2">
+                            <label className="block text-[10.5px] text-faint mb-1">何を待っているか</label>
+                            <input
+                              type="text"
+                              value={editWaitingOn}
+                              onChange={(e) => setEditWaitingOn(e.target.value)}
+                              placeholder="例: NTTからの見積回答"
+                              className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[10.5px] text-faint mb-1">回答予定日</label>
+                              <input
+                                type="datetime-local"
+                                value={editExpectedReplyBy}
+                                onChange={(e) => setEditExpectedReplyBy(e.target.value)}
+                                className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10.5px] text-faint mb-1">追跡(催促)日</label>
+                              <input
+                                type="datetime-local"
+                                value={editFollowUpAt}
+                                onChange={(e) => setEditFollowUpAt(e.target.value)}
+                                className="w-full text-xs border border-line rounded-lg px-2 py-1.5 focus:outline-none focus:border-brand"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
                       <div className="flex gap-2">
                         <button
                           onClick={saveEditing}
@@ -1011,6 +1291,69 @@ export function ResponsibilitiesClient() {
                     )}
                     {detail.importance && <span>重要度: {detail.importance}/5</span>}
                   </div>
+
+                  {/* [2026-08-22新設] 種別固有詳細情報(TBL-007〜010)の読み取り専用表示。
+                      「編集する」から入力できる。値が一つも無い場合は何も表示しない。 */}
+                  {detail.type === "TASK" &&
+                    detail.taskDetail &&
+                    (detail.taskDetail.estimatedMinutesMin ||
+                      detail.taskDetail.estimatedMinutesMax ||
+                      detail.taskDetail.location ||
+                      (detail.taskDetail.requiredTools?.length ?? 0) > 0) && (
+                      <div className="bg-canvas rounded-lg px-3 py-2 text-xs text-ink space-y-0.5">
+                        {(detail.taskDetail.estimatedMinutesMin || detail.taskDetail.estimatedMinutesMax) && (
+                          <p>
+                            所要時間: {detail.taskDetail.estimatedMinutesMin ?? "?"}〜{detail.taskDetail.estimatedMinutesMax ?? "?"}分
+                          </p>
+                        )}
+                        {detail.taskDetail.location && <p>場所: {detail.taskDetail.location}</p>}
+                        {(detail.taskDetail.requiredTools?.length ?? 0) > 0 && (
+                          <p>準備物: {detail.taskDetail.requiredTools!.join("、")}</p>
+                        )}
+                      </div>
+                    )}
+                  {detail.type === "COMMITMENT" &&
+                    detail.commitmentDetail &&
+                    (detail.commitmentDetail.counterpartyName || detail.commitmentDetail.promiseText) && (
+                      <div className="bg-canvas rounded-lg px-3 py-2 text-xs text-ink space-y-0.5">
+                        {detail.commitmentDetail.counterpartyName && (
+                          <p>
+                            相手方: {detail.commitmentDetail.counterpartyName}
+                            {detail.commitmentDetail.counterpartyContact ? `(${detail.commitmentDetail.counterpartyContact})` : ""}
+                          </p>
+                        )}
+                        {detail.commitmentDetail.promiseText && <p>約束: {detail.commitmentDetail.promiseText}</p>}
+                      </div>
+                    )}
+                  {detail.type === "DECISION" &&
+                    detail.decisionDetail &&
+                    ((detail.decisionDetail.options?.length ?? 0) > 0 ||
+                      detail.decisionDetail.chosenOption ||
+                      detail.decisionDetail.rationale) && (
+                      <div className="bg-canvas rounded-lg px-3 py-2 text-xs text-ink space-y-0.5">
+                        {(detail.decisionDetail.options?.length ?? 0) > 0 && (
+                          <p>選択肢: {detail.decisionDetail.options!.join("、")}</p>
+                        )}
+                        {detail.decisionDetail.chosenOption && <p>選んだ選択肢: {detail.decisionDetail.chosenOption}</p>}
+                        {detail.decisionDetail.decidedAt && (
+                          <p>決定日時: {new Date(detail.decisionDetail.decidedAt).toLocaleString("ja-JP")}</p>
+                        )}
+                        {detail.decisionDetail.rationale && <p>理由: {detail.decisionDetail.rationale}</p>}
+                      </div>
+                    )}
+                  {detail.type === "WAITING" &&
+                    detail.waitingDetail &&
+                    (detail.waitingDetail.waitingOn || detail.waitingDetail.expectedReplyBy || detail.waitingDetail.followUpAt) && (
+                      <div className="bg-canvas rounded-lg px-3 py-2 text-xs text-ink space-y-0.5">
+                        {detail.waitingDetail.waitingOn && <p>待っている内容: {detail.waitingDetail.waitingOn}</p>}
+                        {detail.waitingDetail.expectedReplyBy && (
+                          <p>回答予定日: {new Date(detail.waitingDetail.expectedReplyBy).toLocaleString("ja-JP")}</p>
+                        )}
+                        {detail.waitingDetail.followUpAt && (
+                          <p>追跡(催促)日: {new Date(detail.waitingDetail.followUpAt).toLocaleString("ja-JP")}</p>
+                        )}
+                      </div>
+                    )}
 
                   {/* [2026-08-21新設] カルキョンさんの指摘「もともとどんな文書、音声、画像で
                       抽出したものか正確に把握できないといけない」に対応。 */}
