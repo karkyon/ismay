@@ -19,6 +19,20 @@ import { isTypeSpecificTerminalStatus } from "@/lib/responsibility";
  * Notification.channelは既定値のまま)。「送達」はNotification.status=SENTにする
  * ことと同義であり、以後は通知センターUI(GET /api/v1/notifications)がSENT/READのみを
  * 表示する。将来チャネルを追加する場合はdispatchDueNotifications側にのみ手を入れればよい。
+ *
+ * [2026-08-22追加: 他SaaSの一般的UXパターンを参考にした拡張]
+ * - 種別ごとの受信可否(User.notifyDeadlineEnabled等、GitHubのWatching/Participating/
+ *   Customに相当する粒度選択)。無効化された種別は候補生成の時点で除外する。
+ * - importance(Responsibility.importance)をpayloadに含め、通知センターUIが
+ *   重要度の高い通知を視覚的に強調できるようにする(Gmail「重要マーカー」に相当する
+ *   軽量なヒューリスティック。機械学習は行わない=FN-PEM-03とは別物)。
+ * - DEADLINE通知に当日中の他の期限件数(siblingCountToday)を添える(Googleカレンダー
+ *   の「この予定の前に別の予定があります」に相当する文脈情報)。
+ * - dispatchDueNotifications: 同一ユーザーに複数件が同時到来した場合、個別に見せず
+ *   1件のDIGEST通知へ集約する(Slackの「まとめて1通」・銀行アプリの日次まとめ通知に
+ *   相当。元の各通知はSUPPRESSEDへ遷移し、通知センターの一覧(SENT/READのみ表示)には
+ *   現れなくなる。dedupeKeyによる冪等性は元候補の生成時点で既に担保されているため、
+ *   DIGEST化は表示直前の集約であり、二重通知のリスクは無い)。
  */
 
 const LOOKAHEAD_MS = 24 * 60 * 60 * 1000; // 期限・follow_upの先読み窓(24時間以内に到来する分を対象)
@@ -114,23 +128,49 @@ async function collectDeadlineCandidates(now: Date): Promise<NotificationCandida
       title: true,
       type: true,
       status: true,
+      importance: true,
       hardDeadlineAt: true,
     },
   });
 
-  const candidates: NotificationCandidate[] = [];
-  const workspaceMembersCache = new Map<string, string[]>();
-  for (const r of rows) {
-    if (isTypeSpecificTerminalStatus(r.type, r.status)) continue;
-    if (!r.hardDeadlineAt) continue;
+  type DeadlineRow = {
+    id: string;
+    workspaceId: string;
+    title: string;
+    type: string;
+    status: string;
+    importance: number | null;
+    hardDeadlineAt: Date | null;
+  };
+  const validRows = (rows as DeadlineRow[]).filter(
+    (r: DeadlineRow) => r.hardDeadlineAt && !isTypeSpecificTerminalStatus(r.type, r.status),
+  );
 
+  // [2026-08-22追加] Googleカレンダー的な文脈情報: 同じユーザーが本日中(24時間以内)に
+  // 他にいくつ期限を抱えているかを事前に集計し、各DEADLINE候補のpayloadへ添える。
+  const workspaceMembersCache = new Map<string, string[]>();
+  const userDeadlineCounts = new Map<string, number>();
+  const rowUserIds = new Map<string, string[]>(); // responsibilityId -> userIds(所属Workspaceの全メンバー)
+  for (const r of validRows) {
     let userIds = workspaceMembersCache.get(r.workspaceId);
     if (!userIds) {
       userIds = await activeMemberUserIds(r.workspaceId);
       workspaceMembersCache.set(r.workspaceId, userIds);
     }
+    rowUserIds.set(r.id, userIds);
+    for (const userId of userIds) {
+      userDeadlineCounts.set(userId, (userDeadlineCounts.get(userId) ?? 0) + 1);
+    }
+  }
+
+  const candidates: NotificationCandidate[] = [];
+  for (const r of validRows) {
+    if (!r.hardDeadlineAt) continue;
+    const userIds = rowUserIds.get(r.id) ?? [];
 
     for (const userId of userIds) {
+      // 自分自身を除いた「他にいくつあるか」を出す(1件しかなければ0=文脈不要)。
+      const siblingCount = Math.max((userDeadlineCounts.get(userId) ?? 1) - 1, 0);
       candidates.push({
         userId,
         type: "DEADLINE",
@@ -139,6 +179,8 @@ async function collectDeadlineCandidates(now: Date): Promise<NotificationCandida
           responsibilityId: r.id,
           title: r.title,
           hardDeadlineAt: r.hardDeadlineAt.toISOString(),
+          importance: r.importance !== null ? String(r.importance) : null,
+          siblingCountToday: String(siblingCount),
         },
       });
     }
@@ -232,9 +274,9 @@ async function collectRiskCandidates(now: Date): Promise<NotificationCandidate[]
   const responsibilityIds = [...new Set<string>(occurredEvents.map((e: OccurredEvent) => e.aggregateId))];
   const responsibilities = await db.responsibility.findMany({
     where: { id: { in: responsibilityIds }, type: "RISK", deletedAt: null },
-    select: { id: true, workspaceId: true, title: true },
+    select: { id: true, workspaceId: true, title: true, importance: true },
   });
-  type RiskResponsibility = { id: string; workspaceId: string; title: string };
+  type RiskResponsibility = { id: string; workspaceId: string; title: string; importance: number | null };
   const respById = new Map(
     (responsibilities as RiskResponsibility[]).map((r: RiskResponsibility) => [r.id, r]),
   );
@@ -260,6 +302,7 @@ async function collectRiskCandidates(now: Date): Promise<NotificationCandidate[]
           responsibilityId: resp.id,
           title: resp.title,
           occurredAt: e.occurredAt.toISOString(),
+          importance: resp.importance !== null ? String(resp.importance) : null,
         },
       });
     }
@@ -292,6 +335,9 @@ export async function planNotifications(): Promise<{ created: number; skipped: n
       notifyQuietHoursStart: true,
       notifyQuietHoursEnd: true,
       notifyBundleWindowMinutes: true,
+      notifyDeadlineEnabled: true,
+      notifyFollowUpEnabled: true,
+      notifyRiskEnabled: true,
     },
   });
   type NotifyUser = {
@@ -300,14 +346,29 @@ export async function planNotifications(): Promise<{ created: number; skipped: n
     notifyQuietHoursStart: string | null;
     notifyQuietHoursEnd: string | null;
     notifyBundleWindowMinutes: number;
+    notifyDeadlineEnabled: boolean;
+    notifyFollowUpEnabled: boolean;
+    notifyRiskEnabled: boolean;
   };
   const userById = new Map((users as NotifyUser[]).map((u: NotifyUser) => [u.id, u]));
+
+  const TYPE_ENABLED_KEY: Record<NotificationCandidate["type"], keyof NotifyUser> = {
+    DEADLINE: "notifyDeadlineEnabled",
+    FOLLOW_UP: "notifyFollowUpEnabled",
+    RISK: "notifyRiskEnabled",
+  };
 
   let created = 0;
   let skipped = 0;
   for (const c of candidates) {
     const user = userById.get(c.userId);
     if (!user) continue;
+    // [2026-08-22追加] GitHub「Watching/Participating/Custom」に相当する種別粒度設定。
+    // 無効化されている種別はこの時点でスキップする(dedupeKeyの消費すら発生させない)。
+    if (!user[TYPE_ENABLED_KEY[c.type]]) {
+      skipped++;
+      continue;
+    }
 
     const { inQuietHours, endsAt } = isWithinQuietHours(
       now,
@@ -355,15 +416,82 @@ export async function planNotifications(): Promise<{ created: number; skipped: n
   return { created, skipped };
 }
 
-/** quietHours中に据え置かれたSCHEDULED通知のうち、scheduledAtが到来したものをSENTへ進める。 */
+/** DIGEST payload: 集約された個々の通知の要約リスト(JSON安全な文字列配列)。 */
+type DigestItem = { type: string; title: string; responsibilityId: string };
+
+/**
+ * quietHours中に据え置かれたSCHEDULED通知のうち、scheduledAtが到来したものを送達する。
+ * [2026-08-22追加] 同一ユーザーに2件以上が同時到来した場合は、個別に見せず1件の
+ * DIGEST通知へ集約する(Slack「まとめて1通」・銀行アプリの日次まとめ通知に相当)。
+ * 集約元の各通知はSUPPRESSED(schema.prismaのコメントで元々想定されていた状態値)へ
+ * 遷移させ、通知センターの一覧(SENT/READのみ表示)からは隠す。1件のみの場合は
+ * 従来通りその1件だけをSENTにする(digestのオーバーヘッドを掛けない)。
+ */
 export async function dispatchDueNotifications(): Promise<{ dispatched: number }> {
   const now = new Date();
-  const result = await db.notification.updateMany({
+  const due = await db.notification.findMany({
     where: { status: "SCHEDULED", scheduledAt: { lte: now } },
-    data: { status: "SENT", sentAt: now },
+    select: { id: true, userId: true, type: true, payload: true },
   });
-  if (result.count > 0) {
-    debugServer.event("Notifications/dispatch", "SCHEDULED→SENT", { count: result.count });
+  if (due.length === 0) return { dispatched: 0 };
+
+  type DueNotification = { id: string; userId: string; type: string; payload: unknown };
+  const byUser = new Map<string, DueNotification[]>();
+  for (const n of due as DueNotification[]) {
+    const list = byUser.get(n.userId) ?? [];
+    list.push(n);
+    byUser.set(n.userId, list);
   }
-  return { dispatched: result.count };
+
+  let dispatched = 0;
+  for (const [userId, items] of byUser) {
+    if (items.length === 1) {
+      await db.notification.update({
+        where: { id: items[0].id },
+        data: { status: "SENT", sentAt: now },
+      });
+      dispatched++;
+      continue;
+    }
+
+    // 2件以上 -> DIGESTへ集約。
+    const digestItems: DigestItem[] = items.map((n) => {
+      const p = n.payload as { responsibilityId?: string; title?: string } | null;
+      return { type: n.type, title: p?.title ?? "(タイトル不明)", responsibilityId: p?.responsibilityId ?? "" };
+    });
+    const digestPayload: NotificationPayload = {
+      count: String(digestItems.length),
+      itemsJson: JSON.stringify(digestItems),
+    };
+    try {
+      await db.notification.create({
+        data: {
+          userId,
+          type: "DIGEST",
+          dedupeKey: `DIGEST:${userId}:${now.toISOString()}`,
+          payload: digestPayload,
+          channel: "IN_APP",
+          status: "SENT",
+          scheduledAt: now,
+          sentAt: now,
+        },
+      });
+      await db.notification.updateMany({
+        where: { id: { in: items.map((n) => n.id) } },
+        data: { status: "SUPPRESSED" },
+      });
+      dispatched += items.length;
+      debugServer.event("Notifications/dispatch", "DIGESTへ集約", { userId, count: items.length });
+    } catch (err: unknown) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code !== "P2002") {
+        debugServer.error("Notifications/dispatch", "DIGEST作成失敗", { userId, err });
+      }
+    }
+  }
+
+  if (dispatched > 0) {
+    debugServer.event("Notifications/dispatch", "SCHEDULED→SENT/DIGEST", { count: dispatched });
+  }
+  return { dispatched };
 }

@@ -86,6 +86,8 @@ const UpdateSchema = z.object({
   tagIds: z.array(z.string().uuid()).max(20).optional(),
   graphX: z.number().nullable().optional(),
   graphY: z.number().nullable().optional(),
+  // [2026-08-22追加] FN-WK-03「今日の最低ライン」。最大3件まで固定できる(上限はAPI側で強制)。
+  pinned: z.boolean().optional(),
   taskDetail: TaskDetailSchema.optional(),
   commitmentDetail: CommitmentDetailSchema.optional(),
   decisionDetail: DecisionDetailSchema.optional(),
@@ -166,6 +168,22 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return apiError("VALIDATION_FAILED", "waitingDetailはtype=WAITINGの責任にのみ設定できます");
   }
 
+  // [2026-08-22追加] FN-WK-03「今日の最低ライン」: pinned=trueへの変更は最大3件まで
+  // (Notion「今週のタスク」ダッシュボードの手動ピン留めと同じ発想)。既にpinned=trueの
+  // ものを再度trueにする場合(no-op)は上限チェック対象外。
+  if (rest.pinned === true && !existing.pinned) {
+    const pinnedCount = await db.responsibility.count({
+      where: { workspaceId, pinned: true, deletedAt: null },
+    });
+    if (pinnedCount >= 3) {
+      return apiError(
+        "VALIDATION_FAILED",
+        "今日の最低ラインは最大3件までです。他の固定を解除してから追加してください",
+        { fieldErrors: { pinned: "最大3件までです" } },
+      );
+    }
+  }
+
   const updateResult = await db.responsibility.updateMany({
     where: { id, version },
     data: {
@@ -181,6 +199,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         : {}),
       ...(rest.graphX !== undefined ? { graphX: rest.graphX } : {}),
       ...(rest.graphY !== undefined ? { graphY: rest.graphY } : {}),
+      ...(rest.pinned !== undefined
+        ? { pinned: rest.pinned, pinnedAt: rest.pinned ? new Date() : null }
+        : {}),
       ...(resolvedDomainId ? { domainId: resolvedDomainId } : {}),
       updatedById: auth.user.userId,
       version: { increment: 1 },

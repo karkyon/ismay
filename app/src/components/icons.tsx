@@ -73,3 +73,14 @@ export function BellIcon(props: IconProps) {
     </svg>
   );
 }
+
+/** FN-WK-03「今日の最低ライン」ピン留め用(2026-08-22追加)。画鋲のモチーフ。 */
+export function PinIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 2v6" />
+      <path d="M7 8h10l-1.5 5H8.5L7 8Z" />
+      <path d="M12 13v9" />
+    </svg>
+  );
+}

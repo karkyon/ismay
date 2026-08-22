@@ -8,7 +8,7 @@ import { BellIcon } from "@/components/icons";
 
 interface NotificationItem {
   id: string;
-  type: "DEADLINE" | "FOLLOW_UP" | "RISK" | string;
+  type: "DEADLINE" | "FOLLOW_UP" | "RISK" | "DIGEST" | string;
   payload: {
     responsibilityId?: string;
     title?: string;
@@ -16,6 +16,11 @@ interface NotificationItem {
     followUpAt?: string;
     waitingOn?: string | null;
     occurredAt?: string;
+    importance?: string | null;
+    siblingCountToday?: string;
+    // DIGEST(2026-08-22追加): 複数通知を1件に集約した際のペイロード。
+    count?: string;
+    itemsJson?: string;
   };
   status: "SENT" | "READ" | string;
   scheduledAt: string;
@@ -23,13 +28,31 @@ interface NotificationItem {
   readAt: string | null;
 }
 
+interface DigestItem {
+  type: string;
+  title: string;
+  responsibilityId: string;
+}
+
 const POLL_INTERVAL_MS = 30_000;
+const HIGH_IMPORTANCE_THRESHOLD = 4;
 
 const TYPE_LABEL: Record<string, string> = {
   DEADLINE: "期限",
   FOLLOW_UP: "追跡",
   RISK: "リスク",
+  DIGEST: "まとめ",
 };
+
+function parseDigestItems(itemsJson: string | undefined): DigestItem[] {
+  if (!itemsJson) return [];
+  try {
+    const parsed = JSON.parse(itemsJson);
+    return Array.isArray(parsed) ? (parsed as DigestItem[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 function formatRelative(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -95,6 +118,12 @@ export function NotificationBell() {
 
   function onItemClick(item: NotificationItem) {
     if (item.status !== "READ") void markRead(item.id);
+    // DIGESTは複数の責任を束ねているため単一の遷移先が無い。「今後」一覧を開くに留める。
+    if (item.type === "DIGEST") {
+      setOpen(false);
+      router.push("/responsibilities");
+      return;
+    }
     setOpen(false);
     if (item.payload.responsibilityId) {
       router.push(`/responsibilities?focus=${item.payload.responsibilityId}`);
@@ -138,26 +167,61 @@ export function NotificationBell() {
             {loaded && items.length === 0 && (
               <p className="px-4 py-6 text-center text-xs text-faint">通知はありません</p>
             )}
-            {items.map((item) => (
-              <button
-                key={item.id}
-                onClick={() => onItemClick(item)}
-                className={`w-full text-left px-4 py-2.5 hover:bg-canvas transition border-b border-line/60 last:border-b-0 ${
-                  item.status !== "READ" ? "bg-brand-50/40" : ""
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-semibold text-brand-700 border border-brand-200 rounded px-1.5 py-0.5">
-                    {TYPE_LABEL[item.type] ?? item.type}
-                  </span>
-                  {item.status !== "READ" && <span className="w-1.5 h-1.5 rounded-full bg-red-500" />}
-                  <span className="ml-auto text-[11px] text-faint">
-                    {formatRelative(item.sentAt ?? item.scheduledAt)}
-                  </span>
-                </div>
-                <p className="text-ink mt-1 truncate">{item.payload.title ?? "(タイトル不明)"}</p>
-              </button>
-            ))}
+            {items.map((item) => {
+              const importance = item.payload.importance ? Number(item.payload.importance) : null;
+              const isHighImportance = importance !== null && importance >= HIGH_IMPORTANCE_THRESHOLD;
+              const digestItems = item.type === "DIGEST" ? parseDigestItems(item.payload.itemsJson) : [];
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => onItemClick(item)}
+                  className={`w-full text-left px-4 py-2.5 hover:bg-canvas transition border-b border-line/60 last:border-b-0 ${
+                    item.status !== "READ" ? "bg-brand-50/40" : ""
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`text-[10px] font-semibold rounded px-1.5 py-0.5 border ${
+                        isHighImportance
+                          ? "text-red-700 border-red-200 bg-red-50"
+                          : "text-brand-700 border-brand-200"
+                      }`}
+                    >
+                      {isHighImportance ? "★ " : ""}
+                      {TYPE_LABEL[item.type] ?? item.type}
+                    </span>
+                    {item.status !== "READ" && <span className="w-1.5 h-1.5 rounded-full bg-red-500" />}
+                    <span className="ml-auto text-[11px] text-faint">
+                      {formatRelative(item.sentAt ?? item.scheduledAt)}
+                    </span>
+                  </div>
+                  {item.type === "DIGEST" ? (
+                    <div className="mt-1">
+                      <p className="text-ink">{digestItems.length}件の通知をまとめました</p>
+                      <ul className="mt-1 space-y-0.5">
+                        {digestItems.slice(0, 4).map((d, idx) => (
+                          <li key={`${item.id}-${idx}`} className="text-[11px] text-muted truncate">
+                            ・{TYPE_LABEL[d.type] ?? d.type}: {d.title}
+                          </li>
+                        ))}
+                        {digestItems.length > 4 && (
+                          <li className="text-[11px] text-faint">他{digestItems.length - 4}件</li>
+                        )}
+                      </ul>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-ink mt-1 truncate">{item.payload.title ?? "(タイトル不明)"}</p>
+                      {item.payload.siblingCountToday && Number(item.payload.siblingCountToday) > 0 && (
+                        <p className="text-[11px] text-faint mt-0.5">
+                          本日は他に{item.payload.siblingCountToday}件の期限があります
+                        </p>
+                      )}
+                    </>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

@@ -9,6 +9,9 @@ interface NotificationSettings {
   notifyQuietHoursStart: string | null;
   notifyQuietHoursEnd: string | null;
   notifyBundleWindowMinutes: number;
+  notifyDeadlineEnabled: boolean;
+  notifyFollowUpEnabled: boolean;
+  notifyRiskEnabled: boolean;
 }
 interface MeResponse {
   data: {
@@ -59,6 +62,9 @@ export function DashboardClient() {
   const [quietHoursStart, setQuietHoursStart] = useState("22:00");
   const [quietHoursEnd, setQuietHoursEnd] = useState("07:00");
   const [bundleWindowMinutes, setBundleWindowMinutes] = useState(15);
+  const [deadlineEnabled, setDeadlineEnabled] = useState(true);
+  const [followUpEnabled, setFollowUpEnabled] = useState(true);
+  const [riskEnabled, setRiskEnabled] = useState(true);
   const [notificationError, setNotificationError] = useState("");
   const [notificationSaving, setNotificationSaving] = useState(false);
   const [notificationSaved, setNotificationSaved] = useState(false);
@@ -79,6 +85,9 @@ export function DashboardClient() {
     if (ns.notifyQuietHoursStart) setQuietHoursStart(ns.notifyQuietHoursStart);
     if (ns.notifyQuietHoursEnd) setQuietHoursEnd(ns.notifyQuietHoursEnd);
     setBundleWindowMinutes(ns.notifyBundleWindowMinutes);
+    setDeadlineEnabled(ns.notifyDeadlineEnabled);
+    setFollowUpEnabled(ns.notifyFollowUpEnabled);
+    setRiskEnabled(ns.notifyRiskEnabled);
 
     const sessionsRes = await debugFetch("/api/v1/auth/sessions");
     if (sessionsRes.ok) {
@@ -174,6 +183,9 @@ export function DashboardClient() {
           notifyQuietHoursStart: quietHoursEnabled ? quietHoursStart : null,
           notifyQuietHoursEnd: quietHoursEnabled ? quietHoursEnd : null,
           notifyBundleWindowMinutes: bundleWindowMinutes,
+          notifyDeadlineEnabled: deadlineEnabled,
+          notifyFollowUpEnabled: followUpEnabled,
+          notifyRiskEnabled: riskEnabled,
         }),
       });
       const body = await res.json().catch(() => null);
@@ -368,6 +380,23 @@ export function DashboardClient() {
             <p className="text-[11px] text-slate-400 mt-1">
               近い時刻に発生した複数の通知をこの間隔単位でまとめて表示します(0で即時表示)
             </p>
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-2">受け取る通知の種類</label>
+            <div className="space-y-1.5">
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input type="checkbox" checked={deadlineEnabled} onChange={(e) => setDeadlineEnabled(e.target.checked)} />
+                期限が近い責任(DEADLINE)
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input type="checkbox" checked={followUpEnabled} onChange={(e) => setFollowUpEnabled(e.target.checked)} />
+                追跡日が近いWAITING(FOLLOW_UP)
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input type="checkbox" checked={riskEnabled} onChange={(e) => setRiskEnabled(e.target.checked)} />
+                リスクの発生(RISK)
+              </label>
+            </div>
           </div>
           {notificationError && <p className="text-sm text-red-600">{notificationError}</p>}
           {notificationSaved && <p className="text-sm text-emerald-600">✅ 保存しました</p>}

@@ -220,6 +220,9 @@ export async function GET(req: NextRequest) {
       targetAt: true,
       startAfterAt: true,
       completedAt: true,
+      // [2026-08-22追加] FN-WK-03「今日の最低ライン」。一覧・PERT等でピン留め状態を表示する。
+      pinned: true,
+      pinnedAt: true,
       version: true,
       createdAt: true,
       updatedAt: true,

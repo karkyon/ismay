@@ -39,6 +39,11 @@ model User {
   notifyQuietHoursEnd        String? @map("notify_quiet_hours_end")
   /// FN-NTF-01 通知設定: まとめ通知の時間窓(分)。この間隔単位でscheduledAtを丸め、近接通知を束ねる [新設・推論]
   notifyBundleWindowMinutes  Int     @default(15) @map("notify_bundle_window_minutes")
+  /// FN-NTF-01 通知設定(2026-08-22追加): 種別ごとの受信可否(GitHub「Watching/
+  /// Participating/Custom」の粒度選択に相当)。既定は全種別ON。
+  notifyDeadlineEnabled      Boolean @default(true) @map("notify_deadline_enabled")
+  notifyFollowUpEnabled      Boolean @default(true) @map("notify_follow_up_enabled")
+  notifyRiskEnabled          Boolean @default(true) @map("notify_risk_enabled")
   version         Int       @default(0)
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
@@ -268,6 +273,10 @@ model Responsibility {
   targetAt         DateTime? @map("target_at")
   startAfterAt     DateTime? @map("start_after_at")
   completedAt      DateTime? @map("completed_at")
+  /// FN-WK-03「今日の最低ライン」(2026-08-22新設)。最大3件まで固定できる
+  /// (件数上限はAPI側で強制する)。Reality Mode変更時の差分表示は未実装(将来対応)。
+  pinned           Boolean   @default(false)
+  pinnedAt         DateTime? @map("pinned_at")
   version          Int       @default(0)
   createdById      String    @map("created_by")
   createdBy        User      @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])

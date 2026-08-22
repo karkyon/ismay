@@ -21,6 +21,9 @@ export async function GET(req: NextRequest) {
       notifyQuietHoursStart: user.notifyQuietHoursStart,
       notifyQuietHoursEnd: user.notifyQuietHoursEnd,
       notifyBundleWindowMinutes: user.notifyBundleWindowMinutes,
+      notifyDeadlineEnabled: user.notifyDeadlineEnabled,
+      notifyFollowUpEnabled: user.notifyFollowUpEnabled,
+      notifyRiskEnabled: user.notifyRiskEnabled,
     },
   });
 }

@@ -18,6 +18,11 @@ const UpdateSchema = z.object({
   notifyQuietHoursStart: HHMM.nullable().optional(),
   notifyQuietHoursEnd: HHMM.nullable().optional(),
   notifyBundleWindowMinutes: z.number().int().min(0).max(240).optional(),
+  // [2026-08-22追加] GitHub「Watching/Participating/Custom」の粒度選択に相当する、
+  // 通知種別ごとのON/OFF。
+  notifyDeadlineEnabled: z.boolean().optional(),
+  notifyFollowUpEnabled: z.boolean().optional(),
+  notifyRiskEnabled: z.boolean().optional(),
 });
 
 export async function PATCH(req: NextRequest) {
@@ -39,7 +44,14 @@ export async function PATCH(req: NextRequest) {
       ),
     });
   }
-  const { notifyQuietHoursStart, notifyQuietHoursEnd, notifyBundleWindowMinutes } = parsed.data;
+  const {
+    notifyQuietHoursStart,
+    notifyQuietHoursEnd,
+    notifyBundleWindowMinutes,
+    notifyDeadlineEnabled,
+    notifyFollowUpEnabled,
+    notifyRiskEnabled,
+  } = parsed.data;
 
   const hasStart = notifyQuietHoursStart !== undefined;
   const hasEnd = notifyQuietHoursEnd !== undefined;
@@ -54,8 +66,18 @@ export async function PATCH(req: NextRequest) {
     data: {
       ...(hasStart ? { notifyQuietHoursStart, notifyQuietHoursEnd } : {}),
       ...(notifyBundleWindowMinutes !== undefined ? { notifyBundleWindowMinutes } : {}),
+      ...(notifyDeadlineEnabled !== undefined ? { notifyDeadlineEnabled } : {}),
+      ...(notifyFollowUpEnabled !== undefined ? { notifyFollowUpEnabled } : {}),
+      ...(notifyRiskEnabled !== undefined ? { notifyRiskEnabled } : {}),
     },
-    select: { notifyQuietHoursStart: true, notifyQuietHoursEnd: true, notifyBundleWindowMinutes: true },
+    select: {
+      notifyQuietHoursStart: true,
+      notifyQuietHoursEnd: true,
+      notifyBundleWindowMinutes: true,
+      notifyDeadlineEnabled: true,
+      notifyFollowUpEnabled: true,
+      notifyRiskEnabled: true,
+    },
   });
   debugServer.state("PATCH /auth/notification-settings", "User通知設定", {
     userId: auth.user.userId,
