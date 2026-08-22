@@ -34,6 +34,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       commitmentDetail: { select: { counterpartyName: true, counterpartyContact: true, promiseText: true } },
       decisionDetail: { select: { options: true, chosenOption: true, rationale: true, decidedAt: true } },
       waitingDetail: { select: { waitingOn: true, expectedReplyBy: true, followUpAt: true } },
+      // 新設(2026-08-23): TBL-011 constraints(FN-CONS-01)。schema.prismaにはテーブルが
+      // 存在したが、GET/PATCHとも一度も配線されていなかった。
+      constraints: { select: { id: true, constraintType: true, value: true, note: true, createdAt: true }, orderBy: { createdAt: "asc" } },
     },
   });
   if (!responsibility) {
@@ -303,6 +306,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       commitmentDetail: { select: { counterpartyName: true, counterpartyContact: true, promiseText: true } },
       decisionDetail: { select: { options: true, chosenOption: true, rationale: true, decidedAt: true } },
       waitingDetail: { select: { waitingOn: true, expectedReplyBy: true, followUpAt: true } },
+      // 新設(2026-08-23): TBL-011 constraints(FN-CONS-01)。schema.prismaにはテーブルが
+      // 存在したが、GET/PATCHとも一度も配線されていなかった。
+      constraints: { select: { id: true, constraintType: true, value: true, note: true, createdAt: true }, orderBy: { createdAt: "asc" } },
     },
   });
   debugServer.state("PATCH /responsibilities/[id]", "Responsibility", { id, status: updated.status });

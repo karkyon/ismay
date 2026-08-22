@@ -88,6 +88,14 @@ interface WaitingDetailRef {
   followUpAt: string | null;
 }
 
+interface ConstraintRef {
+  id: string;
+  constraintType: string;
+  value: { text?: string } | null;
+  note: string | null;
+  createdAt: string;
+}
+
 interface ResponsibilityDetail extends ResponsibilityListItem {
   description: string | null;
   sourceKind: string;
@@ -97,6 +105,7 @@ interface ResponsibilityDetail extends ResponsibilityListItem {
   commitmentDetail: CommitmentDetailRef | null;
   decisionDetail: DecisionDetailRef | null;
   waitingDetail: WaitingDetailRef | null;
+  constraints: ConstraintRef[];
 }
 
 interface RelatedItem {
@@ -106,6 +115,15 @@ interface RelatedItem {
   status: string;
   similarity: number;
 }
+
+/** [2026-08-23追加] FN-CONS-01 制約種別ラベル。schema.prisma Constraint.constraintTypeの値域。 */
+const CONSTRAINT_TYPE_LABEL: Record<string, string> = {
+  DEADLINE: "期限",
+  LOCATION: "場所",
+  PERMISSION: "権限",
+  RESOURCE: "道具・資源",
+  CAPACITY: "体力・認知強度",
+};
 
 const TYPE_LABEL: Record<string, string> = {
   TASK: "作業",
@@ -295,6 +313,14 @@ export function ResponsibilitiesClient() {
   const [bulkTagMode, setBulkTagMode] = useState<"ADD_TAG" | "REMOVE_TAG">("ADD_TAG");
   type BulkUndoState = { label: string; undo: Record<string, unknown> };
   const [bulkUndo, setBulkUndo] = useState<BulkUndoState | null>(null);
+
+  // [2026-08-23追加] FN-CONS-01 制約(TBL-011)。責任詳細に付随する制約の追加・削除。
+  const [constraintFormOpen, setConstraintFormOpen] = useState(false);
+  const [constraintType, setConstraintType] = useState("LOCATION");
+  const [constraintText, setConstraintText] = useState("");
+  const [constraintNote, setConstraintNote] = useState("");
+  const [savingConstraint, setSavingConstraint] = useState(false);
+  const [constraintError, setConstraintError] = useState("");
 
   // [2026-08-21追加] タイトル/詳細のインライン編集、タグ管理
   const [allTags, setAllTags] = useState<ResponsibilityTagRef[]>([]);
@@ -609,6 +635,46 @@ export function ResponsibilitiesClient() {
       await toggleTag(tagId);
     } finally {
       setSavingTag(false);
+    }
+  }
+
+  /** [2026-08-23追加] FN-CONS-01 制約の追加。編集用のライフサイクル管理列がschema.prismaに
+   * 無いため、編集は「削除して追加し直す」で対応する(deleteConstraint参照)。 */
+  async function addConstraint(e: React.FormEvent) {
+    e.preventDefault();
+    if (!detail || !constraintText.trim()) return;
+    setConstraintError("");
+    setSavingConstraint(true);
+    try {
+      const res = await apiFetch(`/api/v1/responsibilities/${detail.id}/constraints`, {
+        method: "POST",
+        body: JSON.stringify({
+          constraintType,
+          text: constraintText.trim(),
+          note: constraintNote.trim() || null,
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setConstraintError(body?.error?.message ?? "制約の追加に失敗しました");
+        return;
+      }
+      setConstraintText("");
+      setConstraintNote("");
+      setConstraintFormOpen(false);
+      await loadDetail(detail.id);
+    } finally {
+      setSavingConstraint(false);
+    }
+  }
+
+  async function deleteConstraint(constraintId: string) {
+    if (!detail) return;
+    const res = await apiFetch(`/api/v1/responsibilities/${detail.id}/constraints/${constraintId}`, {
+      method: "DELETE",
+    });
+    if (res.ok) {
+      await loadDetail(detail.id);
     }
   }
 
@@ -1612,6 +1678,81 @@ export function ResponsibilitiesClient() {
                         </button>
                       )}
                     </div>
+                  </div>
+
+                  {/* [2026-08-23新設] FN-CONS-01 制約(TBL-011)。期限・場所・権限・道具・体力等、
+                      その責任を実行するうえでの制約条件。編集は削除→追加し直す方式。 */}
+                  <div className="pt-2 border-t border-line">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <p className="text-[10.5px] font-semibold text-faint uppercase tracking-wide">制約</p>
+                      <button
+                        onClick={() => setConstraintFormOpen((v) => !v)}
+                        className="text-[10.5px] text-brand-700 hover:underline"
+                      >
+                        {constraintFormOpen ? "閉じる" : "+ 追加"}
+                      </button>
+                    </div>
+                    {detail.constraints.length > 0 && (
+                      <ul className="space-y-1 mb-2">
+                        {detail.constraints.map((c) => (
+                          <li
+                            key={c.id}
+                            className="flex items-start justify-between gap-2 bg-canvas rounded-lg px-2.5 py-1.5 text-[11px]"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-medium text-ink">
+                                {CONSTRAINT_TYPE_LABEL[c.constraintType] ?? c.constraintType}
+                              </span>
+                              <span className="text-muted"> — {c.value?.text ?? ""}</span>
+                              {c.note && <p className="text-faint mt-0.5">{c.note}</p>}
+                            </div>
+                            <button
+                              onClick={() => deleteConstraint(c.id)}
+                              className="shrink-0 text-faint hover:text-red-600"
+                              aria-label="制約を削除"
+                            >
+                              ✕
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {constraintFormOpen && (
+                      <form onSubmit={addConstraint} className="space-y-1.5 bg-canvas rounded-lg p-2.5">
+                        <select
+                          value={constraintType}
+                          onChange={(e) => setConstraintType(e.target.value)}
+                          className="w-full text-[11px] border border-line rounded-md px-2 py-1 bg-surface"
+                        >
+                          {Object.entries(CONSTRAINT_TYPE_LABEL).map(([k, v]) => (
+                            <option key={k} value={k}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          value={constraintText}
+                          onChange={(e) => setConstraintText(e.target.value)}
+                          placeholder="制約の内容(例: 〇〇オフィスのみ)"
+                          required
+                          className="w-full text-[11px] border border-line rounded-md px-2 py-1"
+                        />
+                        <input
+                          value={constraintNote}
+                          onChange={(e) => setConstraintNote(e.target.value)}
+                          placeholder="補足(任意)"
+                          className="w-full text-[11px] border border-line rounded-md px-2 py-1"
+                        />
+                        {constraintError && <p className="text-[11px] text-red-600">{constraintError}</p>}
+                        <button
+                          type="submit"
+                          disabled={savingConstraint || !constraintText.trim()}
+                          className="text-[10.5px] bg-ink text-white rounded-full px-2.5 py-1 disabled:opacity-40"
+                        >
+                          {savingConstraint ? "保存中..." : "追加する"}
+                        </button>
+                      </form>
+                    )}
                   </div>
                 </div>
 
