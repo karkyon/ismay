@@ -286,6 +286,16 @@ export function ResponsibilitiesClient() {
   const [sortBy, setSortBy] = useState<"targetAt" | "importance" | "related">("targetAt");
   const [view, setView] = useState<"list" | "calendar">("list");
 
+  // [2026-08-23追加] FN-WK-04 一括操作(FR-WK-09)。チェックボックス選択+一括操作バー。
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState("");
+  const [bulkTagPickerOpen, setBulkTagPickerOpen] = useState(false);
+  const [bulkTagMode, setBulkTagMode] = useState<"ADD_TAG" | "REMOVE_TAG">("ADD_TAG");
+  type BulkUndoState = { label: string; undo: Record<string, unknown> };
+  const [bulkUndo, setBulkUndo] = useState<BulkUndoState | null>(null);
+
   // [2026-08-21追加] タイトル/詳細のインライン編集、タグ管理
   const [allTags, setAllTags] = useState<ResponsibilityTagRef[]>([]);
   const [editing, setEditing] = useState(false);
@@ -341,6 +351,72 @@ export function ResponsibilitiesClient() {
     }
     setLoadingList(false);
   }, []);
+
+  /** [2026-08-23追加] FN-WK-04 一括操作。選択トグル・一括実行・Undo。 */
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function exitSelectionMode() {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+    setBulkError("");
+  }
+
+  async function runBulkAction(action: "COMPLETE" | "DELETE" | "ADD_TAG" | "REMOVE_TAG", tagId?: string) {
+    if (selectedIds.size === 0) return;
+    const ids = [...selectedIds];
+    const label =
+      action === "COMPLETE" ? "完了" : action === "DELETE" ? "削除" : action === "ADD_TAG" ? "タグ付与" : "タグ削除";
+    if (!confirm(`選択した${ids.length}件を「${label}」します。よろしいですか?`)) return;
+
+    setBulkBusy(true);
+    setBulkError("");
+    try {
+      const res = await apiFetch("/api/v1/responsibilities/bulk", {
+        method: "POST",
+        body: JSON.stringify({ ids, action, tagId }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setBulkError(body?.error?.message ?? "一括操作に失敗しました");
+        return;
+      }
+      const { affected, skipped, undo } = body.data;
+      debugLog.event("ResponsibilitiesClient", "bulk action done", { action, affected, skipped: skipped.length });
+      if (undo) {
+        setBulkUndo({ label: `${label}(${affected}件)`, undo });
+      }
+      exitSelectionMode();
+      await loadList();
+      if (detail && ids.includes(detail.id)) {
+        setSelectedId(null);
+        setDetail(null);
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function undoBulkAction() {
+    if (!bulkUndo) return;
+    setBulkBusy(true);
+    try {
+      await apiFetch("/api/v1/responsibilities/bulk/undo", {
+        method: "POST",
+        body: JSON.stringify(bulkUndo.undo),
+      });
+      setBulkUndo(null);
+      await loadList();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   const loadDetail = useCallback(async (id: string) => {
     setLoadingDetail(true);
@@ -779,6 +855,16 @@ export function ResponsibilitiesClient() {
               カレンダー
             </button>
           </div>
+          {view === "list" && (
+            <button
+              onClick={() => (selectionMode ? exitSelectionMode() : setSelectionMode(true))}
+              className={`text-xs px-3 py-2 rounded-lg font-medium border transition ${
+                selectionMode ? "border-brand bg-brand-50 text-brand-700" : "border-line text-muted hover:bg-canvas"
+              }`}
+            >
+              {selectionMode ? "選択をやめる" : "選択"}
+            </button>
+          )}
           <button
             onClick={() => setShowCreate((v) => !v)}
             className="shrink-0 bg-ink text-white text-sm font-medium px-4 py-2 rounded-xl hover:bg-black transition"
@@ -787,6 +873,100 @@ export function ResponsibilitiesClient() {
           </button>
         </div>
       </div>
+
+      {/* [2026-08-23新設] FN-WK-04 一括操作バー。選択中のみ表示。 */}
+      {selectionMode && (
+        <div className="mb-4 bg-ink text-white rounded-xl px-4 py-3 flex items-center gap-3 flex-wrap sticky top-0 z-10 shadow-pop">
+          <span className="text-sm font-medium">{selectedIds.size}件選択中</span>
+          <div className="flex items-center gap-2 ml-auto flex-wrap">
+            <button
+              onClick={() => runBulkAction("COMPLETE")}
+              disabled={bulkBusy || selectedIds.size === 0}
+              className="text-xs bg-white/15 hover:bg-white/25 rounded-lg px-3 py-1.5 disabled:opacity-40"
+            >
+              完了にする
+            </button>
+            <button
+              onClick={() => {
+                setBulkTagMode("ADD_TAG");
+                setBulkTagPickerOpen(true);
+              }}
+              disabled={bulkBusy || selectedIds.size === 0}
+              className="text-xs bg-white/15 hover:bg-white/25 rounded-lg px-3 py-1.5 disabled:opacity-40"
+            >
+              タグ付与
+            </button>
+            <button
+              onClick={() => {
+                setBulkTagMode("REMOVE_TAG");
+                setBulkTagPickerOpen(true);
+              }}
+              disabled={bulkBusy || selectedIds.size === 0}
+              className="text-xs bg-white/15 hover:bg-white/25 rounded-lg px-3 py-1.5 disabled:opacity-40"
+            >
+              タグ削除
+            </button>
+            <button
+              onClick={() => runBulkAction("DELETE")}
+              disabled={bulkBusy || selectedIds.size === 0}
+              className="text-xs bg-red-500/80 hover:bg-red-500 rounded-lg px-3 py-1.5 disabled:opacity-40"
+            >
+              削除
+            </button>
+            <button onClick={exitSelectionMode} className="text-xs text-white/70 hover:text-white px-2">
+              閉じる
+            </button>
+          </div>
+          {bulkError && <p className="w-full text-xs text-red-200">{bulkError}</p>}
+        </div>
+      )}
+
+      {bulkTagPickerOpen && (
+        <div
+          className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-4"
+          onClick={() => setBulkTagPickerOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-surface rounded-2xl shadow-pop w-full max-w-xs p-4"
+          >
+            <p className="text-sm font-medium text-ink mb-3">
+              {bulkTagMode === "ADD_TAG" ? "付与するタグを選択" : "削除するタグを選択"}
+            </p>
+            <div className="flex flex-wrap gap-1.5 mb-3">
+              {allTags.map((tag) => (
+                <button
+                  key={tag.id}
+                  onClick={() => {
+                    setBulkTagPickerOpen(false);
+                    void runBulkAction(bulkTagMode, tag.id);
+                  }}
+                  className="text-xs px-2.5 py-1 rounded-full border border-line hover:border-brand hover:bg-brand-50"
+                  style={{ borderColor: tag.color }}
+                >
+                  {tag.name}
+                </button>
+              ))}
+              {allTags.length === 0 && <p className="text-xs text-faint">タグがまだありません</p>}
+            </div>
+            <button onClick={() => setBulkTagPickerOpen(false)} className="text-xs text-faint hover:underline">
+              キャンセル
+            </button>
+          </div>
+        </div>
+      )}
+
+      {bulkUndo && (
+        <div className="mb-4 bg-canvas border border-line rounded-xl px-4 py-2.5 flex items-center gap-3 text-sm">
+          <span className="text-ink">{bulkUndo.label}を実行しました</span>
+          <button onClick={undoBulkAction} disabled={bulkBusy} className="text-brand-700 font-medium hover:underline ml-auto">
+            元に戻す
+          </button>
+          <button onClick={() => setBulkUndo(null)} className="text-faint hover:text-ink">
+            ✕
+          </button>
+        </div>
+      )}
 
       {showCreate && (
         <form onSubmit={submitCreate} className="mb-6 bg-surface border border-line rounded-2xl shadow-card p-4 space-y-3">
@@ -906,6 +1086,7 @@ export function ResponsibilitiesClient() {
                 const selected = selectedId === item.id;
                 const qa = quickActionFor(item);
                 const busy = quickActingId === item.id;
+                const checked = selectedIds.has(item.id);
                 return (
                   <div key={item.id} id={`resp-row-${item.id}`}>
                     <div
@@ -913,11 +1094,24 @@ export function ResponsibilitiesClient() {
                         selected ? "bg-brand-50 border-l-brand" : "border-l-transparent hover:bg-canvas"
                       }`}
                     >
-                      <button onClick={() => selectItem(item.id)} className="min-w-0 flex-1 text-left">
+                      {selectionMode && (
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSelect(item.id)}
+                          className="shrink-0 mt-2.5 mr-1"
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      )}
+                      <button
+                        onClick={() => (selectionMode ? toggleSelect(item.id) : selectItem(item.id))}
+                        className="min-w-0 flex-1 text-left"
+                      >
                         <div className="flex items-start gap-2">
                           <span
                             className={`shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full ${
                               STATUS_DOT_STYLE[item.status] ?? "bg-faint"
+
                             }`}
                           />
                           <div className="min-w-0 flex-1">
