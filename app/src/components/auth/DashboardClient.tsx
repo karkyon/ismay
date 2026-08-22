@@ -68,6 +68,14 @@ export function DashboardClient() {
   const [notificationError, setNotificationError] = useState("");
   const [notificationSaving, setNotificationSaving] = useState(false);
   const [notificationSaved, setNotificationSaved] = useState(false);
+  // [2026-08-23追加] FN-PRV-01 データ主権(エクスポート・アカウント削除)。
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     // debugFetchは401時に自動でRefresh Tokenによるサイレント延長を1回試みる(src/lib/auth/client.ts)。
@@ -198,6 +206,64 @@ export function DashboardClient() {
       setNotificationError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
     } finally {
       setNotificationSaving(false);
+    }
+  }
+
+  /** データエクスポート(FN-PRV-01)。複数ファイルを個別Blobとして順にダウンロードさせる
+   * (ZIP化は新規npm依存を避けるため今回は行わない。lib/dataExport.ts参照)。 */
+  async function exportData() {
+    setExportError("");
+    setExporting(true);
+    try {
+      const res = await apiFetch("/api/v1/exports");
+      const body = await res.json().catch(() => null);
+      if (!res.ok || !body?.data?.files) {
+        setExportError(body?.error?.message ?? "エクスポートに失敗しました");
+        return;
+      }
+      const files: Record<string, string> = body.data.files;
+      const stamp = new Date().toISOString().slice(0, 10);
+      for (const [name, content] of Object.entries(files)) {
+        const blob = new Blob([content], { type: name.endsWith(".json") ? "application/json" : "text/csv" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `ismay-export-${stamp}-${name}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        // 連続クリックだとブラウザが一部のダウンロードを間引くことがあるため、
+        // ファイル間に短い間隔を空ける。
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    } catch {
+      setExportError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  /** アカウント削除(FR-AUTH-05・FR-PRV-02)。本人再認証+確認文字列入力必須。 */
+  async function deleteAccount(e: React.FormEvent) {
+    e.preventDefault();
+    setDeleteError("");
+    setDeleting(true);
+    try {
+      const res = await apiFetch("/api/v1/auth/account/delete", {
+        method: "POST",
+        body: JSON.stringify({ currentPassword: deletePassword, confirmText: deleteConfirmText }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setDeleteError(body?.error?.message ?? "削除に失敗しました");
+        return;
+      }
+      router.replace("/login");
+    } catch {
+      setDeleteError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -430,6 +496,87 @@ export function DashboardClient() {
           ))}
         </ul>
       </section>
+
+      {/* [2026-08-23新設] FN-PRV-01 データ主権(UI-14)。エクスポート・アカウント削除。 */}
+      <section className="bg-white border border-slate-200 rounded-xl p-5">
+        <h2 className="font-semibold text-slate-800 mb-3">データのエクスポート</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          原文・責任・AI推定・PEM・履歴を機械可読(JSON)・人間可読(CSV)の両形式でダウンロードします。
+        </p>
+        {exportError && <p className="text-sm text-red-600 mb-2">{exportError}</p>}
+        <button
+          onClick={exportData}
+          disabled={exporting}
+          className="bg-slate-900 hover:bg-black text-white text-sm rounded-lg px-4 py-2 disabled:opacity-50"
+        >
+          {exporting ? "エクスポート中..." : "エクスポートをダウンロード"}
+        </button>
+      </section>
+
+      <section className="bg-white border border-red-200 rounded-xl p-5">
+        <h2 className="font-semibold text-red-700 mb-3">アカウントの削除</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          アカウントと全データを削除します。この操作は取り消せません。削除前にエクスポートをおすすめします。
+        </p>
+        {!deleteOpen ? (
+          <button
+            onClick={() => setDeleteOpen(true)}
+            className="text-sm text-red-600 border border-red-300 rounded-lg px-4 py-2 hover:bg-red-50"
+          >
+            アカウントを削除する
+          </button>
+        ) : (
+          <form onSubmit={deleteAccount} className="space-y-3 max-w-sm">
+            <div>
+              <label className="text-xs text-slate-500 block mb-1">現在のパスワード</label>
+              <input
+                type="password"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+                required
+                autoComplete="current-password"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 block mb-1">
+                確認のため「削除」と入力してください
+              </label>
+              <input
+                type="text"
+                value={deleteConfirmText}
+                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                required
+                placeholder="削除"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+            {deleteError && <p className="text-sm text-red-600">{deleteError}</p>}
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={deleting || deleteConfirmText !== "削除"}
+                className="bg-red-600 hover:bg-red-700 text-white text-sm rounded-lg px-4 py-2 disabled:opacity-50"
+              >
+                {deleting ? "削除中..." : "完全に削除する"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteOpen(false);
+                  setDeletePassword("");
+                  setDeleteConfirmText("");
+                  setDeleteError("");
+                }}
+                className="text-sm text-slate-500 px-4 py-2"
+              >
+                キャンセル
+              </button>
+            </div>
+          </form>
+        )}
+      </section>
     </div>
+
   );
 }
