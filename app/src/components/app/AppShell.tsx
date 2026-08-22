@@ -6,6 +6,7 @@ import { apiFetch, debugFetch, AUTH_EXPIRED_EVENT } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { isTypingTarget } from "@/lib/keyboard";
 import { TodayIcon, InboxIcon, CalendarIcon, SettingsIcon, MicIcon } from "@/components/icons";
+import { NotificationBell } from "@/components/app/NotificationBell";
 
 const NAV_ITEMS = [
   { href: "/today", label: "今日", icon: TodayIcon },
@@ -128,6 +129,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
         <div className="flex-1 min-w-0 flex items-center justify-between px-5 md:px-8">
           <p className="text-sm font-semibold text-ink">{PAGE_TITLE[pathname] ?? ""}</p>
+          <div className="flex items-center gap-1.5">
+          {/* [2026-08-22追加] FN-NTF-01通知ベル。教訓2.3(発見できないUI)を踏まえ、
+              ホバー専用にせず常時表示する。ユーザーメニューの左隣に固定配置。 */}
+          <NotificationBell />
           <div className="relative">
             <button
               onClick={(e) => {
@@ -192,6 +197,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </div>
               </div>
             )}
+          </div>
           </div>
         </div>
       </header>

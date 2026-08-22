@@ -5,8 +5,17 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 
+interface NotificationSettings {
+  notifyQuietHoursStart: string | null;
+  notifyQuietHoursEnd: string | null;
+  notifyBundleWindowMinutes: number;
+}
 interface MeResponse {
-  data: { user: { id: string; email: string; displayName: string | null }; mfaEnabled: boolean };
+  data: {
+    user: { id: string; email: string; displayName: string | null };
+    mfaEnabled: boolean;
+    notificationSettings: NotificationSettings;
+  };
 }
 interface SessionItem {
   id: string;
@@ -45,6 +54,14 @@ export function DashboardClient() {
   const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [passwordSubmitting, setPasswordSubmitting] = useState(false);
+  // [2026-08-22追加] FN-NTF-01 通知設定(静穏時間帯・まとめ通知の時間窓)。
+  const [quietHoursEnabled, setQuietHoursEnabled] = useState(false);
+  const [quietHoursStart, setQuietHoursStart] = useState("22:00");
+  const [quietHoursEnd, setQuietHoursEnd] = useState("07:00");
+  const [bundleWindowMinutes, setBundleWindowMinutes] = useState(15);
+  const [notificationError, setNotificationError] = useState("");
+  const [notificationSaving, setNotificationSaving] = useState(false);
+  const [notificationSaved, setNotificationSaved] = useState(false);
 
   const load = useCallback(async () => {
     // debugFetchは401時に自動でRefresh Tokenによるサイレント延長を1回試みる(src/lib/auth/client.ts)。
@@ -57,6 +74,11 @@ export function DashboardClient() {
     }
     const meBody: MeResponse = await meRes.json();
     setMe(meBody.data);
+    const ns = meBody.data.notificationSettings;
+    setQuietHoursEnabled(!!ns.notifyQuietHoursStart && !!ns.notifyQuietHoursEnd);
+    if (ns.notifyQuietHoursStart) setQuietHoursStart(ns.notifyQuietHoursStart);
+    if (ns.notifyQuietHoursEnd) setQuietHoursEnd(ns.notifyQuietHoursEnd);
+    setBundleWindowMinutes(ns.notifyBundleWindowMinutes);
 
     const sessionsRes = await debugFetch("/api/v1/auth/sessions");
     if (sessionsRes.ok) {
@@ -137,6 +159,33 @@ export function DashboardClient() {
       setPasswordError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
     } finally {
       setPasswordSubmitting(false);
+    }
+  }
+
+  async function saveNotificationSettings(e: React.FormEvent) {
+    e.preventDefault();
+    setNotificationError("");
+    setNotificationSaved(false);
+    setNotificationSaving(true);
+    try {
+      const res = await apiFetch("/api/v1/auth/notification-settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          notifyQuietHoursStart: quietHoursEnabled ? quietHoursStart : null,
+          notifyQuietHoursEnd: quietHoursEnabled ? quietHoursEnd : null,
+          notifyBundleWindowMinutes: bundleWindowMinutes,
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setNotificationError(body?.error?.message ?? "通知設定の保存に失敗しました");
+        return;
+      }
+      setNotificationSaved(true);
+    } catch {
+      setNotificationError("通信に失敗しました。ネットワーク状態を確認してもう一度お試しください");
+    } finally {
+      setNotificationSaving(false);
     }
   }
 
@@ -272,6 +321,63 @@ export function DashboardClient() {
             {passwordSubmitting ? "変更中..." : "パスワードを変更する"}
           </button>
           <p className="text-[11px] text-slate-400">変更すると、この端末を含む全ての端末で再ログインが必要になります。</p>
+        </form>
+      </section>
+
+      {/* [2026-08-22新設] FN-NTF-01 通知設定。 */}
+      <section className="bg-white border border-slate-200 rounded-xl p-5">
+        <h2 className="font-semibold text-slate-800 mb-3">通知設定</h2>
+        <form onSubmit={saveNotificationSettings} className="space-y-4 max-w-sm">
+          <div>
+            <label className="flex items-center gap-2 text-sm text-slate-700 mb-2">
+              <input
+                type="checkbox"
+                checked={quietHoursEnabled}
+                onChange={(e) => setQuietHoursEnabled(e.target.checked)}
+              />
+              静穏時間帯を設定する(この時間帯は通知の表示を翌朝まで待ちます)
+            </label>
+            {quietHoursEnabled && (
+              <div className="flex items-center gap-2 text-sm">
+                <input
+                  type="time"
+                  value={quietHoursStart}
+                  onChange={(e) => setQuietHoursStart(e.target.value)}
+                  className="border border-slate-300 rounded-lg px-2 py-1.5"
+                />
+                <span className="text-slate-400">〜</span>
+                <input
+                  type="time"
+                  value={quietHoursEnd}
+                  onChange={(e) => setQuietHoursEnd(e.target.value)}
+                  className="border border-slate-300 rounded-lg px-2 py-1.5"
+                />
+              </div>
+            )}
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 block mb-1">まとめ通知の時間窓(分)</label>
+            <input
+              type="number"
+              min={0}
+              max={240}
+              value={bundleWindowMinutes}
+              onChange={(e) => setBundleWindowMinutes(Number(e.target.value))}
+              className="w-28 border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            />
+            <p className="text-[11px] text-slate-400 mt-1">
+              近い時刻に発生した複数の通知をこの間隔単位でまとめて表示します(0で即時表示)
+            </p>
+          </div>
+          {notificationError && <p className="text-sm text-red-600">{notificationError}</p>}
+          {notificationSaved && <p className="text-sm text-emerald-600">✅ 保存しました</p>}
+          <button
+            type="submit"
+            disabled={notificationSaving}
+            className="bg-slate-900 hover:bg-black text-white text-sm rounded-lg px-4 py-2 disabled:opacity-50"
+          >
+            {notificationSaving ? "保存中..." : "通知設定を保存する"}
+          </button>
         </form>
       </section>
 

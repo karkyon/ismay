@@ -33,6 +33,12 @@ model User {
   timeZone        String    @default("Asia/Tokyo") @map("time_zone")
   /// ACTIVE/SUSPENDED/DELETED [推論]
   status          String    @default("ACTIVE")
+  /// FN-NTF-01 通知設定: 静穏時間帯の開始("HH:MM"、timeZone基準)。null=静穏時間なし [新設・推論]
+  notifyQuietHoursStart      String? @map("notify_quiet_hours_start")
+  /// FN-NTF-01 通知設定: 静穏時間帯の終了("HH:MM"、timeZone基準)。開始>終了の場合は日をまたぐ扱い [新設・推論]
+  notifyQuietHoursEnd        String? @map("notify_quiet_hours_end")
+  /// FN-NTF-01 通知設定: まとめ通知の時間窓(分)。この間隔単位でscheduledAtを丸め、近接通知を束ねる [新設・推論]
+  notifyBundleWindowMinutes  Int     @default(15) @map("notify_bundle_window_minutes")
   version         Int       @default(0)
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")

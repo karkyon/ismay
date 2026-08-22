@@ -16,5 +16,11 @@ export async function GET(req: NextRequest) {
   return apiOk({
     user: { id: user.id, email: user.email, displayName: user.displayName },
     mfaEnabled: !!totp && !totp.disabledAt,
+    // FN-NTF-01(2026-08-22追加): 通知設定はDashboardClient側の設定UIが初期値として使う。
+    notificationSettings: {
+      notifyQuietHoursStart: user.notifyQuietHoursStart,
+      notifyQuietHoursEnd: user.notifyQuietHoursEnd,
+      notifyBundleWindowMinutes: user.notifyBundleWindowMinutes,
+    },
   });
 }
