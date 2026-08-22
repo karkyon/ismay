@@ -5,7 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { apiFetch, debugFetch, AUTH_EXPIRED_EVENT } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { isTypingTarget } from "@/lib/keyboard";
-import { TodayIcon, InboxIcon, CalendarIcon, SettingsIcon, MicIcon } from "@/components/icons";
+import { TodayIcon, InboxIcon, CalendarIcon, SettingsIcon, MicIcon, SearchIcon } from "@/components/icons";
 import { NotificationBell } from "@/components/app/NotificationBell";
 
 const NAV_ITEMS = [
@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { href: "/inbox", label: "Inbox", icon: InboxIcon },
   { href: "/responsibilities", label: "今後", icon: CalendarIcon },
   { href: "/relations", label: "関係図", icon: CalendarIcon },
+  { href: "/search", label: "検索", icon: SearchIcon },
   { href: "/tags", label: "タグ", icon: SettingsIcon },
   { href: "/admin/ai-providers", label: "AIプロバイダー", icon: SettingsIcon },
 ] as const;

@@ -84,3 +84,13 @@ export function PinIcon(props: IconProps) {
     </svg>
   );
 }
+
+/** UI-11 横断検索用(2026-08-22追加)。虫眼鏡のモチーフ。 */
+export function SearchIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="M20 20l-5-5" />
+    </svg>
+  );
+}
