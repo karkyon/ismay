@@ -31,8 +31,9 @@ async function representativeTimeZone(workspaceId: string): Promise<string> {
   return member?.user.timeZone ?? "Asia/Tokyo";
 }
 
-/** 指定timeZone上での「直近の月曜0:00」を起点に、[startAt, endAt)の週境界を返す。 */
-function weekBoundaries(now: Date, timeZone: string): { startAt: Date; endAt: Date } {
+/** 指定timeZone上での「直近の月曜0:00」を起点に、[startAt, endAt)の週境界を返す。
+ * [2026-08-23] FN-PEM-03(週次レビュー)でも同じ週区切りを使うためexportする。 */
+export function weekBoundaries(now: Date, timeZone: string): { startAt: Date; endAt: Date } {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",

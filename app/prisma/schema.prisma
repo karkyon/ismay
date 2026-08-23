@@ -58,6 +58,7 @@ model User {
   pemObservations     PemObservation[]
   pemHypotheses       PemHypothesis[]
   pemOnboardingConversation PemOnboardingConversation?
+  pemWeeklyReviews    PemWeeklyReview[]
   notifications       Notification[]
   auditLogsAsActor    AuditLog[]             @relation("AuditActorUser")
 
@@ -702,6 +703,11 @@ model PemHypothesis {
   /// に合わせTEMPORARYを追加。設計書の4分類のうち「今後使わない」は本レコードの
   /// deletedAt(論理削除・忘却操作)として表現し、userVerdictには含めない。
   userVerdict String    @default("PENDING") @map("user_verdict")
+  /// 新設(2026-08-23・FN-PEM-03対応): AI-07自動生成時のみ設定する集計指標キー
+  /// (例: "DEFER_RATE_BY_ESTIMATE"、lib/pem.tsのOBSERVATION.payload.metricと対応)。
+  /// 「本人がREJECTした仮説は同じ根拠だけで再提案しない」(機能別詳細設計書v1.1 13章)を
+  /// 満たすため、再生成前に同一metricの既存仮説を確認する用途に使う。初回対話由来(null)は対象外。
+  sourceMetric String?   @map("source_metric")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
   deletedAt   DateTime? @map("deleted_at")
@@ -745,6 +751,27 @@ model PemOnboardingConversation {
   completedAt DateTime? @map("completed_at")
 
   @@map("pem_onboarding_conversations")
+}
+
+/// 新設(2026-08-23・FN-PEM-03対応): 週次レビュー(AI-08)のキャッシュ。
+/// API-PEM-03(GET /reviews/weekly)は「直近の完了済み週のレビューが無ければその場で
+/// AI生成し、あれば再利用する」設計のため、週単位で1行(userId, weekStart)に保存する。
+/// TBL番号未採番([推論]。DB設計書のTBL-016〜018には無いが、AI-08「原データ変更不可」を
+/// 満たしつつ毎回AI再呼び出しするとコスト目標(月額¥300〜500)に反するため新設)。
+model PemWeeklyReview {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id])
+  /// 週境界はlib/cycle.tsのCycleと同じ月曜0:00〜翌月曜0:00(排他的)。
+  weekStart   DateTime @map("week_start")
+  weekEnd     DateTime @map("week_end")
+  /// {fulfilledCount, stalledCount, estimateErrorPercent, strengthStatement,
+  ///  experimentSuggestion, generatedByAi}
+  summaryJson Json     @map("summary_json")
+  generatedAt DateTime @default(now()) @map("generated_at")
+
+  @@unique([userId, weekStart])
+  @@map("pem_weekly_reviews")
 }
 
 /// TBL-019 evidences - 完了等の証拠候補 [推論]

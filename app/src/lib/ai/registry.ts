@@ -18,14 +18,16 @@ import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
 import type { AiOcrProvider } from "@/lib/ai/ocrProvider";
 import type { AiSegmentProvider } from "@/lib/ai/segmentProvider";
 import type { PemDialogueProvider } from "@/lib/ai/pemProvider";
+import type { PemAdviceProvider } from "@/lib/ai/pemAdviceProvider";
 import { createAnthropicExtractionProvider } from "@/lib/ai/anthropicProvider";
 import { createOpenAiEmbeddingProvider } from "@/lib/ai/openaiEmbeddingProvider";
 import { createOpenAiTranscriptionProvider } from "@/lib/ai/openaiTranscriptionProvider";
 import { createAnthropicOcrProvider } from "@/lib/ai/anthropicOcrProvider";
 import { createAnthropicSegmentProvider } from "@/lib/ai/anthropicSegmentProvider";
 import { createAnthropicPemDialogueProvider } from "@/lib/ai/anthropicPemDialogueProvider";
+import { createAnthropicPemAdviceProvider } from "@/lib/ai/anthropicPemAdviceProvider";
 
-export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION", "OCR", "SEGMENTATION", "PEM_DIALOGUE"] as const;
+export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION", "OCR", "SEGMENTATION", "PEM_DIALOGUE", "PEM_ADVICE"] as const;
 export type AiCapability = (typeof AI_CAPABILITIES)[number];
 
 export interface ProviderFactoryOpts {
@@ -72,6 +74,12 @@ export const SEGMENTATION_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFact
 // Claude Sonnet 5相当(低頻度・高品質階層)を使う。
 export const PEM_DIALOGUE_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => PemDialogueProvider> = {
   anthropic: createAnthropicPemDialogueProvider,
+};
+
+// [2026-08-23新設] FN-PEM-03助言・週次レビュー。PEM_DIALOGUEと同じSonnet 5階層だが、
+// 管理画面で独立して切り替えられるよう別capabilityとして登録する。
+export const PEM_ADVICE_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => PemAdviceProvider> = {
+  anthropic: createAnthropicPemAdviceProvider,
 };
 
 /** 管理画面でモデル名を選べるようにするための一覧(価格根拠はlib/ai/pricing.ts)。 */
@@ -121,6 +129,8 @@ export const DEFAULT_PROVIDER_KEY: Record<AiCapability, string> = {
   SEGMENTATION: "anthropic",
   // 2026-08-23新設: PEM初回対話はシステム基本設計書v1.2 9.1節の指定通りAnthropic Claude Sonnet 5
   PEM_DIALOGUE: "anthropic",
+  // 2026-08-23新設: PEM助言・週次レビューも同様にAnthropic Claude Sonnet 5
+  PEM_ADVICE: "anthropic",
 };
 
 function registryFor(capability: AiCapability): Record<string, unknown> {
@@ -129,6 +139,7 @@ function registryFor(capability: AiCapability): Record<string, unknown> {
   if (capability === "TRANSCRIPTION") return TRANSCRIPTION_PROVIDER_REGISTRY;
   if (capability === "OCR") return OCR_PROVIDER_REGISTRY;
   if (capability === "PEM_DIALOGUE") return PEM_DIALOGUE_PROVIDER_REGISTRY;
+  if (capability === "PEM_ADVICE") return PEM_ADVICE_PROVIDER_REGISTRY;
   return SEGMENTATION_PROVIDER_REGISTRY;
 }
 
@@ -188,6 +199,14 @@ export function resolvePemDialogueProvider(providerKey: string, opts?: ProviderF
   const factory = PEM_DIALOGUE_PROVIDER_REGISTRY[providerKey];
   if (!factory) {
     throw new Error(`未登録のPEM対話プロバイダーです: ${providerKey}`);
+  }
+  return factory(opts);
+}
+
+export function resolvePemAdviceProvider(providerKey: string, opts?: ProviderFactoryOpts): PemAdviceProvider {
+  const factory = PEM_ADVICE_PROVIDER_REGISTRY[providerKey];
+  if (!factory) {
+    throw new Error(`未登録のPEM助言プロバイダーです: ${providerKey}`);
   }
   return factory(opts);
 }

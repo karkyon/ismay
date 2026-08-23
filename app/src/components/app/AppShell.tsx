@@ -5,7 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { apiFetch, debugFetch, AUTH_EXPIRED_EVENT } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { isTypingTarget } from "@/lib/keyboard";
-import { TodayIcon, InboxIcon, CalendarIcon, SettingsIcon, MicIcon, SearchIcon } from "@/components/icons";
+import { TodayIcon, InboxIcon, CalendarIcon, SettingsIcon, MicIcon, SearchIcon, PemIcon, ReviewIcon } from "@/components/icons";
 import { NotificationBell } from "@/components/app/NotificationBell";
 
 const NAV_ITEMS = [
@@ -14,6 +14,10 @@ const NAV_ITEMS = [
   { href: "/responsibilities", label: "今後", icon: CalendarIcon },
   { href: "/relations", label: "関係図", icon: CalendarIcon },
   { href: "/search", label: "検索", icon: SearchIcon },
+  // [2026-08-23追加] ワイヤーフレーム(ISMAY_画面UX設計書v2.1)のサイドナビ「理解」区分に
+  // 相当。UI-02(初回対話)とは異なり、UI-09/UI-10は常設ナビから直接開ける画面。
+  { href: "/pem", label: "PEM", icon: PemIcon },
+  { href: "/pem/review", label: "週次レビュー", icon: ReviewIcon },
   { href: "/tags", label: "タグ", icon: SettingsIcon },
   { href: "/admin/ai-providers", label: "AIプロバイダー", icon: SettingsIcon },
   { href: "/admin/audit-logs", label: "監査ログ", icon: SettingsIcon },

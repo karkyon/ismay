@@ -94,3 +94,27 @@ export function SearchIcon(props: IconProps) {
     </svg>
   );
 }
+
+/** UI-09 PEM(あなたの実行モデル)ナビ用(2026-08-23追加)。指紋のような同心弧のモチーフ
+ * (「本人固有の実行パターン」を象徴)。 */
+export function PemIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 3a9 9 0 0 1 9 9" />
+      <path d="M12 7a5 5 0 0 1 5 5" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <path d="M12 21a9 9 0 0 1-9-9" />
+    </svg>
+  );
+}
+
+/** UI-10 週次レビューナビ用(2026-08-23追加)。折れ線グラフのモチーフ(振り返り)。 */
+export function ReviewIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 19V5" />
+      <path d="M4 19h16" />
+      <path d="M7 15l3.5-4 3 2.5L18 8" />
+    </svg>
+  );
+}

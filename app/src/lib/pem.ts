@@ -205,3 +205,339 @@ export async function recomputeAggregates(): Promise<{ usersProcessed: number; o
 
   return { usersProcessed: userRows.length, observationsWritten };
 }
+
+// =====================================================================
+// FN-PEM-03 助言(AI-07)・週次レビュー(AI-08)
+// 出典: AI・PEM設計書v1.0 9〜10章、機能別詳細設計書v1.1 14章、API・イベント設計書v1.1 4.5節
+// =====================================================================
+
+import { getActivePemAdviceProvider } from "@/lib/ai/config";
+import { estimateCostMicros } from "@/lib/ai/pricing";
+import { PemHypothesisDraftSchema, PemWeeklyReviewDraftSchema } from "@/lib/ai/pemAdviceSchema";
+import { checkPemSafety } from "@/lib/ai/pemSafety";
+import type { PemAdviceProvider, PemAdviceUsage } from "@/lib/ai/pemAdviceProvider";
+import { weekBoundaries } from "@/lib/cycle";
+
+const MAX_ADVICE_AI_ATTEMPTS = 2;
+/** §9「1件で恒常仮説を作らない」の再提案防止版。却下済み仮説と同じ観察窓の場合は再提案しない。 */
+const REJECTION_COOLDOWN_DAYS = AGGREGATE_WINDOW_DAYS;
+
+async function persistAdviceRun(params: {
+  workspaceId: string;
+  ai: PemAdviceProvider;
+  status: "SUCCEEDED" | "FAILED";
+  usage: PemAdviceUsage | undefined;
+  errorReason?: string;
+}): Promise<void> {
+  const { workspaceId, ai, status, usage, errorReason } = params;
+  await db.aiRun.create({
+    data: {
+      workspaceId,
+      provider: ai.providerName,
+      model: ai.modelName,
+      promptVersion: ai.promptVersion,
+      schemaVersion: ai.schemaVersion,
+      inputTokens: usage?.inputTokens,
+      outputTokens: usage?.outputTokens,
+      costMicros: usage ? estimateCostMicros(ai.modelName, usage.inputTokens, usage.outputTokens) : null,
+      latencyMs: usage?.latencyMs,
+      status,
+      errorCode: errorReason?.slice(0, 200),
+      finishedAt: new Date(),
+    },
+  });
+}
+
+/**
+ * AI-07 PEM助言。有効なOBSERVATION行のうち、まだ有効な(却下猶予期間内に却下されていない)
+ * 仮説が無いものについてのみAI呼び出しを行い、新しい仮説を1件生成する。
+ * 既に対応する仮説がある場合はAIを呼ばない(コスト抑制。§「低頻度」の趣旨に合わせる)。
+ */
+export async function ensureHypothesesUpToDate(userId: string, workspaceId: string): Promise<{ generated: number }> {
+  const observations = await db.pemObservation.findMany({
+    where: {
+      userId,
+      observationType: "OBSERVATION",
+      deletedAt: null,
+      OR: [{ validUntil: null }, { validUntil: { gt: new Date() } }],
+    },
+  });
+
+  let generated = 0;
+
+  for (const obs of observations as { id: string; payload: unknown; occurredAt: Date }[]) {
+    const payload = obs.payload as {
+      metric?: string;
+      statement?: string;
+      sampleSize?: number;
+      comparisonSampleSize?: number;
+      gapPercentagePoints?: number;
+    };
+    if (!payload.metric || !payload.statement) continue;
+
+    const cooldownStart = new Date(Date.now() - REJECTION_COOLDOWN_DAYS * 24 * 60 * 60 * 1000);
+    const existingActive = await db.pemHypothesis.findFirst({
+      where: {
+        userId,
+        sourceMetric: payload.metric,
+        deletedAt: null,
+        windowTo: { gte: cooldownStart },
+      },
+    });
+    if (existingActive) continue; // 既に同じ根拠の仮説がある(評決に関わらずAIを再度呼ばない)
+
+    const recentlyRejected = await db.pemHypothesis.findMany({
+      where: { userId, sourceMetric: payload.metric, userVerdict: "REJECTED", windowTo: { gte: cooldownStart } },
+      select: { statement: true },
+      take: 5,
+    });
+
+    const ai = await getActivePemAdviceProvider(workspaceId);
+    let lastFailureReason = "";
+    let lastUsage: PemAdviceUsage | undefined;
+    let succeeded = false;
+
+    for (let attempt = 1; attempt <= MAX_ADVICE_AI_ATTEMPTS; attempt++) {
+      const outcome = await ai.generateHypothesis({
+        observationStatement: payload.statement,
+        sampleSize: payload.sampleSize ?? 0,
+        comparisonSampleSize: payload.comparisonSampleSize ?? 0,
+        gapPercentagePoints: payload.gapPercentagePoints ?? 0,
+        recentlyRejectedStatements: (recentlyRejected as { statement: string }[]).map((r) => r.statement),
+      });
+      if (!outcome.ok) {
+        lastFailureReason = outcome.message;
+        lastUsage = outcome.usage;
+        if (outcome.kind === "FATAL") break;
+        continue;
+      }
+      lastUsage = outcome.usage;
+      const parsed = PemHypothesisDraftSchema.safeParse(outcome.rawJson);
+      if (!parsed.success) {
+        lastFailureReason = `AI_SCHEMA_INVALID: ${parsed.error.issues.map((i) => i.message).join("; ").slice(0, 500)}`;
+        continue;
+      }
+
+      const safety = checkPemSafety(parsed.data.statement);
+      if (!safety.safe) {
+        debugServer.error("pem/ensureHypothesesUpToDate", "SafetyValidator違反、この仮説は破棄", {
+          userId,
+          violations: safety.violations,
+        });
+        lastFailureReason = "SAFETY_VIOLATION";
+        continue; // 安全でない仮説は保存せず次のattemptへ(構造は正しいが内容が不適切なため)
+      }
+
+      await persistAdviceRun({ workspaceId, ai, status: "SUCCEEDED", usage: outcome.usage });
+      await db.pemHypothesis.create({
+        data: {
+          userId,
+          statement: `${parsed.data.statement}(実験案: ${parsed.data.experimentSuggestion})`,
+          sampleSize: payload.sampleSize ?? 0,
+          windowFrom: new Date(Date.now() - AGGREGATE_WINDOW_DAYS * 24 * 60 * 60 * 1000),
+          windowTo: obs.occurredAt,
+          confidence: parsed.data.confidence,
+          userVerdict: "PENDING",
+          sourceMetric: payload.metric,
+        },
+      });
+      generated++;
+      succeeded = true;
+      break;
+    }
+
+    if (!succeeded) {
+      await persistAdviceRun({ workspaceId, ai, status: "FAILED", usage: lastUsage, errorReason: lastFailureReason });
+      debugServer.error("pem/ensureHypothesesUpToDate", "仮説生成失敗", { userId, metric: payload.metric, lastFailureReason });
+    }
+  }
+
+  return { generated };
+}
+
+const SUCCESS_TERMINAL_STATUSES = new Set(["COMPLETED", "FULFILLED", "DECIDED", "RESOLVED", "MITIGATED"]);
+
+interface WeeklyStats {
+  fulfilledCount: number;
+  stalledCount: number;
+  estimateErrorPercent: number | null;
+}
+
+/** 実測データのみから週次統計を計算する(AIには渡すだけで、ここでは一切AIを呼ばない)。 */
+async function computeWeeklyStats(userId: string, weekStart: Date, weekEnd: Date): Promise<WeeklyStats> {
+  const rows = await db.pemObservation.findMany({
+    where: { userId, observationType: "TRANSITION", occurredAt: { gte: weekStart, lt: weekEnd }, deletedAt: null },
+    select: { payload: true, occurredAt: true },
+    orderBy: { occurredAt: "asc" },
+  });
+
+  type Row = { payload: TransitionPayload; occurredAt: Date };
+  // [2026-08-23修正] 実サーバーで発覚したバグ: Prismaの実生成型ではpayloadがJsonValue
+  // (JsonObject|JsonArray|string|number|boolean|null)として返るため、TransitionPayloadへ
+  // 直接asキャストすると型が「十分に重ならない」としてtsc TS2352エラーになる
+  // (サンドボックスのPrismaスタブは[key: string]: anyのため検出できなかった)。
+  // 他の箇所(recomputeAggregates等)と同じく、unknownを経由してキャストする。
+  const transitions = rows as unknown as Row[];
+
+  const fulfilledIds = new Set<string>();
+  const stalledIds = new Set<string>();
+  for (const t of transitions) {
+    if (SUCCESS_TERMINAL_STATUSES.has(t.payload.toStatus)) fulfilledIds.add(t.payload.responsibilityId);
+    if (t.payload.action === "DEFER") stalledIds.add(t.payload.responsibilityId);
+  }
+
+  // 予測誤差: 同一responsibilityIdでIN_PROGRESS→COMPLETEDのペアが取れたものだけを対象にする
+  // (取れない場合は誤差不明。無理に数値を作らない)。
+  const startAtByResponsibility = new Map<string, Date>();
+  const errorPercents: number[] = [];
+  for (const t of transitions) {
+    if (t.payload.toStatus === "IN_PROGRESS") {
+      startAtByResponsibility.set(t.payload.responsibilityId, t.occurredAt);
+    } else if (t.payload.toStatus === "COMPLETED") {
+      const startedAt = startAtByResponsibility.get(t.payload.responsibilityId);
+      if (startedAt && t.payload.estimatedMinutesMax) {
+        const elapsedMinutes = (t.occurredAt.getTime() - startedAt.getTime()) / 60000;
+        const errorPercent = ((elapsedMinutes - t.payload.estimatedMinutesMax) / t.payload.estimatedMinutesMax) * 100;
+        errorPercents.push(errorPercent);
+      }
+    }
+  }
+  const estimateErrorPercent =
+    errorPercents.length > 0 ? Math.round(errorPercents.reduce((a, b) => a + b, 0) / errorPercents.length) : null;
+
+  return { fulfilledCount: fulfilledIds.size, stalledCount: stalledIds.size, estimateErrorPercent };
+}
+
+export interface WeeklyReviewResult {
+  weekStart: Date;
+  weekEnd: Date;
+  fulfilledCount: number;
+  stalledCount: number;
+  estimateErrorPercent: number | null;
+  strengthStatement: string | null;
+  experimentSuggestion: string | null;
+  generatedAt: Date;
+  /** データがまだ1週間分たまっていない(アカウント作成直後等)場合はfalse。 */
+  available: boolean;
+}
+
+/**
+ * API-PEM-03(GET /reviews/weekly)。直近の完了済み週(現在の週の1つ前)のレビューを返す。
+ * 既に生成済みならキャッシュ(PemWeeklyReview)を返し、無ければその場でAI-08を呼び出して
+ * 生成・保存する(週1回程度の低頻度呼び出しのため、Workerでの事前生成はしない設計。
+ * 2026-08-23セッションでカルキョンさんへ説明・合意済みの方針)。
+ */
+export async function getOrGenerateWeeklyReview(
+  userId: string,
+  workspaceId: string,
+  timeZone: string,
+  now: Date = new Date(),
+): Promise<WeeklyReviewResult> {
+  const { startAt: currentWeekStart } = weekBoundaries(now, timeZone);
+  const weekStart = new Date(currentWeekStart.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const weekEnd = currentWeekStart;
+
+  // アカウント作成が今週の場合、直近の完了済み週が存在しない可能性がある。
+  const firstActivity = await db.pemObservation.findFirst({
+    where: { userId },
+    orderBy: { occurredAt: "asc" },
+    select: { occurredAt: true },
+  });
+  if (!firstActivity || firstActivity.occurredAt >= weekEnd) {
+    return {
+      weekStart,
+      weekEnd,
+      fulfilledCount: 0,
+      stalledCount: 0,
+      estimateErrorPercent: null,
+      strengthStatement: null,
+      experimentSuggestion: null,
+      generatedAt: now,
+      available: false,
+    };
+  }
+
+  const cached = await db.pemWeeklyReview.findUnique({ where: { userId_weekStart: { userId, weekStart } } });
+  if (cached) {
+    const summary = cached.summaryJson as {
+      fulfilledCount: number;
+      stalledCount: number;
+      estimateErrorPercent: number | null;
+      strengthStatement: string | null;
+      experimentSuggestion: string | null;
+    };
+    return { weekStart, weekEnd, ...summary, generatedAt: cached.generatedAt, available: true };
+  }
+
+  const stats = await computeWeeklyStats(userId, weekStart, weekEnd);
+
+  const activeHypothesis = await db.pemHypothesis.findFirst({
+    where: {
+      userId,
+      deletedAt: null,
+      userVerdict: { in: ["CONFIRMED", "PENDING"] },
+      OR: [{ validUntil: null }, { validUntil: { gt: now } }],
+    },
+    orderBy: { createdAt: "desc" },
+    select: { statement: true },
+  });
+
+  const weekLabel = `${weekStart.toISOString().slice(0, 10)} 〜 ${new Date(weekEnd.getTime() - 1).toISOString().slice(0, 10)}`;
+
+  let strengthStatement: string | null = null;
+  let experimentSuggestion: string | null = null;
+
+  if (stats.fulfilledCount > 0 || stats.stalledCount > 0) {
+    const ai = await getActivePemAdviceProvider(workspaceId);
+    let lastUsage: PemAdviceUsage | undefined;
+    let lastFailureReason = "";
+
+    for (let attempt = 1; attempt <= MAX_ADVICE_AI_ATTEMPTS; attempt++) {
+      const outcome = await ai.generateWeeklyReview({
+        weekLabel,
+        fulfilledCount: stats.fulfilledCount,
+        stalledCount: stats.stalledCount,
+        estimateErrorPercent: stats.estimateErrorPercent,
+        activeHypothesisStatement: activeHypothesis?.statement ?? null,
+      });
+      if (!outcome.ok) {
+        lastFailureReason = outcome.message;
+        lastUsage = outcome.usage;
+        if (outcome.kind === "FATAL") break;
+        continue;
+      }
+      lastUsage = outcome.usage;
+      const parsed = PemWeeklyReviewDraftSchema.safeParse(outcome.rawJson);
+      if (!parsed.success) {
+        lastFailureReason = `AI_SCHEMA_INVALID: ${parsed.error.issues.map((i) => i.message).join("; ").slice(0, 500)}`;
+        continue;
+      }
+      const safeStrength =
+        parsed.data.strengthStatement && checkPemSafety(parsed.data.strengthStatement).safe
+          ? parsed.data.strengthStatement
+          : null;
+      const safeExperiment =
+        parsed.data.experimentSuggestion && checkPemSafety(parsed.data.experimentSuggestion).safe
+          ? parsed.data.experimentSuggestion
+          : null;
+      strengthStatement = safeStrength;
+      experimentSuggestion = safeExperiment;
+      await persistAdviceRun({ workspaceId, ai, status: "SUCCEEDED", usage: outcome.usage });
+      break;
+    }
+    if (strengthStatement === null && experimentSuggestion === null && lastFailureReason) {
+      await persistAdviceRun({ workspaceId, ai, status: "FAILED", usage: lastUsage, errorReason: lastFailureReason });
+      debugServer.error("pem/getOrGenerateWeeklyReview", "週次レビューAI生成失敗(実績数値のみで保存)", {
+        userId,
+        lastFailureReason,
+      });
+    }
+  }
+
+  const summary = { ...stats, strengthStatement, experimentSuggestion };
+  await db.pemWeeklyReview.create({
+    data: { userId, weekStart, weekEnd, summaryJson: summary as unknown as object },
+  });
+
+  return { weekStart, weekEnd, ...summary, generatedAt: now, available: true };
+}
