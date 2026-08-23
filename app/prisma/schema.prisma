@@ -672,6 +672,13 @@ model PemObservation {
   occurredAt     DateTime  @default(now()) @map("occurred_at")
   createdAt      DateTime  @default(now()) @map("created_at")
   deletedAt      DateTime? @map("deleted_at")
+  /// 新設(2026-08-23・FN-PEM-02対応): observationType="TRANSITION"(生イベント取り込み)の
+  /// 冪等性キー。機能別詳細設計書v1.1 13章「PEMObserverはResponsibilityTransitionedを
+  /// 購読し、eventIdで重複排除する」に対応。EventLog.idを保持し、@uniqueによる
+  /// DB制約で二重取り込みを防ぐ(worker/relay.tsと同じP2002依拠の冪等パターン)。
+  /// observationType="OBSERVATION"(集計結果)の行はnull(集計は日次で再計算されるため
+  /// 単一イベントに紐付かない)。
+  sourceEventLogId String?  @unique @map("source_event_log_id")
 
   evidenceLinks PemEvidenceLink[]
 

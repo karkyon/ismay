@@ -6,6 +6,7 @@ import { processAwaitingBatchJobs } from "@/lib/worker/batchPollJob";
 import { processNotificationScan } from "@/lib/worker/notificationScanJob";
 import { processCycleRotation } from "@/lib/worker/cycleRotationJob";
 import { processRecurrenceGeneration } from "@/lib/worker/recurrenceGenerationJob";
+import { processPemObservation } from "@/lib/worker/pemObserverJob";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -42,6 +43,9 @@ async function tick(): Promise<void> {
     const cycleResult = await processCycleRotation();
     // 定期責任(2026-08-23新設): 1時間間隔の自己スロットリング(recurrenceGenerationJob.ts参照)。
     const recurrenceResult = await processRecurrenceGeneration();
+    // FN-PEM-02(2026-08-23新設): 観察イベント取り込み60秒間隔・集計再計算1時間間隔の
+    // 自己スロットリング(pemObserverJob.ts参照)。
+    const pemResult = await processPemObservation();
     if (
       relayResult.relayed > 0 ||
       jobResult.processed > 0 ||
@@ -50,7 +54,8 @@ async function tick(): Promise<void> {
       batchResult.processed > 0 ||
       notificationResult.processed > 0 ||
       cycleResult.processed > 0 ||
-      recurrenceResult.processed > 0
+      recurrenceResult.processed > 0 ||
+      pemResult.processed > 0
     ) {
       debugServer.event("Worker/tick", "tick完了", {
         ...relayResult,
@@ -61,6 +66,7 @@ async function tick(): Promise<void> {
         notificationProcessed: notificationResult.processed,
         cycleProcessed: cycleResult.processed,
         recurrenceProcessed: recurrenceResult.processed,
+        pemProcessed: pemResult.processed,
       });
     }
   } catch (err) {
