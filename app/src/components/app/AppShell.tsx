@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { href: "/search", label: "検索", icon: SearchIcon },
   { href: "/tags", label: "タグ", icon: SettingsIcon },
   { href: "/admin/ai-providers", label: "AIプロバイダー", icon: SettingsIcon },
+  { href: "/admin/audit-logs", label: "監査ログ", icon: SettingsIcon },
 ] as const;
 
 /** [2026-08-21追加] ヘッダーバーの左側に出すページ名。NAV_ITEMSと同じhrefで引く。 */
