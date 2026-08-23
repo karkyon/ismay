@@ -17,8 +17,13 @@ import { embedAndStoreResponsibility, findRelatedResponsibilities } from "@/lib/
  * - 「既存統合は対象versionとimpactConfirmation必須」に対応する重複統合フローは、
  *   FN-GR-01/02(意味照合・関係確定)が未実装のため本パッチでは扱わない。
  *   ACCEPT/EDITは常に新規Responsibilityとして作成する。
- * - レスポンスの「取消可能期限」は、取消(Undo)の実処理自体が未実装のため
- *   常にnullを返す(実装するAPI-RESP-06の5分間取消と合わせて別途対応予定)。
+ * - レスポンスの「取消可能期限」(undoDeadlineAt)は常にnullを返す。
+ *   [2026-08-23訂正] このコメントは元々「API-RESP-06の5分間取消と合わせて対応予定」と
+ *   記載していたが古い情報だった。実際に実装した一括操作の取消(FN-WK-04)は5分間の
+ *   期限付きUndoではなく無期限のステートレスUndo(操作前の状態を都度APIから再取得して
+ *   復元する方式)であり、この個別採否APIのundoDeadlineAtフィールドとは無関係。
+ *   フィールド自体は現状フロントで未使用のためnullのまま残すが、将来この個別採否の
+ *   取消(期限付き)を実装する場合はここを置き換える。
  */
 
 const EditedPayloadSchema = z

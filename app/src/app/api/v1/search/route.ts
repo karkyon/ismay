@@ -72,7 +72,18 @@ export async function GET(req: NextRequest) {
         ...(type ? { type } : {}),
         ...(status ? { status } : {}),
         ...(domainId ? { domainId } : {}),
-        ...(hasDateFilter ? { hardDeadlineAt: dateFilter } : {}),
+        // [2026-08-23修正] 従来はhardDeadlineAtのみを対象にしており、targetAtしか
+        // 持たない責任(締切未設定・目標日のみ)が期間検索から漏れていた。
+        // today-summary API・lib/planning.tsと同じ優先順位(hardDeadlineAtがあれば
+        // それを優先、無ければtargetAt)で判定するようOR条件に修正する。
+        ...(hasDateFilter
+          ? {
+              OR: [
+                { hardDeadlineAt: dateFilter },
+                { AND: [{ hardDeadlineAt: null }, { targetAt: dateFilter }] },
+              ],
+            }
+          : {}),
         AND: [
           {
             OR: [

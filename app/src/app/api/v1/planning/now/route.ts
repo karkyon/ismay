@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { requireAuth } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { isTypeSpecificTerminalStatus } from "@/lib/responsibility";
 import {
   computeNow,
   PLANNING_ASSUMPTIONS,
@@ -116,11 +117,21 @@ export async function GET(req: NextRequest) {
 
   const { primary, alternatives } = computeNow(candidates, now);
 
+  // FN-WK-03「今日の最低ライン」は9bbb420でpinnedフラグとして実装済み(today-summary APIと
+  // 同じデータソース)。このAPIでは取り残されて常にnullを返していたため、pinned項目を返すよう
+  // 修正する(2026-08-23点検分・軽微な不整合修正)。
+  const minimumLineRows = await db.responsibility.findMany({
+    where: { workspaceId, deletedAt: null, completedAt: null, pinned: true },
+    select: { id: true, type: true, title: true, status: true },
+    orderBy: { pinnedAt: "asc" },
+  });
+
   return apiOk({
     primary,
     alternatives,
-    // FN-WK-03(BaselineService)未実装のため常にnull。実装後に置き換える。
-    minimumLine: null,
+    minimumLine: (minimumLineRows as { id: string; type: string; title: string; status: string }[]).filter(
+      (r) => !isTypeSpecificTerminalStatus(r.type, r.status),
+    ),
     decisions: (decisions as DecisionRow[]).map((d) => ({
       id: d.id,
       title: d.title,

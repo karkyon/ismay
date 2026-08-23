@@ -6,6 +6,16 @@ import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { QuickCaptureForm } from "@/components/capture/QuickCaptureForm";
 import { PinIcon } from "@/components/icons";
+import { isCommonStatusType, isTypeSpecificTerminalStatus } from "@/lib/responsibility";
+
+/** 共通状態側の終端状態(用語・状態・コード定義書v1.1 3章)。バックログ候補から除外する。 */
+const COMMON_TERMINAL_STATUS = new Set(["COMPLETED", "NOT_NEEDED", "CANCELLED"]);
+
+/** ピッカー候補として出してよいか(完了・キャンセル等の終端状態を除外)。 */
+function isBacklogEligible(type: string, status: string): boolean {
+  if (isCommonStatusType(type)) return !COMMON_TERMINAL_STATUS.has(status);
+  return !isTypeSpecificTerminalStatus(type, status);
+}
 
 interface CaptureListItem {
   id: string;
@@ -135,6 +145,10 @@ export function TodayClient() {
   const [pickerQuery, setPickerQuery] = useState("");
   const [backlog, setBacklog] = useState<BacklogCandidate[]>([]);
   const [backlogLoading, setBacklogLoading] = useState(false);
+  // [2026-08-23修正] 検索API(/api/v1/search、d9c31a7で実装済み)を使った絞り込み結果。
+  // nullの間はクエリ未入力とみなし、openPicker取得時の直近100件(backlog)を表示する。
+  const [searchResults, setSearchResults] = useState<BacklogCandidate[] | null>(null);
+  const [searching, setSearching] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -229,11 +243,12 @@ export function TodayClient() {
     }
   }
 
-  /** バックログ選択ピッカーを開く。未完了の責任を取得し、クライアント側でタイトル絞り込みする
-   * (全文検索APIは未実装のため簡易実装。FR-GR-01の残課題として別途対応予定)。 */
+  /** バックログ選択ピッカーを開く。クエリ未入力時に表示する直近100件を取得する
+   * (全件ブラウズ用。101件を超える候補の検索は下のuseEffectで検索APIを使う)。 */
   async function openPicker() {
     setPickerOpen(true);
     setPickerQuery("");
+    setSearchResults(null);
     setBacklogLoading(true);
     const res = await apiFetch("/api/v1/responsibilities?limit=100&sort=updatedAt");
     if (res.ok) {
@@ -247,6 +262,36 @@ export function TodayClient() {
     }
     setBacklogLoading(false);
   }
+
+  /** [2026-08-23修正] ピッカーの検索欄への入力を検索API(/api/v1/search、mode=keyword)へ
+   * 委譲する(300msデバウンス)。修正前はopenPicker取得時の直近100件のみをクライアント側で
+   * タイトル絞り込みしていたため、101件目以降の責任がヒットしなかった(FN-SRCH-01実装
+   * (d9c31a7)後に取り残されていたバグ)。クエリが空の間はbacklog(直近100件の全件ブラウズ)を
+   * そのまま使い、検索APIは呼ばない(空クエリは検索APIが空配列を返す仕様のため)。 */
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const q = pickerQuery.trim();
+    if (!q) {
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      const res = await apiFetch(`/api/v1/search?q=${encodeURIComponent(q)}&mode=keyword`);
+      if (res.ok) {
+        const body = await res.json();
+        const existingIds = new Set((cycle?.items ?? []).map((i) => i.responsibilityId));
+        type SearchRespRow = { id: string; title: string; type: string; status: string };
+        const candidates: BacklogCandidate[] = (body.data.responsibilities as SearchRespRow[])
+          .filter((r) => isBacklogEligible(r.type, r.status) && !existingIds.has(r.id))
+          .map((r) => ({ id: r.id, title: r.title, type: r.type }));
+        setSearchResults(candidates);
+      }
+      setSearching(false);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [pickerQuery, pickerOpen, cycle]);
 
   async function addToCycle(responsibilityId: string) {
     setCycleItemBusy(responsibilityId);
@@ -415,32 +460,32 @@ export function TodayClient() {
                 type="text"
                 value={pickerQuery}
                 onChange={(e) => setPickerQuery(e.target.value)}
-                placeholder="タイトルで絞り込み..."
+                placeholder="タイトル・詳細で検索..."
                 className="w-full text-sm border border-line rounded-lg px-3 py-2 focus:outline-none focus:border-brand"
               />
             </div>
             <div className="flex-1 overflow-y-auto">
-              {backlogLoading ? (
-                <p className="px-4 py-6 text-center text-xs text-faint">読み込み中...</p>
-              ) : (
-                backlog
-                  .filter((b) => b.title.toLowerCase().includes(pickerQuery.toLowerCase()))
-                  .slice(0, 30)
-                  .map((b) => (
-                    <button
-                      key={b.id}
-                      onClick={() => addToCycle(b.id)}
-                      disabled={cycleItemBusy === b.id}
-                      className="w-full text-left px-4 py-2.5 hover:bg-canvas transition text-sm border-b border-line/60 last:border-b-0 disabled:opacity-40"
-                    >
-                      {b.title}
-                    </button>
-                  ))
-              )}
-              {!backlogLoading &&
-                backlog.filter((b) => b.title.toLowerCase().includes(pickerQuery.toLowerCase())).length === 0 && (
-                  <p className="px-4 py-6 text-center text-xs text-faint">該当する候補がありません</p>
-                )}
+              {(() => {
+                const isQuerying = pickerQuery.trim().length > 0;
+                const loading = isQuerying ? searching : backlogLoading;
+                const list = (isQuerying ? (searchResults ?? []) : backlog).slice(0, 30);
+                if (loading) {
+                  return <p className="px-4 py-6 text-center text-xs text-faint">読み込み中...</p>;
+                }
+                if (list.length === 0) {
+                  return <p className="px-4 py-6 text-center text-xs text-faint">該当する候補がありません</p>;
+                }
+                return list.map((b) => (
+                  <button
+                    key={b.id}
+                    onClick={() => addToCycle(b.id)}
+                    disabled={cycleItemBusy === b.id}
+                    className="w-full text-left px-4 py-2.5 hover:bg-canvas transition text-sm border-b border-line/60 last:border-b-0 disabled:opacity-40"
+                  >
+                    {b.title}
+                  </button>
+                ));
+              })()}
             </div>
             <div className="px-4 py-2.5 border-t border-line text-right">
               <button onClick={() => setPickerOpen(false)} className="text-xs text-faint hover:underline">
