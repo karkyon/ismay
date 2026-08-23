@@ -149,6 +149,9 @@ export function TodayClient() {
   // nullの間はクエリ未入力とみなし、openPicker取得時の直近100件(backlog)を表示する。
   const [searchResults, setSearchResults] = useState<BacklogCandidate[] | null>(null);
   const [searching, setSearching] = useState(false);
+  // [2026-08-23新設] FN-PEM-01初回対話の未完了バナー(設計方針: プッシュ通知等での
+  // 催促はせず、UI-03に常設の目立たない帯として表示するのみ)。
+  const [pemOnboardingIncomplete, setPemOnboardingIncomplete] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -192,19 +195,31 @@ export function TodayClient() {
     setCycleLoading(false);
   }, []);
 
+  // [2026-08-23新設] FN-PEM-01対話の未完了確認。読み込み失敗時は「未完了」を誤って
+  // 出さないよう、成功時のみ状態を反映する(fail-open: バナーを出さない方向へ倒す)。
+  const loadPemOnboardingStatus = useCallback(async () => {
+    const res = await debugFetch("/api/v1/pem/onboarding/messages");
+    if (res.ok) {
+      const body = await res.json();
+      setPemOnboardingIncomplete(!body.data.completed);
+    }
+  }, []);
+
   const reload = useCallback(() => {
     load();
     loadPlanning();
     loadSummary();
     loadCycle();
-  }, [load, loadPlanning, loadSummary, loadCycle]);
+    loadPemOnboardingStatus();
+  }, [load, loadPlanning, loadSummary, loadCycle, loadPemOnboardingStatus]);
 
   useEffect(() => {
     load();
     loadPlanning();
     loadSummary();
     loadCycle();
-  }, [load, loadPlanning, loadSummary, loadCycle]);
+    loadPemOnboardingStatus();
+  }, [load, loadPlanning, loadSummary, loadCycle, loadPemOnboardingStatus]);
 
   /** ピン留め切替(FN-WK-03、最大3件はAPI側で強制)。versionを都度取得してから送る。 */
   async function togglePin(item: SummaryItem, nextPinned: boolean) {
@@ -327,6 +342,18 @@ export function TodayClient() {
         </p>
         <h1 className="font-serif text-3xl">今日</h1>
       </div>
+
+      {/* [2026-08-23新設] FN-PEM-01初回対話の未完了バナー。通知(FN-NTF-01)とは別枠の
+          常設帯とし、プッシュ通知やポップアップでの催促はしない(押しつけない設計方針)。
+          対話完了で自動的に消える(pemOnboardingIncompleteがfalseになる)。 */}
+      {pemOnboardingIncomplete && (
+        <Link
+          href="/pem/onboarding"
+          className="flex items-center gap-2 bg-brand-50 border border-brand/20 rounded-xl px-4 py-2.5 text-xs text-brand-700 hover:bg-brand-100 transition"
+        >
+          実行モデルの初回対話が途中です・続ける →
+        </Link>
+      )}
 
       <QuickCaptureForm onCreated={reload} />
 

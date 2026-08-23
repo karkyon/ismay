@@ -12,6 +12,9 @@
  * 出典:
  * - Claude Haiku 4.5: $1.00/$5.00 per Mtok(入力/出力) — Anthropic公式ドキュメント基準の
  *   複数ソースで一致確認(2026-08-19時点)
+ * - Claude Sonnet 5: $2.00/$10.00 per Mtok(入力/出力) — 2026-08-10にAnthropicが導入価格を
+ *   恒久価格化(当初予定していた2026-09-01の$3/$15への値上げは撤回)。2026-08-23 web検索で
+ *   複数ソース(Anthropic公式pricingページ含む)一致確認。
  * - OpenAI text-embedding-3-small: $0.02 per Mtok(入力のみ、出力課金なし) — OpenAI公式
  *   pricing pageベースの複数ソースで一致確認
  */
@@ -26,6 +29,7 @@ export interface ModelPricing {
 
 export const MODEL_PRICING: Record<string, ModelPricing> = {
   "claude-haiku-4-5-20251001": { inputPerMillionUsd: 1.0, outputPerMillionUsd: 5.0, verifiedOn: "2026-08-19" },
+  "claude-sonnet-5": { inputPerMillionUsd: 2.0, outputPerMillionUsd: 10.0, verifiedOn: "2026-08-23" },
   "text-embedding-3-small": { inputPerMillionUsd: 0.02, outputPerMillionUsd: 0, verifiedOn: "2026-08-19" },
 };
 

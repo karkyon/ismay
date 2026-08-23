@@ -8,6 +8,7 @@ import {
   resolveTranscriptionProvider,
   resolveOcrProvider,
   resolveSegmentProvider,
+  resolvePemDialogueProvider,
   type AiCapability,
 } from "@/lib/ai/registry";
 import { decryptApiKey } from "@/lib/ai/credentialCrypto";
@@ -16,6 +17,7 @@ import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
 import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
 import type { AiOcrProvider } from "@/lib/ai/ocrProvider";
 import type { AiSegmentProvider } from "@/lib/ai/segmentProvider";
+import type { PemDialogueProvider } from "@/lib/ai/pemProvider";
 
 /**
  * Workspaceに設定された有効プロバイダーキー・モデル名を返す。未設定・不明なキーの場合は
@@ -91,4 +93,10 @@ export async function getActiveSegmentProvider(workspaceId: string): Promise<AiS
   const { providerKey, modelName } = await getActiveProviderSelection(workspaceId, "SEGMENTATION");
   const apiKey = await getDecryptedApiKey(workspaceId, providerKey);
   return resolveSegmentProvider(providerKey, { apiKey, model: modelName });
+}
+
+export async function getActivePemDialogueProvider(workspaceId: string): Promise<PemDialogueProvider> {
+  const { providerKey, modelName } = await getActiveProviderSelection(workspaceId, "PEM_DIALOGUE");
+  const apiKey = await getDecryptedApiKey(workspaceId, providerKey);
+  return resolvePemDialogueProvider(providerKey, { apiKey, model: modelName });
 }

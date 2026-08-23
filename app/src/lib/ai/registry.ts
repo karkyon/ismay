@@ -17,13 +17,15 @@ import type { AiEmbeddingProvider } from "@/lib/ai/embeddingProvider";
 import type { AiTranscriptionProvider } from "@/lib/ai/transcriptionProvider";
 import type { AiOcrProvider } from "@/lib/ai/ocrProvider";
 import type { AiSegmentProvider } from "@/lib/ai/segmentProvider";
+import type { PemDialogueProvider } from "@/lib/ai/pemProvider";
 import { createAnthropicExtractionProvider } from "@/lib/ai/anthropicProvider";
 import { createOpenAiEmbeddingProvider } from "@/lib/ai/openaiEmbeddingProvider";
 import { createOpenAiTranscriptionProvider } from "@/lib/ai/openaiTranscriptionProvider";
 import { createAnthropicOcrProvider } from "@/lib/ai/anthropicOcrProvider";
 import { createAnthropicSegmentProvider } from "@/lib/ai/anthropicSegmentProvider";
+import { createAnthropicPemDialogueProvider } from "@/lib/ai/anthropicPemDialogueProvider";
 
-export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION", "OCR", "SEGMENTATION"] as const;
+export const AI_CAPABILITIES = ["EXTRACTION", "EMBEDDING", "TRANSCRIPTION", "OCR", "SEGMENTATION", "PEM_DIALOGUE"] as const;
 export type AiCapability = (typeof AI_CAPABILITIES)[number];
 
 export interface ProviderFactoryOpts {
@@ -66,6 +68,12 @@ export const SEGMENTATION_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFact
   anthropic: createAnthropicSegmentProvider,
 };
 
+// [2026-08-23新設] FN-PEM-01初回対話。システム基本設計書v1.2 9.1節の指定通り
+// Claude Sonnet 5相当(低頻度・高品質階層)を使う。
+export const PEM_DIALOGUE_PROVIDER_REGISTRY: Record<string, (opts?: ProviderFactoryOpts) => PemDialogueProvider> = {
+  anthropic: createAnthropicPemDialogueProvider,
+};
+
 /** 管理画面でモデル名を選べるようにするための一覧(価格根拠はlib/ai/pricing.ts)。 */
 export const AVAILABLE_MODELS: Record<string, AvailableModel[]> = {
   anthropic: [
@@ -75,6 +83,13 @@ export const AVAILABLE_MODELS: Record<string, AvailableModel[]> = {
       description:
         "高速・低コストな小型モデル。責任抽出・OCR・話題分割等、高頻度で呼ばれる処理向け。" +
         "入力$1.00/出力$5.00(100万トークンあたり)。Vision(画像入力)対応。",
+    },
+    {
+      modelName: "claude-sonnet-5",
+      label: "Claude Sonnet 5",
+      description:
+        "高品質・低頻度階層。PEM初回対話・仮説更新・週次レビュー等、人格断定を避けた丁寧な" +
+        "文章生成とSafetyValidatorの判定精度が必要な処理向け(システム基本設計書v1.2 9.1節)。",
     },
   ],
   openai: [
@@ -104,6 +119,8 @@ export const DEFAULT_PROVIDER_KEY: Record<AiCapability, string> = {
   OCR: "anthropic",
   // 2026-08-21合意: 音声テーマ自動分割は抽出と同じAnthropic Claude Haiku 4.5
   SEGMENTATION: "anthropic",
+  // 2026-08-23新設: PEM初回対話はシステム基本設計書v1.2 9.1節の指定通りAnthropic Claude Sonnet 5
+  PEM_DIALOGUE: "anthropic",
 };
 
 function registryFor(capability: AiCapability): Record<string, unknown> {
@@ -111,6 +128,7 @@ function registryFor(capability: AiCapability): Record<string, unknown> {
   if (capability === "EMBEDDING") return EMBEDDING_PROVIDER_REGISTRY;
   if (capability === "TRANSCRIPTION") return TRANSCRIPTION_PROVIDER_REGISTRY;
   if (capability === "OCR") return OCR_PROVIDER_REGISTRY;
+  if (capability === "PEM_DIALOGUE") return PEM_DIALOGUE_PROVIDER_REGISTRY;
   return SEGMENTATION_PROVIDER_REGISTRY;
 }
 
@@ -165,3 +183,12 @@ export function resolveSegmentProvider(providerKey: string, opts?: ProviderFacto
   }
   return factory(opts);
 }
+
+export function resolvePemDialogueProvider(providerKey: string, opts?: ProviderFactoryOpts): PemDialogueProvider {
+  const factory = PEM_DIALOGUE_PROVIDER_REGISTRY[providerKey];
+  if (!factory) {
+    throw new Error(`未登録のPEM対話プロバイダーです: ${providerKey}`);
+  }
+  return factory(opts);
+}
+

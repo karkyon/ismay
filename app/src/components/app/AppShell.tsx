@@ -20,7 +20,12 @@ const NAV_ITEMS = [
 ] as const;
 
 /** [2026-08-21追加] ヘッダーバーの左側に出すページ名。NAV_ITEMSと同じhrefで引く。 */
-const PAGE_TITLE: Record<string, string> = Object.fromEntries(NAV_ITEMS.map((i) => [i.href, i.label]));
+const PAGE_TITLE: Record<string, string> = {
+  ...Object.fromEntries(NAV_ITEMS.map((i) => [i.href, i.label])),
+  // [2026-08-23追加] FN-PEM-01初回対話。常設サイドナビには入れず(UI-03の未完了バナー
+  // からのみ遷移する設計)、ヘッダータイトルのみ対応させる。
+  "/pem/onboarding": "初回対話",
+};
 
 /** クイック入力欄へフォーカスを移すためのグローバルイベント名。
  * "C"キーはLinear同様、アプリ内どこからでも効くグローバルショートカットとし、

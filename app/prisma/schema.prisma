@@ -57,6 +57,7 @@ model User {
   responsibilitiesUpdated Responsibility[]   @relation("ResponsibilityUpdatedBy")
   pemObservations     PemObservation[]
   pemHypotheses       PemHypothesis[]
+  pemOnboardingConversation PemOnboardingConversation?
   notifications       Notification[]
   auditLogsAsActor    AuditLog[]             @relation("AuditActorUser")
 
@@ -568,6 +569,11 @@ model AiRun {
   id             String    @id @default(uuid())
   captureId      String?   @map("capture_id")
   capture        Capture?  @relation(fields: [captureId], references: [id])
+  /// 新設(2026-08-23・FN-PEM系対応): Captureに紐付かないAI呼び出し(PEM対話・仮説生成・
+  /// 週次レビュー)のコスト集計用。captureIdがある行はcapture.workspaceId経由で辿れるが、
+  /// PEM呼び出しはCaptureを持たないため、admin/ai-usage APIの集計から漏れないよう
+  /// 直接workspaceIdを持たせる(MVPは1ユーザー=1 Workspace固定のため矛盾は生じない)。
+  workspaceId    String?   @map("workspace_id")
   provider       String
   model          String
   promptVersion  String    @map("prompt_version")
@@ -683,7 +689,11 @@ model PemHypothesis {
   windowTo    DateTime  @map("window_to")
   confidence  Decimal   @db.Decimal(4, 3)
   validUntil  DateTime? @map("valid_until")
-  /// CONFIRMED/REJECTED/PENDING [推論]
+  /// CONFIRMED(合っている)/REJECTED(違う)/TEMPORARY(今だけ一時的)/PENDING(未評決) [推論]
+  /// [2026-08-23訂正] 従来コメントはCONFIRMED/REJECTED/PENDINGの3値だったが、
+  /// AI_PEM設計書v1.0 14章・ワイヤーフレームUI-09の3ボタン(合っている/違う/今だけ一時的)
+  /// に合わせTEMPORARYを追加。設計書の4分類のうち「今後使わない」は本レコードの
+  /// deletedAt(論理削除・忘却操作)として表現し、userVerdictには含めない。
   userVerdict String    @default("PENDING") @map("user_verdict")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
@@ -706,6 +716,28 @@ model PemEvidenceLink {
   createdAt        DateTime        @default(now()) @map("created_at")
 
   @@map("pem_evidence_links")
+}
+
+/// 新設(2026-08-23): FN-PEM-01 初回対話のConversationState永続化。
+/// TBL番号未採番([推論]。DB設計書のTBL-016〜018には無いが、機能別詳細設計書v1.1 12章
+/// 「中断位置を保存」を満たすために必要と判断し新設)。1ユーザー1件(再対話は上書き)。
+model PemOnboardingConversation {
+  id        String    @id @default(uuid())
+  userId    String    @unique @map("user_id")
+  user      User      @relation(fields: [userId], references: [id])
+  /// ROLE/CURRENT_LOAD/FIXED_CONSTRAINTS/EXECUTION_CONTEXT/VALUES/REVIEW/DONE [推論]
+  state     String    @default("ROLE")
+  /// {role: "assistant"|"user", content: string, at: string}[] の対話履歴全体
+  messages  Json      @default("[]")
+  /// 本人未確認のFACT候補({statement, evidenceMessageIndex}[])。REVIEW段階で提示し、
+  /// 確認されたものだけpem_observations(observationType="FACT")へ昇格させる。
+  proposedFacts       Json @default("[]") @map("proposed_facts")
+  proposedHypotheses  Json @default("[]") @map("proposed_hypotheses")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  completedAt DateTime? @map("completed_at")
+
+  @@map("pem_onboarding_conversations")
 }
 
 /// TBL-019 evidences - 完了等の証拠候補 [推論]
