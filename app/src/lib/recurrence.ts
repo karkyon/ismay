@@ -215,6 +215,15 @@ export async function generateRecurrences(now: Date = new Date()): Promise<{
   return { processed, reset, carried, dropped, renotified, skippedException, skippedPaused };
 }
 
+/**
+ * [既知の制限・2026-08-23全ソース総点検で発見] targetAtのみを次回発生日へ進め、
+ * hardDeadlineAtは更新しない。元の責任にhardDeadlineAtが設定されていた場合
+ * (例: 「毎週月曜に着手、火曜が締切」のような定期責任)、次サイクルでも古い
+ * hardDeadlineAtが残ってしまう。「次回のhardDeadlineAtをどう計算すべきか」は
+ * targetAtとの差分維持など設計判断が必要で、想像で複雑な自動計算を組み込むと
+ * 誤った期限を設定しかねないため、今回はtargetAtのみの更新に留める。
+ * hardDeadlineAt付きの定期責任を使う場合は、都度手動で更新することを推奨する。
+ */
 async function resetForNextCycle(
   responsibilityId: string,
   type: string,

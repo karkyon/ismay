@@ -39,14 +39,21 @@ export async function GET(req: NextRequest) {
           hardDeadlineAt: true,
           targetAt: true,
           completedAt: true,
+          deletedAt: true,
         },
       },
     },
   });
 
   type ItemRow = (typeof items)[number];
-  const visible = (items as ItemRow[]).filter((i) => !i.responsibility.completedAt);
-  const done = (items as ItemRow[]).length - visible.length;
+  // [2026-08-23バグ修正・全ソース総点検で発見] completedAtのみでフィルタしており、
+  // 責任がsoft-delete(deletedAt設定、例: 一括削除機能で削除)された場合に、
+  // 削除済みのアイテムが「未完了」としてサイクル一覧に残り続けてしまっていた。
+  // また、削除済みを「完了」扱いで進捗バーの分子に加算してしまうのも意味的に誤り
+  // なので、削除済みはtotal/doneどちらの分母・分子からも除外する。
+  const nonDeleted = (items as ItemRow[]).filter((i) => !i.responsibility.deletedAt);
+  const visible = nonDeleted.filter((i) => !i.responsibility.completedAt);
+  const done = nonDeleted.length - visible.length;
 
   return apiOk({
     cycle: { id: cycle.id, startAt: cycle.startAt, endAt: cycle.endAt, status: cycle.status },
@@ -63,7 +70,7 @@ export async function GET(req: NextRequest) {
       targetAt: i.responsibility.targetAt,
     })),
     doneCount: done,
-    totalCount: (items as ItemRow[]).length,
+    totalCount: nonDeleted.length,
   });
 }
 

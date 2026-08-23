@@ -65,6 +65,24 @@ async function fetchTargets(ids: string[], workspaceId: string): Promise<TargetR
   });
 }
 
+/**
+ * [2026-08-23バグ修正] 種別ごとの「完了」に相当するactionは統一されていない
+ * (COMMON=COMPLETE、COMMITMENT=FULFILL、WAITING=RESOLVE、RISK=CLOSE)。
+ * 当初の実装は固定で"COMPLETE"のみを探しており、種別固有型は常に
+ * 「現在の状態からは一括完了できません」としてスキップされてしまっていた
+ * (実質的にTASK/EVENT/CONCERN/HABIT/IDEAでしか一括完了が機能していなかった)。
+ * これは設計コメント「COMPLETEはDECISIONのみ対象外とする」という意図と矛盾する
+ * 実装上の見落としであり、全ソース総点検で発見・修正した。
+ */
+const COMPLETE_ACTION_BY_TYPE: Record<string, string> = {
+  COMMITMENT: "FULFILL",
+  WAITING: "RESOLVE",
+  RISK: "CLOSE",
+};
+function completeActionFor(type: string): string {
+  return COMPLETE_ACTION_BY_TYPE[type] ?? "COMPLETE";
+}
+
 async function bulkComplete(ids: string[], workspaceId: string, userId: string): Promise<BulkResult> {
   const targets = await fetchTargets(ids, workspaceId);
   const skipped: BulkSkip[] = [];
@@ -80,8 +98,13 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
       skipped.push({ id: t.id, reason: "既に完了状態のため対象外" });
       continue;
     }
+    if (t.type === "DECISION") {
+      skipped.push({ id: t.id, reason: "判断は理由の記録が必須のため一括完了できません(個別に操作してください)" });
+      continue;
+    }
+    const completeAction = completeActionFor(t.type);
     const rule = transitionsForType(t.type).find(
-      (r) => r.action === "COMPLETE" && (r.from as readonly string[]).includes(t.status),
+      (r) => r.action === completeAction && (r.from as readonly string[]).includes(t.status),
     );
     if (!rule) {
       skipped.push({ id: t.id, reason: "現在の状態からは一括完了できません(個別に操作してください)" });

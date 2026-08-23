@@ -464,22 +464,28 @@ export async function dispatchDueNotifications(): Promise<{ dispatched: number }
       itemsJson: JSON.stringify(digestItems),
     };
     try {
-      await db.notification.create({
-        data: {
-          userId,
-          type: "DIGEST",
-          dedupeKey: `DIGEST:${userId}:${now.toISOString()}`,
-          payload: digestPayload,
-          channel: "IN_APP",
-          status: "SENT",
-          scheduledAt: now,
-          sentAt: now,
-        },
-      });
-      await db.notification.updateMany({
-        where: { id: { in: items.map((n) => n.id) } },
-        data: { status: "SUPPRESSED" },
-      });
+      // [2026-08-23バグ修正・全ソース総点検で発見] DIGEST作成とSUPPRESSED化が
+      // 別々のPrisma呼び出しだったため、createが成功しupdateManyが失敗した場合
+      // (通常起きないが、DB接続断等の異常系)、DIGESTと元の個別通知が両方SENTの
+      // まま残る不整合が起こり得た。$transactionで原子性を確保する。
+      await db.$transaction([
+        db.notification.create({
+          data: {
+            userId,
+            type: "DIGEST",
+            dedupeKey: `DIGEST:${userId}:${now.toISOString()}`,
+            payload: digestPayload,
+            channel: "IN_APP",
+            status: "SENT",
+            scheduledAt: now,
+            sentAt: now,
+          },
+        }),
+        db.notification.updateMany({
+          where: { id: { in: items.map((n) => n.id) } },
+          data: { status: "SUPPRESSED" },
+        }),
+      ]);
       dispatched += items.length;
       debugServer.event("Notifications/dispatch", "DIGESTへ集約", { userId, count: items.length });
     } catch (err: unknown) {
