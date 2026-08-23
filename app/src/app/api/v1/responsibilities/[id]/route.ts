@@ -37,6 +37,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       // 新設(2026-08-23): TBL-011 constraints(FN-CONS-01)。schema.prismaにはテーブルが
       // 存在したが、GET/PATCHとも一度も配線されていなかった。
       constraints: { select: { id: true, constraintType: true, value: true, note: true, createdAt: true }, orderBy: { createdAt: "asc" } },
+      // 新設(2026-08-23): TBL-020 recurrence_rules(FN-REC-01)。GET/PATCHとも一度も配線されていなかった。
+      recurrenceRule: { select: { id: true, frequency: true, interval: true, weekdays: true, exceptions: true, pausedUntil: true, carryoverPolicy: true, lastGeneratedAt: true } },
     },
   });
   if (!responsibility) {
@@ -309,6 +311,8 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       // 新設(2026-08-23): TBL-011 constraints(FN-CONS-01)。schema.prismaにはテーブルが
       // 存在したが、GET/PATCHとも一度も配線されていなかった。
       constraints: { select: { id: true, constraintType: true, value: true, note: true, createdAt: true }, orderBy: { createdAt: "asc" } },
+      // 新設(2026-08-23): TBL-020 recurrence_rules(FN-REC-01)。GET/PATCHとも一度も配線されていなかった。
+      recurrenceRule: { select: { id: true, frequency: true, interval: true, weekdays: true, exceptions: true, pausedUntil: true, carryoverPolicy: true, lastGeneratedAt: true } },
     },
   });
   debugServer.state("PATCH /responsibilities/[id]", "Responsibility", { id, status: updated.status });

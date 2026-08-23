@@ -5,6 +5,7 @@ import { processOcrImageJobs } from "@/lib/worker/ocrImageJob";
 import { processAwaitingBatchJobs } from "@/lib/worker/batchPollJob";
 import { processNotificationScan } from "@/lib/worker/notificationScanJob";
 import { processCycleRotation } from "@/lib/worker/cycleRotationJob";
+import { processRecurrenceGeneration } from "@/lib/worker/recurrenceGenerationJob";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -39,6 +40,8 @@ async function tick(): Promise<void> {
     const notificationResult = await processNotificationScan();
     // 週次サイクル(2026-08-22新設): 1時間間隔の自己スロットリング(cycleRotationJob.ts参照)。
     const cycleResult = await processCycleRotation();
+    // 定期責任(2026-08-23新設): 1時間間隔の自己スロットリング(recurrenceGenerationJob.ts参照)。
+    const recurrenceResult = await processRecurrenceGeneration();
     if (
       relayResult.relayed > 0 ||
       jobResult.processed > 0 ||
@@ -46,7 +49,8 @@ async function tick(): Promise<void> {
       ocrResult.processed > 0 ||
       batchResult.processed > 0 ||
       notificationResult.processed > 0 ||
-      cycleResult.processed > 0
+      cycleResult.processed > 0 ||
+      recurrenceResult.processed > 0
     ) {
       debugServer.event("Worker/tick", "tick完了", {
         ...relayResult,
@@ -56,6 +60,7 @@ async function tick(): Promise<void> {
         batchProcessed: batchResult.processed,
         notificationProcessed: notificationResult.processed,
         cycleProcessed: cycleResult.processed,
+        recurrenceProcessed: recurrenceResult.processed,
       });
     }
   } catch (err) {

@@ -96,6 +96,17 @@ interface ConstraintRef {
   createdAt: string;
 }
 
+interface RecurrenceRuleRef {
+  id: string;
+  frequency: string;
+  interval: number;
+  weekdays: number[] | null;
+  exceptions: string[] | null;
+  pausedUntil: string | null;
+  carryoverPolicy: string;
+  lastGeneratedAt: string | null;
+}
+
 interface ResponsibilityDetail extends ResponsibilityListItem {
   description: string | null;
   sourceKind: string;
@@ -106,6 +117,7 @@ interface ResponsibilityDetail extends ResponsibilityListItem {
   decisionDetail: DecisionDetailRef | null;
   waitingDetail: WaitingDetailRef | null;
   constraints: ConstraintRef[];
+  recurrenceRule: RecurrenceRuleRef | null;
 }
 
 interface RelatedItem {
@@ -124,6 +136,19 @@ const CONSTRAINT_TYPE_LABEL: Record<string, string> = {
   RESOURCE: "道具・資源",
   CAPACITY: "体力・認知強度",
 };
+
+/** [2026-08-23追加] FN-REC-01 定期責任ラベル。 */
+const RECURRENCE_FREQUENCY_LABEL: Record<string, string> = {
+  DAILY: "毎日",
+  WEEKLY: "毎週",
+  MONTHLY: "毎月",
+};
+const RECURRENCE_CARRYOVER_LABEL: Record<string, string> = {
+  CARRY: "そのまま繰越",
+  DROP: "破棄して仕切り直す",
+  RENOTIFY: "再通知のみ",
+};
+const WEEKDAY_LABEL = ["日", "月", "火", "水", "木", "金", "土"];
 
 const TYPE_LABEL: Record<string, string> = {
   TASK: "作業",
@@ -321,6 +346,15 @@ export function ResponsibilitiesClient() {
   const [constraintNote, setConstraintNote] = useState("");
   const [savingConstraint, setSavingConstraint] = useState(false);
   const [constraintError, setConstraintError] = useState("");
+
+  // [2026-08-23追加] FN-REC-01 定期責任(TBL-020)。責任詳細でのルール編集用。
+  const [recurrenceFormOpen, setRecurrenceFormOpen] = useState(false);
+  const [recFrequency, setRecFrequency] = useState<"DAILY" | "WEEKLY" | "MONTHLY">("WEEKLY");
+  const [recInterval, setRecInterval] = useState(1);
+  const [recWeekdays, setRecWeekdays] = useState<Set<number>>(new Set());
+  const [recCarryoverPolicy, setRecCarryoverPolicy] = useState<"CARRY" | "DROP" | "RENOTIFY">("CARRY");
+  const [savingRecurrence, setSavingRecurrence] = useState(false);
+  const [recurrenceError, setRecurrenceError] = useState("");
 
   // [2026-08-21追加] タイトル/詳細のインライン編集、タグ管理
   const [allTags, setAllTags] = useState<ResponsibilityTagRef[]>([]);
@@ -673,6 +707,68 @@ export function ResponsibilitiesClient() {
     const res = await apiFetch(`/api/v1/responsibilities/${detail.id}/constraints/${constraintId}`, {
       method: "DELETE",
     });
+    if (res.ok) {
+      await loadDetail(detail.id);
+    }
+  }
+
+  /** [2026-08-23追加] FN-REC-01 定期責任ルールの編集開始。既存ルールがあれば値を復元する。 */
+  function openRecurrenceForm() {
+    if (detail?.recurrenceRule) {
+      const r = detail.recurrenceRule;
+      setRecFrequency(r.frequency as "DAILY" | "WEEKLY" | "MONTHLY");
+      setRecInterval(r.interval);
+      setRecWeekdays(new Set(r.weekdays ?? []));
+      setRecCarryoverPolicy(r.carryoverPolicy as "CARRY" | "DROP" | "RENOTIFY");
+    } else {
+      setRecFrequency("WEEKLY");
+      setRecInterval(1);
+      setRecWeekdays(new Set());
+      setRecCarryoverPolicy("CARRY");
+    }
+    setRecurrenceError("");
+    setRecurrenceFormOpen(true);
+  }
+
+  function toggleRecWeekday(day: number) {
+    setRecWeekdays((prev) => {
+      const next = new Set(prev);
+      if (next.has(day)) next.delete(day);
+      else next.add(day);
+      return next;
+    });
+  }
+
+  async function saveRecurrence(e: React.FormEvent) {
+    e.preventDefault();
+    if (!detail) return;
+    setRecurrenceError("");
+    setSavingRecurrence(true);
+    try {
+      const res = await apiFetch(`/api/v1/responsibilities/${detail.id}/recurrence`, {
+        method: "PUT",
+        body: JSON.stringify({
+          frequency: recFrequency,
+          interval: recInterval,
+          weekdays: recFrequency === "WEEKLY" && recWeekdays.size > 0 ? [...recWeekdays] : null,
+          carryoverPolicy: recCarryoverPolicy,
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setRecurrenceError(body?.error?.message ?? "定期ルールの保存に失敗しました");
+        return;
+      }
+      setRecurrenceFormOpen(false);
+      await loadDetail(detail.id);
+    } finally {
+      setSavingRecurrence(false);
+    }
+  }
+
+  async function deleteRecurrence() {
+    if (!detail) return;
+    const res = await apiFetch(`/api/v1/responsibilities/${detail.id}/recurrence`, { method: "DELETE" });
     if (res.ok) {
       await loadDetail(detail.id);
     }
@@ -1751,6 +1847,111 @@ export function ResponsibilitiesClient() {
                         >
                           {savingConstraint ? "保存中..." : "追加する"}
                         </button>
+                      </form>
+                    )}
+                  </div>
+
+                  {/* [2026-08-23新設] FN-REC-01 定期責任(TBL-020)。曜日・間隔・繰越方針を設定できる。 */}
+                  <div className="pt-2 border-t border-line">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <p className="text-[10.5px] font-semibold text-faint uppercase tracking-wide">定期責任</p>
+                      {!recurrenceFormOpen && (
+                        <button onClick={openRecurrenceForm} className="text-[10.5px] text-brand-700 hover:underline">
+                          {detail.recurrenceRule ? "編集" : "+ 定期化する"}
+                        </button>
+                      )}
+                    </div>
+                    {!recurrenceFormOpen && detail.recurrenceRule && (
+                      <div className="bg-canvas rounded-lg px-2.5 py-1.5 text-[11px] text-ink space-y-0.5">
+                        <p>
+                          {RECURRENCE_FREQUENCY_LABEL[detail.recurrenceRule.frequency] ?? detail.recurrenceRule.frequency}
+                          {detail.recurrenceRule.interval > 1 ? `(${detail.recurrenceRule.interval}回に1回)` : ""}
+                          {detail.recurrenceRule.frequency === "WEEKLY" && detail.recurrenceRule.weekdays && detail.recurrenceRule.weekdays.length > 0 && (
+                            <> ・{detail.recurrenceRule.weekdays.map((d) => WEEKDAY_LABEL[d]).join("")}曜</>
+                          )}
+                        </p>
+                        <p className="text-faint">
+                          未完了時: {RECURRENCE_CARRYOVER_LABEL[detail.recurrenceRule.carryoverPolicy] ?? detail.recurrenceRule.carryoverPolicy}
+                        </p>
+                        <button onClick={deleteRecurrence} className="text-[10.5px] text-red-600 hover:underline mt-1">
+                          定期化を解除
+                        </button>
+                      </div>
+                    )}
+                    {!recurrenceFormOpen && !detail.recurrenceRule && (
+                      <p className="text-[11px] text-faint">この責任は定期化されていません。</p>
+                    )}
+                    {recurrenceFormOpen && (
+                      <form onSubmit={saveRecurrence} className="space-y-1.5 bg-canvas rounded-lg p-2.5">
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={recFrequency}
+                            onChange={(e) => setRecFrequency(e.target.value as typeof recFrequency)}
+                            className="text-[11px] border border-line rounded-md px-2 py-1 bg-surface"
+                          >
+                            {Object.entries(RECURRENCE_FREQUENCY_LABEL).map(([k, v]) => (
+                              <option key={k} value={k}>
+                                {v}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="number"
+                            min={1}
+                            max={365}
+                            value={recInterval}
+                            onChange={(e) => setRecInterval(Number(e.target.value))}
+                            className="w-14 text-[11px] border border-line rounded-md px-2 py-1"
+                          />
+                          <span className="text-[11px] text-faint">回に1回</span>
+                        </div>
+                        {recFrequency === "WEEKLY" && (
+                          <div className="flex gap-1">
+                            {WEEKDAY_LABEL.map((label, day) => (
+                              <button
+                                key={day}
+                                type="button"
+                                onClick={() => toggleRecWeekday(day)}
+                                className={`w-6 h-6 text-[10px] rounded-full border ${
+                                  recWeekdays.has(day) ? "bg-ink text-white border-ink" : "border-line text-muted"
+                                }`}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <div>
+                          <label className="text-[10.5px] text-faint block mb-0.5">未完了のまま次回が来たら</label>
+                          <select
+                            value={recCarryoverPolicy}
+                            onChange={(e) => setRecCarryoverPolicy(e.target.value as typeof recCarryoverPolicy)}
+                            className="w-full text-[11px] border border-line rounded-md px-2 py-1 bg-surface"
+                          >
+                            {Object.entries(RECURRENCE_CARRYOVER_LABEL).map(([k, v]) => (
+                              <option key={k} value={k}>
+                                {v}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {recurrenceError && <p className="text-[11px] text-red-600">{recurrenceError}</p>}
+                        <div className="flex gap-2">
+                          <button
+                            type="submit"
+                            disabled={savingRecurrence}
+                            className="text-[10.5px] bg-ink text-white rounded-full px-2.5 py-1 disabled:opacity-40"
+                          >
+                            {savingRecurrence ? "保存中..." : "保存する"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setRecurrenceFormOpen(false)}
+                            className="text-[10.5px] text-faint hover:underline"
+                          >
+                            キャンセル
+                          </button>
+                        </div>
                       </form>
                     )}
                   </div>
