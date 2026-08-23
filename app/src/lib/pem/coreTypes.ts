@@ -1,11 +1,12 @@
 /**
- * PEMサブシステム Phase 0G: 共通enum・識別子定義。
+ * PEMサブシステム Phase 0G: 共通enum・識別子定義(v2)。
  * 出典: ISMAY_PEMサブシステム_統合正本仕様書_v4_0 2章・4章・5章・6章・9章・16章。
  *
- * 本ファイルはPhase 0Gの成果物であり、DBスキーマ変更を一切伴わない
- * (v4.0仕様書の実装ゲート原則により、Phase 0D以降のMetric Catalog等が
- *  未確定のため、まずコード上の型・定義registryのみを確定する)。
- * 実際のDB書き込み・状態遷移適用は、本Registryを参照する形でPhase 0A以降に実装する。
+ * v1(733959a)からの修正: EvidenceClass→Ledgerの固定1対1対応を廃止した。
+ * INFERENCE(AIの推定)をMODEL_FEEDBACK(本人の確認回答)へ暫定対応させていたのは
+ * v4.0 2.1節が最も排除しようとした「推定と本人回答の混在」そのものであり、仕様違反だった。
+ * 保存先はEvidence Class単体では決まらず、Event/Entity種別ごとにEvent Definition
+ * Registry(eventDefinitionRegistry.ts)側で個別に確定する方式へ変更する。
  */
 
 /** Evidence Class(v4.0 2.1節)。Execution Ledgerへ保存できるのはFACTのみ。 */
@@ -20,32 +21,24 @@ export const EVIDENCE_CLASSES = [
 ] as const;
 export type EvidenceClass = (typeof EVIDENCE_CLASSES)[number];
 
-/** Ledgerの保存先分類(v4.0 3章 論理アーキテクチャ)。 */
-export const LEDGER_KINDS = [
-  "EXECUTION",
-  "ACTIVITY_EVIDENCE",
-  "ONBOARDING_SELF_REPORT",
-  "CONSENT_CONFIGURATION",
-  "MODEL_FEEDBACK",
-  "INTERVENTION",
-  "EXPERIMENT",
+/**
+ * 保存先の物理的分類(v4.0 3章の論理アーキテクチャを踏まえた具体化)。
+ * Evidence Classとは1対1対応させない(INFERENCEはEntity種別により
+ * Observation/Hypothesis/TemporaryState/Predictionのいずれかへ分かれるため)。
+ * 各Event/Entity定義側が、この集合から個別に保存先を宣言する。
+ */
+export const EVIDENCE_STORAGE_TARGETS = [
+  "EXECUTION_LEDGER",
+  "ACTIVITY_EVIDENCE_LEDGER",
+  "SELF_REPORT_LEDGER",
+  "MODEL_ENTITY", // Observation/Hypothesis/TemporaryState/Prediction本体(INFERENCE)
+  "MODEL_FEEDBACK_LEDGER", // 本人の仮説評決・確認回答(FEEDBACK)
+  "INTERVENTION_LEDGER",
+  "CONSENT_LEDGER",
+  "CONFIGURATION_LEDGER",
+  "EXPERIMENT_LEDGER",
 ] as const;
-export type LedgerKind = (typeof LEDGER_KINDS)[number];
-
-/** Evidence ClassとLedgerの対応(v4.0 2.1節の表をコード化)。 */
-export const EVIDENCE_CLASS_TO_LEDGER: Readonly<Record<EvidenceClass, LedgerKind>> = {
-  FACT: "EXECUTION",
-  SELF_REPORT: "ONBOARDING_SELF_REPORT",
-  MEASUREMENT: "ACTIVITY_EVIDENCE",
-  INFERENCE: "MODEL_FEEDBACK", // Hypothesis/Observation等はModel Layer由来だが、
-  // Feedbackとの接続点としてMODEL_FEEDBACKを暫定割当(Phase 0Dで正式なModel Layer
-  // 用Ledger区分を再検討する。INFERENCE自体は「Model Layer」に保存され、単一の
-  // Ledger種別には収まらないため、この対応表はEXECUTION/INTERVENTION等、
-  // Ledgerが一意に決まる区分のみを機械的ガードに用いる想定。
-  INTERVENTION: "INTERVENTION",
-  FEEDBACK: "MODEL_FEEDBACK",
-  CONFIGURATION: "CONSENT_CONFIGURATION",
-};
+export type EvidenceStorageTarget = (typeof EVIDENCE_STORAGE_TARGETS)[number];
 
 /** actorType(v4.0 4章)。 */
 export const ACTOR_TYPES = ["USER", "SYSTEM", "WORKER", "AI", "SERVICE"] as const;
@@ -82,24 +75,18 @@ export const EVIDENCE_DELETION_MODES = [
 export type EvidenceDeletionMode = (typeof EVIDENCE_DELETION_MODES)[number];
 
 /**
- * Responsibility実行状態(v4.0 5.1節)。
- * 既存 lib/responsibility.ts の COMMON_STATUS(INBOX/PLANNED/IN_PROGRESS/DEFERRED/
- * COMPLETED/NOT_NEEDED/CANCELLED)より狭い、Execution Ledgerが直接扱う範囲。
- * INBOX・NOT_NEEDED・CANCELLEDとの対応関係はPhase 0A(Execution Ledger実装)で
- * 既存状態遷移表(COMMON_TRANSITIONS等)と突合の上、正式に確定する
- * (現時点では未確定事項として残す。v4.0 24.2節の方針と同様、値の選択が
- *  製品方針へ影響するため、根拠なく断定しない)。
+ * 個人情報区分(v3.3.1整合性修正・用語コード定義書 第II部1章 piiClassificationに対応)。
+ * Event Definition Registryの各エントリが持ち、ログ・Export・削除方針の判断材料にする。
  */
-export const EXECUTION_RESPONSIBILITY_STATES = [
-  "PLANNED",
-  "IN_PROGRESS",
-  "DEFERRED",
-  "COMPLETED",
-  "ABANDONED",
-] as const;
-export type ExecutionResponsibilityState = (typeof EXECUTION_RESPONSIBILITY_STATES)[number];
+export const PII_CLASSIFICATIONS = ["NONE", "LOW", "MEDIUM", "HIGH"] as const;
+export type PiiClassification = (typeof PII_CLASSIFICATIONS)[number];
 
-/** Execution Ledgerイベント種別(v4.0 5.2節)。FACTのみで構成される。 */
+/**
+ * Execution Ledgerイベント種別(v4.0 5.2節)。FACTのみで構成される。
+ * 注記: 状態(from/to)は独自enumを持たず、既存 lib/responsibility.ts の
+ * COMMON_STATUS をそのまま参照する(eventDefinitionRegistry.ts参照)。
+ * これはPhase 0G-Aの決定事項: 「新しい状態体系を並行定義しない」。
+ */
 export const EXECUTION_EVENT_TYPES = [
   "START",
   "RESUME",
@@ -117,8 +104,6 @@ export type ExecutionEventType = (typeof EXECUTION_EVENT_TYPES)[number];
  * Execution Ledgerへの保存を明示的に禁止するイベント種別(v4.0 5.2節)。
  * 「AUTO_PAUSE_PROPOSED、AUTO_PAUSE_REJECTED、SESSION_TIMEOUT_CLOSE、heartbeat、
  *  AI推定はExecution Ledgerへ保存しない」の一覧化。
- * これらは将来Intervention Ledger / Model Feedback Ledger / Activity Evidence Ledger
- * 側の型として別途定義する(Phase 0A以降)。
  */
 export const EXCLUDED_FROM_EXECUTION_LEDGER = [
   "AUTO_PAUSE_PROPOSED",
@@ -142,7 +127,7 @@ export type PemConsentType = (typeof PEM_CONSENT_TYPES)[number];
 export const PEM_CONSENT_ACTIONS = ["GRANTED", "WITHDRAWN"] as const;
 export type PemConsentAction = (typeof PEM_CONSENT_ACTIONS)[number];
 
-/** PriorityClass(v4.0 13.1節)。数値が小さいほど優先度が高い。 */
+/** PriorityClass(v4.0 13.1節)。配列の並び順が優先度順(先頭ほど高優先)。 */
 export const PLANNING_PRIORITY_CLASSES = [
   "CRITICAL_OBLIGATION",
   "OVERDUE",
@@ -163,7 +148,14 @@ export const PEM_HYPOTHESIS_STATUSES = [
 ] as const;
 export type PemHypothesisStatus = (typeof PEM_HYPOTHESIS_STATUSES)[number];
 
-/** 本人評決(v4.0 12.2節・15章)。仮説評決とレビュー実施状況(reviewStatus)は別軸。 */
+/**
+ * 本人評決(v4.0 12.2節・15章)。
+ * 重要: 既存Prismaの PemHypothesis.userVerdict は現在
+ * CONFIRMED/REJECTED/TEMPORARY/PENDING という別語彙で実装されている(不一致)。
+ * この不一致はPhase 0G-Dの「PEM衝突台帳」(PHASE_0G_COMPATIBILITY_LEDGER.md)で
+ * 正式に記録し、Phase 0C(Model Layer実装)でDBマイグレーションを伴って解消する。
+ * 本Phase 0Gでは新語彙をコード上の正本として先に確定するに留める。
+ */
 export const PEM_USER_VERDICTS = ["UNREVIEWED", "AGREED", "DISAGREED", "PARTIALLY_AGREED"] as const;
 export type PemUserVerdict = (typeof PEM_USER_VERDICTS)[number];
 
