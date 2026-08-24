@@ -61,6 +61,7 @@ model User {
   pemWeeklyReviews    PemWeeklyReview[]
   pemConsentEvents    PemConsentEvent[]
   pemEvidenceDeletionEvents PemEvidenceDeletionEvent[]
+  bootstrapAssertions BootstrapAssertion[]
   notifications       Notification[]
   auditLogsAsActor    AuditLog[]             @relation("AuditActorUser")
 
