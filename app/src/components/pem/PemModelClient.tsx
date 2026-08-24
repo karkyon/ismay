@@ -62,7 +62,7 @@ export function PemModelClient() {
     load();
   }, [load]);
 
-  async function setVerdict(id: string, userVerdict: "CONFIRMED" | "REJECTED" | "TEMPORARY") {
+  async function setVerdict(id: string, userVerdict: "AGREED" | "DISAGREED") {
     setBusyId(id);
     try {
       const res = await apiFetch(`/api/v1/pem/hypotheses/${id}`, {
@@ -172,34 +172,30 @@ export function PemModelClient() {
                     仮説・HYPOTHESIS・確度:{confidenceLabel(h.confidence)}
                   </span>
                 </div>
-                {h.userVerdict !== "PENDING" && (
+                {h.userVerdict !== "UNREVIEWED" && (
                   <span className="text-[11px] text-faint">
-                    {h.userVerdict === "CONFIRMED" ? "合っている" : h.userVerdict === "REJECTED" ? "違う" : "今だけ一時的"}
+                    {h.userVerdict === "AGREED" ? "合っている" : h.userVerdict === "DISAGREED" ? "違う" : h.userVerdict}
                   </span>
                 )}
               </div>
               <p className="text-sm">{h.statement}</p>
+              {/* [2026-08-24・Phase 0C-3] 従来あった「今だけ一時的」ボタンは削除した。
+                  v4.0仕様ではこれは評決ではなくTemporary State側の概念(Phase 1で
+                  新設予定、未着手)と判明したため、受け皿の無いボタンを残置しない判断。 */}
               <div className="flex items-center gap-2 mt-4 flex-wrap">
                 <button
-                  onClick={() => setVerdict(h.id, "CONFIRMED")}
+                  onClick={() => setVerdict(h.id, "AGREED")}
                   disabled={busyId === h.id}
-                  className={`text-xs border rounded-lg px-3 py-1.5 hover:bg-canvas disabled:opacity-40 ${h.userVerdict === "CONFIRMED" ? "border-brand text-brand-700" : "border-line"}`}
+                  className={`text-xs border rounded-lg px-3 py-1.5 hover:bg-canvas disabled:opacity-40 ${h.userVerdict === "AGREED" ? "border-brand text-brand-700" : "border-line"}`}
                 >
                   合っている
                 </button>
                 <button
-                  onClick={() => setVerdict(h.id, "REJECTED")}
+                  onClick={() => setVerdict(h.id, "DISAGREED")}
                   disabled={busyId === h.id}
-                  className={`text-xs border rounded-lg px-3 py-1.5 hover:bg-canvas disabled:opacity-40 ${h.userVerdict === "REJECTED" ? "border-red-400 text-red-600" : "border-line"}`}
+                  className={`text-xs border rounded-lg px-3 py-1.5 hover:bg-canvas disabled:opacity-40 ${h.userVerdict === "DISAGREED" ? "border-red-400 text-red-600" : "border-line"}`}
                 >
                   違う
-                </button>
-                <button
-                  onClick={() => setVerdict(h.id, "TEMPORARY")}
-                  disabled={busyId === h.id}
-                  className={`text-xs border rounded-lg px-3 py-1.5 hover:bg-canvas disabled:opacity-40 ${h.userVerdict === "TEMPORARY" ? "border-amber-400 text-amber-700" : "border-line"}`}
-                >
-                  今だけ一時的
                 </button>
                 <button
                   onClick={() => forget(h.id)}

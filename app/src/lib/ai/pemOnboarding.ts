@@ -246,7 +246,7 @@ async function finalizeOnboarding(
           windowFrom: now,
           windowTo: now,
           confidence: Math.min(hyp.confidence, 0.3),
-          userVerdict: "PENDING",
+          userVerdict: "UNREVIEWED",
         },
       });
     }

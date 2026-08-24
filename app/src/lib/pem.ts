@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
 import { METRIC_DEFINITIONS } from "@/lib/pem/metricDefinitionRegistry";
+import { getDeletedEvidenceIds } from "@/lib/pem/evidenceDeletion";
 
 /**
  * FN-PEM-02 観察更新(機能別詳細設計書v1.1 13章)。
@@ -129,8 +130,16 @@ interface DeferRateBucket {
 export async function recomputeAggregates(): Promise<{ usersProcessed: number; observationsWritten: number }> {
   const windowStart = new Date(Date.now() - AGGREGATE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
+  // Phase 0C-2: PemObservationの論理削除はinsert-only Evidence Deletion Event経由
+  // (v4.0 16.3節)。バッチ処理のため一度だけ全ユーザー分の削除済みidを取得する。
+  const deletedObservationIds = await getDeletedEvidenceIds("PEM_OBSERVATION");
+
   const userRows = await db.pemObservation.findMany({
-    where: { observationType: "TRANSITION", occurredAt: { gte: windowStart }, deletedAt: null },
+    where: {
+      observationType: "TRANSITION",
+      occurredAt: { gte: windowStart },
+      id: { notIn: [...deletedObservationIds] },
+    },
     select: { userId: true },
     distinct: ["userId"],
   });
@@ -139,7 +148,12 @@ export async function recomputeAggregates(): Promise<{ usersProcessed: number; o
 
   for (const { userId } of userRows as { userId: string }[]) {
     const transitions = await db.pemObservation.findMany({
-      where: { userId, observationType: "TRANSITION", occurredAt: { gte: windowStart }, deletedAt: null },
+      where: {
+        userId,
+        observationType: "TRANSITION",
+        occurredAt: { gte: windowStart },
+        id: { notIn: [...deletedObservationIds] },
+      },
       select: { payload: true },
     });
 
@@ -159,7 +173,7 @@ export async function recomputeAggregates(): Promise<{ usersProcessed: number; o
     }
 
     const existing = await db.pemObservation.findFirst({
-      where: { userId, observationType: "OBSERVATION", deletedAt: null },
+      where: { userId, observationType: "OBSERVATION", id: { notIn: [...deletedObservationIds] } },
       orderBy: { createdAt: "desc" },
     });
 
@@ -261,11 +275,12 @@ async function persistAdviceRun(params: {
  * 既に対応する仮説がある場合はAIを呼ばない(コスト抑制。§「低頻度」の趣旨に合わせる)。
  */
 export async function ensureHypothesesUpToDate(userId: string, workspaceId: string): Promise<{ generated: number }> {
+  const deletedObservationIds = await getDeletedEvidenceIds("PEM_OBSERVATION", userId);
   const observations = await db.pemObservation.findMany({
     where: {
       userId,
       observationType: "OBSERVATION",
-      deletedAt: null,
+      id: { notIn: [...deletedObservationIds] },
       OR: [{ validUntil: null }, { validUntil: { gt: new Date() } }],
     },
   });
@@ -294,7 +309,7 @@ export async function ensureHypothesesUpToDate(userId: string, workspaceId: stri
     if (existingActive) continue; // 既に同じ根拠の仮説がある(評決に関わらずAIを再度呼ばない)
 
     const recentlyRejected = await db.pemHypothesis.findMany({
-      where: { userId, sourceMetric: payload.metric, userVerdict: "REJECTED", windowTo: { gte: cooldownStart } },
+      where: { userId, sourceMetric: payload.metric, userVerdict: "DISAGREED", windowTo: { gte: cooldownStart } },
       select: { statement: true },
       take: 5,
     });
@@ -344,7 +359,7 @@ export async function ensureHypothesesUpToDate(userId: string, workspaceId: stri
           windowFrom: new Date(Date.now() - AGGREGATE_WINDOW_DAYS * 24 * 60 * 60 * 1000),
           windowTo: obs.occurredAt,
           confidence: parsed.data.confidence,
-          userVerdict: "PENDING",
+          userVerdict: "UNREVIEWED",
           sourceMetric: payload.metric,
         },
       });
@@ -372,8 +387,14 @@ interface WeeklyStats {
 
 /** 実測データのみから週次統計を計算する(AIには渡すだけで、ここでは一切AIを呼ばない)。 */
 async function computeWeeklyStats(userId: string, weekStart: Date, weekEnd: Date): Promise<WeeklyStats> {
+  const deletedObservationIds = await getDeletedEvidenceIds("PEM_OBSERVATION", userId);
   const rows = await db.pemObservation.findMany({
-    where: { userId, observationType: "TRANSITION", occurredAt: { gte: weekStart, lt: weekEnd }, deletedAt: null },
+    where: {
+      userId,
+      observationType: "TRANSITION",
+      occurredAt: { gte: weekStart, lt: weekEnd },
+      id: { notIn: [...deletedObservationIds] },
+    },
     select: { payload: true, occurredAt: true },
     orderBy: { occurredAt: "asc" },
   });
@@ -482,7 +503,7 @@ export async function getOrGenerateWeeklyReview(
     where: {
       userId,
       deletedAt: null,
-      userVerdict: { in: ["CONFIRMED", "PENDING"] },
+      userVerdict: { in: ["AGREED", "UNREVIEWED"] },
       OR: [{ validUntil: null }, { validUntil: { gt: now } }],
     },
     orderBy: { createdAt: "desc" },

@@ -7,17 +7,23 @@ import { apiOk, apiError } from "@/lib/auth/response";
 
 /**
  * API-PEM-02: GET/PATCH /pem/hypotheses/{id} 閲覧・訂正(FN-PEM-03/UI-09)。
- * 出典: API・イベント設計書v1.1 4.5節、AI・PEM設計書v1.0 14章「訂正・忘却・リセット」。
+ * 出典: API・イベント設計書v1.1 4.5節、AI・PEM設計書v1.0 14章「訂正・忘却・リセット」、
+ *       PEMサブシステム統合正本仕様書v4.0 12.2節。
  *
- * 訂正: 「正しい／違う／一時的」→userVerdict(CONFIRMED/REJECTED/TEMPORARY)。
- * 忘却(「今後使わない」相当): forget=trueでdeletedAt設定(論理削除)。
+ * [2026-08-24訂正・Phase 0C-3] 訂正: 「正しい／違う」→userVerdict(AGREED/DISAGREED、
+ * v4.0新語彙)。従来あった「一時的」(TEMPORARY)は、評決ではなくTemporary State側の
+ * 概念(Phase 1で新設予定、未着手)と判明したため、選択肢から削除した
+ * (PHASE_0G_COMPATIBILITY_LEDGER.md参照。既存TEMPORARY行はマイグレーションで
+ * UNREVIEWEDへ移行済み、元の値はlegacyUserVerdict列に残る)。
+ * 忘却(「今後使わない」相当): forget=trueでdeletedAt設定(論理削除。このモデルに
+ * 限り従来通りUPDATE方式。v4.0 16.3節のinsert-only化対象はPemObservationのみ)。
  * 「証拠を除外できるが履歴に理由を残す」は、削除ではなくvalidUntil即時失効という形で
  * 対応済み(lib/pem.tsのrecomputeAggregates参照)。個別仮説の物理削除はしない。
  */
 
 const PatchSchema = z
   .object({
-    userVerdict: z.enum(["CONFIRMED", "REJECTED", "TEMPORARY"]).optional(),
+    userVerdict: z.enum(["AGREED", "DISAGREED"]).optional(),
     forget: z.boolean().optional(),
   })
   .refine((v) => v.userVerdict !== undefined || v.forget !== undefined, {

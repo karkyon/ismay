@@ -10,7 +10,8 @@
     "test:pem-phase0g": "tsx src/lib/pem/__tests__/phase0gInvariants.test.ts",
     "test:pem-phase0b": "tsx src/lib/pem/__tests__/phase0bInvariants.test.ts",
     "test:pem-phase0c1": "tsx src/lib/pem/__tests__/phase0c1Invariants.test.ts",
-    "test:pem-phase0d1": "tsx src/lib/pem/__tests__/phase0d1Invariants.test.ts"
+    "test:pem-phase0d1": "tsx src/lib/pem/__tests__/phase0d1Invariants.test.ts",
+    "test:pem-phase0c2": "tsx src/lib/pem/__tests__/phase0c2Invariants.test.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",

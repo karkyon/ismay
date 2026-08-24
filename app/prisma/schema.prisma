@@ -60,6 +60,7 @@ model User {
   pemOnboardingConversation PemOnboardingConversation?
   pemWeeklyReviews    PemWeeklyReview[]
   pemConsentEvents    PemConsentEvent[]
+  pemEvidenceDeletionEvents PemEvidenceDeletionEvent[]
   notifications       Notification[]
   auditLogsAsActor    AuditLog[]             @relation("AuditActorUser")
 
@@ -675,6 +676,10 @@ model PemObservation {
   validUntil     DateTime? @map("valid_until")
   occurredAt     DateTime  @default(now()) @map("occurred_at")
   createdAt      DateTime  @default(now()) @map("created_at")
+  /// [2026-08-24訂正・Phase 0C-2] v4.0 16.3節により論理削除はinsert-onlyの
+  /// PemEvidenceDeletionEvent(evidenceDeletion.ts参照)へ移行した。この列自体は
+  /// 過去データとの後方互換のため残すが、以後のコードはこの列を読み書きしない
+  /// (削除判定はgetDeletedEvidenceIds()を正とする)。
   deletedAt      DateTime? @map("deleted_at")
   /// 新設(2026-08-23・FN-PEM-02対応): observationType="TRANSITION"(生イベント取り込み)の
   /// 冪等性キー。機能別詳細設計書v1.1 13章「PEMObserverはResponsibilityTransitionedを
@@ -751,12 +756,19 @@ model PemHypothesis {
   windowTo    DateTime  @map("window_to")
   confidence  Decimal   @db.Decimal(4, 3)
   validUntil  DateTime? @map("valid_until")
-  /// CONFIRMED(合っている)/REJECTED(違う)/TEMPORARY(今だけ一時的)/PENDING(未評決) [推論]
-  /// [2026-08-23訂正] 従来コメントはCONFIRMED/REJECTED/PENDINGの3値だったが、
-  /// AI_PEM設計書v1.0 14章・ワイヤーフレームUI-09の3ボタン(合っている/違う/今だけ一時的)
-  /// に合わせTEMPORARYを追加。設計書の4分類のうち「今後使わない」は本レコードの
-  /// deletedAt(論理削除・忘却操作)として表現し、userVerdictには含めない。
-  userVerdict String    @default("PENDING") @map("user_verdict")
+  /// UNREVIEWED(未評決)/AGREED(合っている)/DISAGREED(違う)/PARTIALLY_AGREED(部分的に合っている)
+  /// [出典: PEMサブシステム統合正本仕様書v4.0 12.2節]
+  /// [2026-08-24訂正・Phase 0C-3] 従来はCONFIRMED/REJECTED/TEMPORARY/PENDINGという
+  /// 別語彙だった(PHASE_0G_COMPATIBILITY_LEDGER.md参照)。TEMPORARY(今だけ一時的)は
+  /// 評決ではなくTemporary State側の概念(Phase 1で新設予定、未着手)のため、新語彙には
+  /// 対応する値が無い。既存TEMPORARY行はUNREVIEWEDへ移行し、元の値はlegacyUserVerdict
+  /// (下記)へ退避した。「今後使わない」は引き続き本レコードのdeletedAt(forget操作、
+  /// このモデルに限りv4.0 16.3節のinsert-only化対象外。衝突台帳未フラグ)として表現する。
+  userVerdict String    @default("UNREVIEWED") @map("user_verdict")
+  /// [新設・Phase 0C-3] マイグレーション前のuserVerdict値の退避列(CONFIRMED/REJECTED/
+  /// TEMPORARY/PENDING)。特にTEMPORARYだった仮説をPhase 1のTemporary State実装時に
+  /// 洗い出せるようにするため削除しない。新規作成される行では常にnull。
+  legacyUserVerdict String? @map("legacy_user_verdict")
   /// 新設(2026-08-23・FN-PEM-03対応): AI-07自動生成時のみ設定する集計指標キー
   /// (例: "DEFER_RATE_BY_ESTIMATE"、lib/pem.tsのOBSERVATION.payload.metricと対応)。
   /// 「本人がREJECTした仮説は同じ根拠だけで再提案しない」(機能別詳細設計書v1.1 13章)を
@@ -826,6 +838,27 @@ model PemWeeklyReview {
 
   @@unique([userId, weekStart])
   @@map("pem_weekly_reviews")
+}
+
+
+
+/// TBL(PEM Phase 0C) pem_evidence_deletion_events - Evidence削除Ledger(insert-only)
+/// [出典: PEMサブシステム統合正本仕様書v4.0 16.3節]
+model PemEvidenceDeletionEvent {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  user         User     @relation(fields: [userId], references: [id])
+  /// 現時点はPEM_OBSERVATIONのみ(PHASE_0G_COMPATIBILITY_LEDGER.md参照)。
+  targetType   String   @map("target_type")
+  targetId     String   @map("target_id")
+  /// EXCLUDED_FROM_USE/REDACTED/ANONYMIZED/CRYPTOGRAPHICALLY_ERASED/
+  /// PHYSICALLY_DELETED/LEGALLY_RETAINED(coreTypes.ts EvidenceDeletionMode)
+  deletionMode String   @map("deletion_mode")
+  reason       String?
+  occurredAt   DateTime @default(now()) @map("occurred_at")
+
+  @@index([userId, targetType, targetId])
+  @@map("pem_evidence_deletion_events")
 }
 
 /// TBL-019 evidences - 完了等の証拠候補 [推論]

@@ -5,6 +5,7 @@ import { debugServer } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { verifyPassword } from "@/lib/auth/password";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { recordEvidenceDeletionEvents } from "@/lib/pem/evidenceDeletion";
 
 /**
  * POST /pem/reset(2026-08-23新設)。
@@ -64,8 +65,27 @@ export async function POST(req: NextRequest) {
   }
 
   const now = new Date();
+  // Phase 0C-2: PemObservationの論理削除はinsert-only Evidence Deletion Event経由
+  // (v4.0 16.3節)。トランザクション配列の外で対象idを先に確定してから、
+  // イベント追記を含む一括トランザクションを実行する。
+  const activeObservations = await db.pemObservation.findMany({
+    where: { userId: user.id, deletedAt: null },
+    select: { id: true },
+  });
   await db.$transaction([
-    db.pemObservation.updateMany({ where: { userId: user.id, deletedAt: null }, data: { deletedAt: now } }),
+    ...(activeObservations.length > 0
+      ? [
+          db.pemEvidenceDeletionEvent.createMany({
+            data: activeObservations.map((o: { id: string }) => ({
+              userId: user.id,
+              targetType: "PEM_OBSERVATION",
+              targetId: o.id,
+              deletionMode: "EXCLUDED_FROM_USE",
+              reason: "PEM_RESET",
+            })),
+          }),
+        ]
+      : []),
     db.pemHypothesis.updateMany({ where: { userId: user.id, deletedAt: null }, data: { deletedAt: now } }),
     db.pemOnboardingConversation.deleteMany({ where: { userId: user.id } }),
     db.pemWeeklyReview.deleteMany({ where: { userId: user.id } }),

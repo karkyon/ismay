@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { ensureHypothesesUpToDate } from "@/lib/pem";
+import { getDeletedEvidenceIds } from "@/lib/pem/evidenceDeletion";
 
 /**
  * API-PEM-02: GET /pem/hypotheses 閲覧(FN-PEM-03/UI-09)。
@@ -29,9 +30,16 @@ export async function GET(req: NextRequest) {
     // AI・PEM設計書v1.0 15章「低確度、Provider障害...でもCapture・手動管理を継続」の精神)。
   });
 
+  // Phase 0C-2: PemObservationの論理削除判定はevidenceDeletion.ts経由(v4.0 16.3節)。
+  const deletedObservationIds = await getDeletedEvidenceIds("PEM_OBSERVATION", auth.user.userId);
+
   const [facts, observations, hypotheses] = await Promise.all([
     db.pemObservation.findMany({
-      where: { userId: auth.user.userId, observationType: "FACT", deletedAt: null },
+      where: {
+        userId: auth.user.userId,
+        observationType: "FACT",
+        id: { notIn: [...deletedObservationIds] },
+      },
       orderBy: { occurredAt: "desc" },
       select: { id: true, payload: true, occurredAt: true },
     }),
@@ -39,7 +47,7 @@ export async function GET(req: NextRequest) {
       where: {
         userId: auth.user.userId,
         observationType: "OBSERVATION",
-        deletedAt: null,
+        id: { notIn: [...deletedObservationIds] },
         OR: [{ validUntil: null }, { validUntil: { gt: new Date() } }],
       },
       orderBy: { occurredAt: "desc" },
