@@ -78,6 +78,10 @@ export async function POST(req: NextRequest) {
  * [2026-08-23新設・設計書に明記は無いが必要と判断] UI-03の未完了バナー表示のため、
  * 対話が未完了かどうかをフロントが軽量に確認できるGETを追加する。
  * POST側は「メッセージ送信」の作用があるため、単純な状態確認に流用しない。
+ *
+ * [2026-08-24改訂・Phase 0E] userIdのunique制約廃止に伴いfindUnique→findFirstへ変更。
+ * 「最新の対話行」を現在の対話とみなす(lib/ai/pemOnboarding.tsのfindOrCreateCurrentConversation
+ * と同じ選択基準)。
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth(req);
@@ -85,8 +89,9 @@ export async function GET(req: NextRequest) {
     return apiError("AUTH_REQUIRED", "ログインが必要です");
   }
 
-  const conversation = await db.pemOnboardingConversation.findUnique({
+  const conversation = await db.pemOnboardingConversation.findFirst({
     where: { userId: auth.user.userId },
+    orderBy: { createdAt: "desc" },
     select: { state: true, completedAt: true, messages: true },
   });
 

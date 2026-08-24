@@ -14,9 +14,30 @@ import type { PemDialogueProvider, PemOnboardingUsage } from "@/lib/ai/pemProvid
  * [設計判断・2026-08-23] API・イベント設計書v1.1 4.5節は「最大2回」のAI Gateway再試行を
  * 明記していないが(FN-AI-01固有の記述)、FN-PEM-01もAI Gatewayの一部であるため、
  * 2章「Retryは一時障害と修復可能な構造違反に限定。最大2回」に従い同じ再試行方針を適用する。
+ *
+ * [2026-08-24改訂・Phase 0E] PemOnboardingConversation.userIdのunique制約を廃止し
+ * (v4.0 11章、複数履歴を許可)、findOrCreateCurrentConversation()が「そのユーザーの
+ * 最新の対話行」を都度探索する方式へ変更した。既存データ(1ユーザー1行)に対しては
+ * 従来と同じ挙動になる(常に最新=唯一の行を返すため)。
  */
 
 const MAX_AI_ATTEMPTS = 2;
+
+/**
+ * ユーザーの現在の対話を返す(最新の行。無ければconversationKind="INITIAL"で新規作成)。
+ * RECALIBRATION/MAJOR_CHANGEの生成トリガーは本パッチのスコープ外(v4.0 11章の該当詳細
+ * 未確認のため未実装)。新規作成時は常にINITIALとする。
+ */
+async function findOrCreateCurrentConversation(userId: string) {
+  const existing = await db.pemOnboardingConversation.findFirst({
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+  });
+  if (existing) return existing;
+  return db.pemOnboardingConversation.create({
+    data: { userId, conversationKind: "INITIAL" },
+  });
+}
 const DEFAULT_TIMEZONE = "Asia/Tokyo"; // TBD-10と同じ前提(extract.tsと合わせる)
 const MAX_HISTORY_MESSAGES = 20; // プロンプト肥大化防止。直近20件のみモデルへ渡す
 
@@ -78,11 +99,7 @@ export async function processOnboardingMessage(
   message: string,
   skip: boolean,
 ): Promise<PemOnboardingMessageResult> {
-  const conversation = await db.pemOnboardingConversation.upsert({
-    where: { userId },
-    create: { userId },
-    update: {},
-  });
+  const conversation = await findOrCreateCurrentConversation(userId);
 
   if (conversation.completedAt) {
     return {

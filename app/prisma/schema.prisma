@@ -57,7 +57,7 @@ model User {
   responsibilitiesUpdated Responsibility[]   @relation("ResponsibilityUpdatedBy")
   pemObservations     PemObservation[]
   pemHypotheses       PemHypothesis[]
-  pemOnboardingConversation PemOnboardingConversation?
+  pemOnboardingConversations PemOnboardingConversation[]
   pemWeeklyReviews    PemWeeklyReview[]
   pemConsentEvents    PemConsentEvent[]
   pemEvidenceDeletionEvents PemEvidenceDeletionEvent[]
@@ -797,13 +797,21 @@ model PemEvidenceLink {
   @@map("pem_evidence_links")
 }
 
-/// 新設(2026-08-23): FN-PEM-01 初回対話のConversationState永続化。
-/// TBL番号未採番([推論]。DB設計書のTBL-016〜018には無いが、機能別詳細設計書v1.1 12章
-/// 「中断位置を保存」を満たすために必要と判断し新設)。1ユーザー1件(再対話は上書き)。
+/// [2026-08-24改訂・Phase 0E] FN-PEM-01 初回対話のConversationState永続化。
+/// 出典: PEMサブシステム統合正本仕様書v4.0 11章、
+/// PHASE_0G_COMPATIBILITY_LEDGER.md「PemOnboardingConversation.userId @unique」行。
+/// 従来は1ユーザー1件固定(userIdがunique)だったが、v4.0はINITIAL/RECALIBRATION/
+/// MAJOR_CHANGEを複数履歴として許可するため、unique制約を外し複数行を許容する。
+/// [スコープ] 本改訂はデータモデルのみ。RECALIBRATION/MAJOR_CHANGEを実際にいつ・
+/// どうトリガーするかの業務ロジックは未実装(v4.0 11章の該当詳細が未確認のため、
+/// 想像で実装しない判断)。現状は新規対話を常にconversationKind="INITIAL"で作成する
+/// (lib/ai/pemOnboarding.tsのfindOrCreateCurrentConversation参照)。
 model PemOnboardingConversation {
   id        String    @id @default(uuid())
-  userId    String    @unique @map("user_id")
+  userId    String    @map("user_id")
   user      User      @relation(fields: [userId], references: [id])
+  /// INITIAL/RECALIBRATION/MAJOR_CHANGE(v4.0 11章)。既存データはbackfillでINITIALとする。
+  conversationKind String @default("INITIAL") @map("conversation_kind")
   /// ROLE/CURRENT_LOAD/FIXED_CONSTRAINTS/EXECUTION_CONTEXT/VALUES/REVIEW/DONE [推論]
   state     String    @default("ROLE")
   /// {role: "assistant"|"user", content: string, at: string}[] の対話履歴全体
@@ -816,6 +824,7 @@ model PemOnboardingConversation {
   updatedAt DateTime  @updatedAt @map("updated_at")
   completedAt DateTime? @map("completed_at")
 
+  @@index([userId, createdAt])
   @@map("pem_onboarding_conversations")
 }
 

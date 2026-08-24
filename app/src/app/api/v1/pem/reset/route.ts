@@ -87,6 +87,8 @@ export async function POST(req: NextRequest) {
         ]
       : []),
     db.pemHypothesis.updateMany({ where: { userId: user.id, deletedAt: null }, data: { deletedAt: now } }),
+    // Phase 0E以降、対話は複数行になり得るが、userId条件のみで全件削除する挙動は
+    // 従来と変わらない(deleteManyのため複数行でも問題なく動作する)。
     db.pemOnboardingConversation.deleteMany({ where: { userId: user.id } }),
     db.pemWeeklyReview.deleteMany({ where: { userId: user.id } }),
   ]);
