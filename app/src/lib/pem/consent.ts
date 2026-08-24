@@ -59,6 +59,7 @@ export async function recordConsentEvent(
   await db.pemConsentEvent.create({
     data: {
       userId: ctx.subjectUserId,
+      workspaceId: ctx.tenantId,
       consentType,
       action,
       policyVersion: PEM_CONSENT_POLICY_VERSION,
@@ -76,7 +77,7 @@ export async function getConsentState(
   client: PemDbClient = db,
 ): Promise<Record<PemConsentType, PemConsentState>> {
   const events = await client.pemConsentEvent.findMany({
-    where: { userId: ctx.subjectUserId },
+    where: { userId: ctx.subjectUserId, workspaceId: ctx.tenantId },
     orderBy: { occurredAt: "asc" },
     select: { consentType: true, action: true, policyVersion: true, occurredAt: true },
   });
@@ -89,9 +90,14 @@ export async function getConsentState(
   const result = {} as Record<PemConsentType, PemConsentState>;
   for (const consentType of PEM_CONSENT_TYPES) {
     const latest = latestByType.get(consentType);
+    // [2026-08-25追加・Completion Gate 1、v4.0 16.1節] 最新イベントのpolicyVersionが
+    // 現在のPEM_CONSENT_POLICY_VERSIONと一致しない場合、GRANTEDを有効とみなさない
+    // (文言改定後に旧GRANTEDが自動的に有効扱いになる問題を是正)。occurredAt/
+    // policyVersion自体は透明性のため保持し、actionだけをnull(未回答扱い)にする。
+    const isCurrentPolicy = latest?.policyVersion === PEM_CONSENT_POLICY_VERSION;
     result[consentType] = {
       consentType,
-      action: (latest?.action as PemConsentAction | undefined) ?? null,
+      action: isCurrentPolicy ? ((latest?.action as PemConsentAction | undefined) ?? null) : null,
       policyVersion: latest?.policyVersion ?? null,
       occurredAt: latest?.occurredAt ?? null,
     };
@@ -137,17 +143,62 @@ export interface PemFeatureGate {
   dataCollectionEnabled: boolean; // PEM全体OFFでない
   aiProcessingEnabled: boolean;
   planningApplicationEnabled: boolean; // PlanningのみOFFでない
-  isMetricEnabled: (metricKey: string) => boolean; // Phase 0Dまでは常にtrue(制御なし)を返す
+  /** registry登録済み かつ 本人がmetric単位OFFにしていないmetricでtrue。 */
+  isMetricEnabled: (metricKey: string) => boolean;
+}
+
+/**
+ * [2026-08-25追加・Completion Gate 1、v4.0 16.2節「metric OFF」]
+ * ユーザーが個別に無効化(WITHDRAWN)したmetricKeyの集合を返す(投影)。
+ */
+export async function getWithdrawnMetricKeys(
+  ctx: PemAuthorizationContext,
+  client: PemDbClient = db,
+): Promise<Set<string>> {
+  const events = await client.pemMetricConsentEvent.findMany({
+    where: { userId: ctx.subjectUserId, workspaceId: ctx.tenantId },
+    orderBy: { occurredAt: "asc" },
+    select: { metricKey: true, action: true },
+  });
+  const latestByMetric = new Map<string, string>();
+  for (const e of events) {
+    latestByMetric.set(e.metricKey, e.action); // 昇順で舐めるため、最後に残ったものが最新
+  }
+  const withdrawn = new Set<string>();
+  for (const [metricKey, action] of latestByMetric) {
+    if (action === "WITHDRAWN") withdrawn.add(metricKey);
+  }
+  return withdrawn;
+}
+
+/** v4.0 16.2節「metric OFF」。GRANTEDの記録はinsert-onlyのopt back-in。 */
+export async function recordMetricConsentEvent(
+  ctx: PemAuthorizationContext,
+  metricKey: string,
+  action: PemConsentAction,
+  source: "ONBOARDING" | "SETTINGS",
+): Promise<void> {
+  await db.pemMetricConsentEvent.create({
+    data: {
+      userId: ctx.subjectUserId,
+      workspaceId: ctx.tenantId,
+      metricKey,
+      action,
+      policyVersion: PEM_CONSENT_POLICY_VERSION,
+      source,
+    },
+  });
 }
 
 export async function evaluateFeatureGate(ctx: PemAuthorizationContext): Promise<PemFeatureGate> {
   const state = await getConsentState(ctx);
+  const withdrawnMetrics = await getWithdrawnMetricKeys(ctx);
   return {
     dataCollectionEnabled: state.PEM_DATA_COLLECTION.action === "GRANTED",
     aiProcessingEnabled: state.PEM_AI_PROCESSING.action === "GRANTED",
     planningApplicationEnabled: state.PEM_PLANNING_APPLICATION.action === "GRANTED",
-    // Phase 0D-1: 登録済みmetricKeyかどうかで判定する。ユーザーごとの個別無効化
-    // (metric単位OFF)は永続化先の設計確定後に別途追加する(現状は未実装)。
-    isMetricEnabled: (metricKey: string) => isMetricEnabledByDefault(metricKey),
+    // registryに登録済み かつ 本人がmetric単位OFFにしていない場合のみtrue。
+    isMetricEnabled: (metricKey: string) =>
+      isMetricEnabledByDefault(metricKey) && !withdrawnMetrics.has(metricKey),
   };
 }

@@ -14,6 +14,7 @@ import {
 import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
 import { projectAndPersistExecutionSessions } from "@/lib/pem/sessionPersistence";
 import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
+import { isExecutionLedgerApplicableType } from "@/lib/pem/eventDefinitionRegistry";
 
 const TransitionSchema = z.object({
   action: z.enum([
@@ -114,6 +115,37 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       "STATE_TRANSITION_INVALID",
       `${existing.type}の現在の状態(${existing.status})から${action}へは遷移できません`,
     );
+  }
+
+  // [2026-08-25追加・Completion Gate 1、v4.0 5.5節「idempotency response contract」]
+  // Responsibility.versionの楽観ロックは、同一リクエストの再送(retry)であっても
+  // versionが既に進んでいればVERSION_CONFLICTとして弾いてしまい、v4.0が要求する
+  // 「同一key・同一payloadなら元の成功応答を返す」という冪等再送にならない。
+  // Execution Ledger対象型(TASK/EVENT/CONCERN/HABIT/IDEA)に限り、楽観ロックの
+  // 試行前にidempotencyKeyで既存Eventを検索し、再送か否かを先に判定する。
+  // 対象外型(COMMITMENT等、Execution Eventを持たない)は従来通りVERSION_CONFLICT
+  // 経路のみとなる(このEvent Ledgerを使わないためidempotencyKey突合が出来ない)。
+  if (isExecutionLedgerApplicableType(existing.type)) {
+    const idempotencyKey = `${id}:${action}:${version}`;
+    const existingEvent = await db.responsibilityExecutionEvent.findFirst({
+      where: { workspaceId, subjectUserId: auth.user.userId, idempotencyKey },
+      select: { requestPayloadHash: true },
+    });
+    if (existingEvent) {
+      if (existingEvent.requestPayloadHash === pemRequestPayloadHash) {
+        // 同一key・同一payload: 冪等再送とみなし、新たな更新は行わず現在の状態を返す。
+        const current = await db.responsibility.findUniqueOrThrow({
+          where: { id },
+          select: { id: true, status: true, version: true },
+        });
+        return apiOk(current);
+      }
+      // 同一key・異なるpayload: 呼び出し元の実装不備の疑いがあるため409で拒否する。
+      return apiError(
+        "IDEMPOTENCY_KEY_CONFLICT",
+        "同一のリクエストキーで内容の異なるリクエストが送信されました",
+      );
+    }
   }
   const nextStatus = typeof rule.to === "function" ? rule.to(existing.status) : rule.to;
 

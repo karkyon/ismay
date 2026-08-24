@@ -14,7 +14,10 @@ export type ErrorCode =
   | "MFA_REQUIRED"
   | "MFA_INVALID"
   | "CREDENTIALS_INVALID"
-  | "ACCOUNT_LOCKED";
+  | "ACCOUNT_LOCKED"
+  /** [2026-08-25追加・Completion Gate 1、v4.0 5.5節] 同一idempotencyKeyで
+   * 異なるrequestPayloadHashのリクエストが再送された場合。 */
+  | "IDEMPOTENCY_KEY_CONFLICT";
 
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   VALIDATION_FAILED: 400,
@@ -26,6 +29,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   ACCOUNT_LOCKED: 403,
   RESOURCE_NOT_FOUND: 404,
   VERSION_CONFLICT: 409,
+  IDEMPOTENCY_KEY_CONFLICT: 409,
   STATE_TRANSITION_INVALID: 422,
   RATE_LIMITED: 429,
   AI_TEMPORARILY_UNAVAILABLE: 503,

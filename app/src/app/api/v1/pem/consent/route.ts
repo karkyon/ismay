@@ -2,7 +2,12 @@ import type { NextRequest } from "next/server";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
-import { getConsentState, recordConsentEvent } from "@/lib/pem/consent";
+import {
+  getConsentState,
+  getWithdrawnMetricKeys,
+  recordConsentEvent,
+  recordMetricConsentEvent,
+} from "@/lib/pem/consent";
 import { PEM_CONSENT_ACTIONS, PEM_CONSENT_TYPES } from "@/lib/pem/coreTypes";
 
 /**
@@ -39,21 +44,29 @@ export async function POST(req: NextRequest) {
     return apiError("VALIDATION_FAILED", "リクエストボディがJSONではありません");
   }
 
-  const { consentType, action, source } = (body ?? {}) as Record<string, unknown>;
+  const { consentType, metricKey, action, source } = (body ?? {}) as Record<string, unknown>;
 
-  if (typeof consentType !== "string" || !(PEM_CONSENT_TYPES as readonly string[]).includes(consentType)) {
-    return apiError("VALIDATION_FAILED", "consentTypeが不正です", {
-      fieldErrors: { consentType: `許可値: ${PEM_CONSENT_TYPES.join(", ")}` },
-    });
-  }
   if (typeof action !== "string" || !(PEM_CONSENT_ACTIONS as readonly string[]).includes(action)) {
     return apiError("VALIDATION_FAILED", "actionが不正です", {
       fieldErrors: { action: `許可値: ${PEM_CONSENT_ACTIONS.join(", ")}` },
     });
   }
   const resolvedSource = source === "ONBOARDING" ? "ONBOARDING" : "SETTINGS";
-
   const ctx = await buildPemAuthorizationContext(auth.user.userId, auth.user.sessionId);
+
+  // [2026-08-25追加・Completion Gate 1、v4.0 16.2節] metricKeyが指定されていれば
+  // metric単位OFFの記録として扱う(consentTypeとは排他)。
+  if (typeof metricKey === "string" && metricKey.length > 0) {
+    await recordMetricConsentEvent(ctx, metricKey, action as (typeof PEM_CONSENT_ACTIONS)[number], resolvedSource);
+    const withdrawnMetrics = await getWithdrawnMetricKeys(ctx);
+    return apiOk({ withdrawnMetricKeys: [...withdrawnMetrics] }, { status: 201 });
+  }
+
+  if (typeof consentType !== "string" || !(PEM_CONSENT_TYPES as readonly string[]).includes(consentType)) {
+    return apiError("VALIDATION_FAILED", "consentTypeが不正です", {
+      fieldErrors: { consentType: `許可値: ${PEM_CONSENT_TYPES.join(", ")}` },
+    });
+  }
   await recordConsentEvent(
     ctx,
     consentType as (typeof PEM_CONSENT_TYPES)[number],

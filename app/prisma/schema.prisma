@@ -60,6 +60,7 @@ model User {
   pemOnboardingConversations PemOnboardingConversation[]
   pemWeeklyReviews    PemWeeklyReview[]
   pemConsentEvents    PemConsentEvent[]
+  pemMetricConsentEvents PemMetricConsentEvent[]
   pemEvidenceDeletionEvents PemEvidenceDeletionEvent[]
   bootstrapAssertions BootstrapAssertion[]
   notifications       Notification[]
@@ -707,8 +708,38 @@ model PemConsentEvent {
   id            String   @id @default(uuid())
   userId        String   @map("user_id")
   user          User     @relation(fields: [userId], references: [id])
+  /// [2026-08-25追加・Completion Gate 1] tenant境界(v4.0 16.1節が要求する
+  /// workspaceId)。既存行はworkspace_membersからbackfillした(MVPは1ユーザー1
+  /// Workspace前提のため、複数所属時は最初に参加したWorkspaceを採用)。
+  workspaceId   String   @map("workspace_id")
   /// PEM_DATA_COLLECTION/PEM_AI_PROCESSING/PEM_PLANNING_APPLICATION/PEM_EXPERIMENT/SENSITIVE_SELF_REPORT
   consentType   String   @map("consent_type")
+  /// GRANTED/WITHDRAWN
+  action        String
+  policyVersion String   @map("policy_version")
+  /// [2026-08-25追加] v4.0 16.1節が要求するConsent scope。正式な構造の記載が原本に
+  /// 無いため、列のみ用意し現状は常にnull(想像で構造を作らない)。
+  scope         Json?
+  /// ONBOARDING/SETTINGS
+  source        String
+  occurredAt    DateTime @default(now()) @map("occurred_at")
+
+  @@index([userId, consentType])
+  @@index([workspaceId])
+  @@map("pem_consent_events")
+}
+
+/// TBL(PEM Completion Gate 1) pem_metric_consent_events - metric単位OFFのLedger
+/// [出典: PEMサブシステム統合正本仕様書v4.0 16.2節「metric OFF」]
+/// insert-only。GRANTED=そのmetricの利用を許可、WITHDRAWN=そのmetricだけを無効化。
+/// イベントが1件も無いmetricは、metricDefinitionRegistry.tsの登録有無
+/// (isMetricEnabledByDefault)がデフォルト値になる。
+model PemMetricConsentEvent {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  user          User     @relation(fields: [userId], references: [id])
+  workspaceId   String   @map("workspace_id")
+  metricKey     String   @map("metric_key")
   /// GRANTED/WITHDRAWN
   action        String
   policyVersion String   @map("policy_version")
@@ -716,8 +747,8 @@ model PemConsentEvent {
   source        String
   occurredAt    DateTime @default(now()) @map("occurred_at")
 
-  @@index([userId, consentType])
-  @@map("pem_consent_events")
+  @@index([userId, metricKey])
+  @@map("pem_metric_consent_events")
 }
 
 /// TBL(PEM Phase 0A) responsibility_execution_events - Execution Event Ledger本体 [出典: PEMサブシステム統合正本仕様書v4.0 5章]
