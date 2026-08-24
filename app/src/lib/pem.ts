@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
+import { METRIC_DEFINITIONS } from "@/lib/pem/metricDefinitionRegistry";
 
 /**
  * FN-PEM-02 観察更新(機能別詳細設計書v1.1 13章)。
@@ -22,14 +23,20 @@ import { debugServer } from "@/lib/debugServer";
 
 const TRANSITION_EVENT_TYPES = ["STATUS_CHANGED", "PARTIALLY_COMPLETED", "DEFERRED"] as const;
 const INGEST_BATCH_SIZE = 100;
+
+/**
+ * [2026-08-24・Phase 0D-1] 集計対象期間・母数・差の閾値は、DEFER_RATE_BY_ESTIMATE指標の
+ * 正式なカタログエントリ(metricDefinitionRegistry.ts)から取得する。値そのものは
+ * 変更していない(ハードコードされていた定数をカタログへ移しただけの、
+ * 挙動保存的なリファクタリング)。
+ */
+const DEFER_RATE_METRIC = METRIC_DEFINITIONS.DEFER_RATE_BY_ESTIMATE;
 /** 集計対象の遡り期間(§9「直近4週」)。 */
-const AGGREGATE_WINDOW_DAYS = 28;
+const AGGREGATE_WINDOW_DAYS = DEFER_RATE_METRIC.windowDays;
 /** §9「初期表示の推奨母数5」。これ未満では観察を生成しない。 */
-const MIN_SAMPLE_SIZE = 5;
-/** 2群間の延期率の差がこのポイント(pp)以上でなければ「強い要因ではない」として観察化しない。
- * [設計判断・2026-08-23] 設計書に閾値の明記が無いため、母数が少ない個人利用規模でも
- * 意味のある差だけを提示する目的で20ppを暫定値とする(将来EVAL-04相当の評価で調整可能)。 */
-const MIN_GAP_PERCENTAGE_POINTS = 20;
+const MIN_SAMPLE_SIZE = DEFER_RATE_METRIC.minSampleSize;
+/** 2群間の延期率の差がこのポイント(pp)以上でなければ「強い要因ではない」として観察化しない。 */
+const MIN_GAP_PERCENTAGE_POINTS = DEFER_RATE_METRIC.minGapPercentagePoints;
 
 interface TransitionPayload {
   responsibilityId: string;
@@ -180,7 +187,7 @@ export async function recomputeAggregates(): Promise<{ usersProcessed: number; o
 
     const statement = `所要時間の見積が30分以上、または未設定のタスク: 直近${AGGREGATE_WINDOW_DAYS / 7}週間で${long.total}件中${long.deferred}件が延期されています`;
     const payload = {
-      metric: "DEFER_RATE_BY_ESTIMATE",
+      metric: DEFER_RATE_METRIC.metricKey,
       statement,
       sampleSize: long.total,
       deferred: long.deferred,

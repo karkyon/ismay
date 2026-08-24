@@ -21,6 +21,7 @@ import {
   type PemConsentType,
 } from "./coreTypes";
 import type { PemAuthorizationContext } from "./authorizationBoundary";
+import { isMetricEnabledByDefault } from "./metricDefinitionRegistry";
 
 // PEM_CONSENT_POLICY_VERSION・PemConsentRequiredErrorはcoreTypes.ts側で定義する
 // (db.tsに依存しない純粋な定義にし、tsx実行テストがdb.ts解決を経由しなくて済むようにするため)。
@@ -131,6 +132,8 @@ export async function evaluateFeatureGate(ctx: PemAuthorizationContext): Promise
     dataCollectionEnabled: state.PEM_DATA_COLLECTION.action === "GRANTED",
     aiProcessingEnabled: state.PEM_AI_PROCESSING.action === "GRANTED",
     planningApplicationEnabled: state.PEM_PLANNING_APPLICATION.action === "GRANTED",
-    isMetricEnabled: () => true, // Phase 0D(Metric Definition Registry)実装後に個別制御へ差し替える
+    // Phase 0D-1: 登録済みmetricKeyかどうかで判定する。ユーザーごとの個別無効化
+    // (metric単位OFF)は永続化先の設計確定後に別途追加する(現状は未実装)。
+    isMetricEnabled: (metricKey: string) => isMetricEnabledByDefault(metricKey),
   };
 }
