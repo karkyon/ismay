@@ -992,6 +992,76 @@ model ExecutionSessionRevision {
   @@map("execution_session_revisions")
 }
 
+/// TBL(PEM Phase 0C-1-2) reason_prompts - Reason Prompt識別子
+/// [出典: PEMサブシステム統合正本仕様書v4.0 8.2節]
+/// 「同一trigger Eventに対するPromptは1件とする」。1 trigger Event = 1 Prompt。
+model ReasonPrompt {
+  id             String   @id @default(uuid())
+  workspaceId    String   @map("workspace_id")
+  subjectUserId  String   @map("subject_user_id")
+  /// このPromptを発生させたResponsibilityExecutionEvent.id
+  /// (INTERRUPT/DEFER/REOPEN/RESPONSIBILITY_ABANDON等、requiresReasonPrompt=trueのEvent)。
+  /// IDは常に同一トランザクション内で自分が作成した行のものであり(ユーザー入力から
+  /// 直接受け取らない)、tenant跨ぎ参照のリスクが無いため単純な単一列FKとする
+  /// (ResponsibilityExecutionEvent.idはグローバルに一意なUUID)。
+  triggerEventId String   @unique(map: "reason_prompts_trigger_event_id_uq") @map("trigger_event_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  stateEvents ReasonPromptStateEvent[]
+  answers     ExecutionReasonAnswer[]
+
+  @@map("reason_prompts")
+}
+
+/// TBL(PEM Phase 0C-1-2) reason_prompt_state_events - Prompt状態のinsert-only履歴
+/// [出典: PEMサブシステム統合正本仕様書v4.0 8.2節]
+/// TRIGGERED/DELIVERED/DISPLAYED/ANSWERED/SKIPPED/EXPIRED/DELIVERY_FAILED。
+/// 「現在状態と履歴を分離し、矛盾する同時状態を許さない」→現在状態は最新行からの
+/// 投影で決定する(Phase 0S Consentと同じinsert-only+投影パターン)。
+/// [既知の簡略化] 現行UIはreason入力を遷移リクエストと同時に送るため、
+/// DELIVERED/DISPLAYED/EXPIRED/DELIVERY_FAILEDへは到達しない(TRIGGERED直後に
+/// ANSWEREDまたはSKIPPEDのみ記録する。reasonLedger.ts参照)。
+model ReasonPromptStateEvent {
+  id         String   @id @default(uuid())
+  promptId   String   @map("prompt_id")
+  prompt     ReasonPrompt @relation(fields: [promptId], references: [id])
+  state      String
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  @@index([promptId])
+  @@map("reason_prompt_state_events")
+}
+
+/// TBL(PEM Phase 0C-1-2) execution_reason_answers - Execution Reasonの回答
+/// [出典: PEMサブシステム統合正本仕様書v4.0 8.3節]
+/// insert-only。「自由記述からAIが分類したReasonと本人選択Reasonを分離する」ため、
+/// reasonCode(本人選択)とaiClassifiedReasonCode(AI分類)を別列にする。
+/// [既知の簡略化] 現行UIには構造化選択肢UIも自由記述AI分類パイプラインも無いため、
+/// reasonCode/aiClassifiedReasonCodeは常にnull、freeTextのみが実際に埋まる。
+model ExecutionReasonAnswer {
+  id                     String   @id @default(uuid())
+  workspaceId            String   @map("workspace_id")
+  subjectUserId          String   @map("subject_user_id")
+  promptId               String   @map("prompt_id")
+  prompt                 ReasonPrompt @relation(fields: [promptId], references: [id])
+  triggerEventId         String   @map("trigger_event_id")
+  /// 本人が選択したReason種別コード。現行UIには構造化選択肢が無いため常にnull。
+  reasonCode             String?  @map("reason_code")
+  /// 自由記述からAIが分類したReason種別コード。分類パイプライン未実装のため常にnull。
+  aiClassifiedReasonCode String?  @map("ai_classified_reason_code")
+  freeText               String?  @map("free_text")
+  structuredDetail       Json?    @map("structured_detail")
+  questionVersion        String   @map("question_version")
+  /// 訂正時、旧回答を指す(insert-only revision chain、v4.0 8.1節と同じ考え方)。
+  /// 現状回答訂正UIが無いため常にnull。
+  revisionOfAnswerId     String?  @map("revision_of_answer_id")
+  answeredAt             DateTime @map("answered_at")
+  createdAt              DateTime @default(now()) @map("created_at")
+
+  @@index([promptId])
+  @@map("execution_reason_answers")
+}
+
 /// TBL-019 evidences - 完了等の証拠候補 [推論]
 model Evidence {
   id               String          @id @default(uuid())

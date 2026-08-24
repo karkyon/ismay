@@ -24,9 +24,12 @@
 import type { Prisma } from "@/generated/prisma/client";
 import {
   assertExecutionLedgerWriteAllowed,
+  getExecutionEventDefinition,
   isExecutionLedgerApplicableType,
   type ExecutionLedgerState,
 } from "./eventDefinitionRegistry";
+import type { ExecutionEventType } from "./coreTypes";
+import { recordReasonPromptAndAnswer } from "./reasonLedger";
 import type { ActorType, EventSource } from "./coreTypes";
 import type { PemAuthorizationContext } from "./authorizationBoundary";
 import { isConsentGranted } from "./consent";
@@ -166,6 +169,17 @@ export async function recordExecutionLedgerEvent(
     },
     select: { id: true },
   });
+
+  // [2026-08-24追加・Phase 0C-1-2、v4.0 8.2節・8.3節] このEvent種別がReason Promptを
+  // 要求する場合、Prompt/回答をinsert-only Ledgerへ記録する(reasonLedger.ts参照)。
+  if (getExecutionEventDefinition(eventType as ExecutionEventType).requiresReasonPrompt) {
+    await recordReasonPromptAndAnswer({
+      tx: params.tx,
+      ctx: params.ctx,
+      triggerEventId: created.id,
+      reason: params.reason,
+    });
+  }
 
   return created;
 }
