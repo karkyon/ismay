@@ -48,6 +48,7 @@ export interface UserExportBundle {
   pemObservations: Record<string, unknown>[];
   pemHypotheses: Record<string, unknown>[];
   eventLogs: Record<string, unknown>[];
+  pemConsentEvents: Record<string, unknown>[]; // Phase 0S追加
 }
 
 /**
@@ -98,6 +99,11 @@ export async function buildUserExportBundle(params: {
     orderBy: { createdAt: "asc" },
   });
 
+  const pemConsentEvents = await db.pemConsentEvent.findMany({
+    where: { userId },
+    orderBy: { occurredAt: "asc" },
+  });
+
   const responsibilityIds = (responsibilities as { id: string }[]).map((r) => r.id);
   const eventLogs = responsibilityIds.length
     ? await db.eventLog.findMany({
@@ -115,6 +121,7 @@ export async function buildUserExportBundle(params: {
     pemObservations: pemObservations as unknown as Record<string, unknown>[],
     pemHypotheses: pemHypotheses as unknown as Record<string, unknown>[],
     eventLogs: eventLogs as unknown as Record<string, unknown>[],
+    pemConsentEvents: pemConsentEvents as unknown as Record<string, unknown>[],
   };
 }
 

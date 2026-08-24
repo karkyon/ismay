@@ -29,3 +29,7 @@ DBスキーマ実装(EvidenceDeletionEvent・Consent Event化等)には着手し
 Migration/Replace対象である。Phase 0G(本パッチ)はコード上の正本語彙・定義を
 確定するに留め、実際のマイグレーションはPhase 0S(Consent)・Phase 0C(Model Layer)・
 Phase 0E(Bootstrap再設計)・Phase 4/5(Weekly Review)で個別に実施する。
+
+## 2026-08-24 訂正(Phase 0S調査結果)
+
+既存 `Consent` モデル(captureId/subjectId/purpose/scope)は、実装コード全体をgrep調査した結果、アプリケーションコードから一切参照されていないことを確認した(FN-PRV-02向けに定義されたが未配線のモデル)。当初「Replace対象」としていたのは誤りで、PEMのConsent(`PemConsentEvent`、Phase 0Sで新設)とは無関係の別モデルとして併存させる。上記表の該当行は「そのまま維持(PEMとは無関係)」に訂正する。

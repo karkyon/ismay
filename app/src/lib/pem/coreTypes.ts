@@ -127,6 +127,21 @@ export type PemConsentType = (typeof PEM_CONSENT_TYPES)[number];
 export const PEM_CONSENT_ACTIONS = ["GRANTED", "WITHDRAWN"] as const;
 export type PemConsentAction = (typeof PEM_CONSENT_ACTIONS)[number];
 
+/**
+ * 同意文言・範囲の版(Phase 0S)。改定時はここを上げ、既存GRANTEDを自動的に有効とみなさない運用にする。
+ * db.ts(実Prismaクライアント)に依存しないここへ置くことで、tsx実行テストがdb.ts解決
+ * (サンドボックスでは`prisma generate`不可のため失敗する)を経由せずに検証できるようにする。
+ */
+export const PEM_CONSENT_POLICY_VERSION = "v4.0-2026-08-24";
+
+/** Consent未取得エラー(db非依存)。consent.tsのDB関数はこれをimportしてthrowする。 */
+export class PemConsentRequiredError extends Error {
+  constructor(public readonly consentType: PemConsentType) {
+    super(`PEM: 同意(${consentType})が必要です`);
+  }
+}
+
+
 /** PriorityClass(v4.0 13.1節)。配列の並び順が優先度順(先頭ほど高優先)。 */
 export const PLANNING_PRIORITY_CLASSES = [
   "CRITICAL_OBLIGATION",

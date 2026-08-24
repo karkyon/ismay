@@ -59,6 +59,7 @@ model User {
   pemHypotheses       PemHypothesis[]
   pemOnboardingConversation PemOnboardingConversation?
   pemWeeklyReviews    PemWeeklyReview[]
+  pemConsentEvents    PemConsentEvent[]
   notifications       Notification[]
   auditLogsAsActor    AuditLog[]             @relation("AuditActorUser")
 
@@ -687,6 +688,24 @@ model PemObservation {
 }
 
 /// TBL-017 pem_hypotheses [推論・DB設計書4.5節に準拠]
+/// TBL(PEM Phase 0S) pem_consent_events - PEM同意Ledger(insert-only) [出典: PEMサブシステム統合正本仕様書v4.0 16.1節]
+model PemConsentEvent {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  user          User     @relation(fields: [userId], references: [id])
+  /// PEM_DATA_COLLECTION/PEM_AI_PROCESSING/PEM_PLANNING_APPLICATION/PEM_EXPERIMENT/SENSITIVE_SELF_REPORT
+  consentType   String   @map("consent_type")
+  /// GRANTED/WITHDRAWN
+  action        String
+  policyVersion String   @map("policy_version")
+  /// ONBOARDING/SETTINGS
+  source        String
+  occurredAt    DateTime @default(now()) @map("occurred_at")
+
+  @@index([userId, consentType])
+  @@map("pem_consent_events")
+}
+
 model PemHypothesis {
   id          String    @id @default(uuid())
   userId      String    @map("user_id")
