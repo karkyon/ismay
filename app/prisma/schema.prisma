@@ -1062,6 +1062,43 @@ model ExecutionReasonAnswer {
   @@map("execution_reason_answers")
 }
 
+/// TBL(PEM Phase 0E-2) bootstrap_assertions - Bootstrap Assertion
+/// [出典: PEMサブシステム統合正本仕様書v4.0 11章]
+/// insert-only。SELF_REPORT/INITIAL_HYPOTHESIS/DECLARED_CONSTRAINT/
+/// INTERVENTION_PREFERENCEを区別する。「AssertionとsourceAnswerを中間テーブルで
+/// 結ぶ」とあるが、現行の初回対話には構造化Answerが存在しない(自由対話形式)ため、
+/// 代わりに昇格元のPemObservation(FACT)/PemHypothesisへ直接参照する
+/// (最も近い誠実な代替。詳細は本パッチのdocstring参照)。
+/// [現状の制約] SELF_REPORT/INITIAL_HYPOTHESISのみ、初回対話のREVIEW確認完了時に
+/// 実際に作成される。DECLARED_CONSTRAINT/INTERVENTION_PREFERENCEはそれを生成する
+/// UI・フローが無いため、型としては用意するが未使用。
+model BootstrapAssertion {
+  id                      String    @id @default(uuid())
+  userId                  String    @map("user_id")
+  user                    User      @relation(fields: [userId], references: [id])
+  /// SELF_REPORT/INITIAL_HYPOTHESIS/DECLARED_CONSTRAINT/INTERVENTION_PREFERENCE
+  assertionType           String    @map("assertion_type")
+  statement               String
+  /// このAssertionの根拠となったPemObservation(FACT)。SELF_REPORT型のみ設定。
+  sourceObservationId     String?   @map("source_observation_id")
+  /// このAssertionの根拠となったPemHypothesis。INITIAL_HYPOTHESIS型のみ設定。
+  sourceHypothesisId      String?   @map("source_hypothesis_id")
+  /// 由来する初回対話。
+  conversationId          String?   @map("conversation_id")
+  /// ACTIVE/EXPIRED/SUPERSEDED/WITHDRAWN [推論。v4.0は「status及びsupersession」と
+  /// のみ記載し正式な値集合の明記が無いため、Hypothesis状態(12.2節)の考え方に
+  /// 揃えて導出した]。
+  status                  String    @default("ACTIVE")
+  expiresAt               DateTime? @map("expires_at")
+  /// insert-only revision chain。新Assertionがこれを置き換える場合、新側の
+  /// supersedesAssertionIdに旧AssertionのIDを入れる(旧行はUPDATEしない)。
+  supersedesAssertionId   String?   @map("supersedes_assertion_id")
+  createdAt               DateTime  @default(now()) @map("created_at")
+
+  @@index([userId, assertionType])
+  @@map("bootstrap_assertions")
+}
+
 /// TBL-019 evidences - 完了等の証拠候補 [推論]
 model Evidence {
   id               String          @id @default(uuid())

@@ -6,6 +6,7 @@ import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { verifyPassword } from "@/lib/auth/password";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { recordEvidenceDeletionEvents } from "@/lib/pem/evidenceDeletion";
+import { propagateEvidenceDeletion } from "@/lib/pem/evidenceDeletionCascade";
 
 /**
  * POST /pem/reset(2026-08-23新設)。
@@ -72,26 +73,32 @@ export async function POST(req: NextRequest) {
     where: { userId: user.id, deletedAt: null },
     select: { id: true },
   });
-  await db.$transaction([
-    ...(activeObservations.length > 0
-      ? [
-          db.pemEvidenceDeletionEvent.createMany({
-            data: activeObservations.map((o: { id: string }) => ({
-              userId: user.id,
-              targetType: "PEM_OBSERVATION",
-              targetId: o.id,
-              deletionMode: "EXCLUDED_FROM_USE",
-              reason: "PEM_RESET",
-            })),
-          }),
-        ]
-      : []),
-    db.pemHypothesis.updateMany({ where: { userId: user.id, deletedAt: null }, data: { deletedAt: now } }),
+  await db.$transaction(async (tx: any) => {
+    if (activeObservations.length > 0) {
+      await tx.pemEvidenceDeletionEvent.createMany({
+        data: activeObservations.map((o: { id: string }) => ({
+          userId: user.id,
+          targetType: "PEM_OBSERVATION",
+          targetId: o.id,
+          deletionMode: "EXCLUDED_FROM_USE",
+          reason: "PEM_RESET",
+        })),
+      });
+    }
+    // [2026-08-24追加・Phase 0C-2b、v4.0 16.4節] Evidence削除の影響をMetric/Hypothesis/
+    // Weekly Reviewへ伝播する(evidenceDeletionCascade.ts参照)。resetは元々全件削除する
+    // ため実質冗長だが、将来の個別削除APIでも同じ経路を使えるよう組み込んでおく。
+    await propagateEvidenceDeletion(
+      tx,
+      user.id,
+      activeObservations.map((o: { id: string }) => o.id),
+    );
+    await tx.pemHypothesis.updateMany({ where: { userId: user.id, deletedAt: null }, data: { deletedAt: now } });
     // Phase 0E以降、対話は複数行になり得るが、userId条件のみで全件削除する挙動は
     // 従来と変わらない(deleteManyのため複数行でも問題なく動作する)。
-    db.pemOnboardingConversation.deleteMany({ where: { userId: user.id } }),
-    db.pemWeeklyReview.deleteMany({ where: { userId: user.id } }),
-  ]);
+    await tx.pemOnboardingConversation.deleteMany({ where: { userId: user.id } });
+    await tx.pemWeeklyReview.deleteMany({ where: { userId: user.id } });
+  });
 
   await db.auditLog.create({
     data: {

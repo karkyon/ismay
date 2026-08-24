@@ -1,22 +1,36 @@
 /**
- * PEM Metric Definition Registry(Phase 0D-1)。
- * 出典: ISMAY_PEMサブシステム_統合正本仕様書_v4_0 21章「実装ゲート」Phase 0D、
+ * PEM Metric Definition Registry(Phase 0D-2)。
+ * 出典: ISMAY_PEMサブシステム_統合正本仕様書_v4_0 10章、
  *       consent.ts の isMetricEnabled が参照する「metricの実体」。
  *
- * 現時点のスコープ: 既存 lib/pem.ts recomputeAggregates() にハードコードされていた
- * 唯一の指標(DEFER_RATE_BY_ESTIMATE)を、Event Definition Registryと同じ形式で
- * 正式なカタログエントリとして宣言する。計算アルゴリズム自体(bucket比較)は
- * まだ汎用化していない(v4.0のMetric Catalogアーキテクチャ章を未参照のまま
- * 計算の抽象化まで進めると、仕様を想像で埋めることになるため、閾値・識別子の
- * カタログ化までに留める)。
+ * [2026-08-24改訂・Phase 0D-2] 10章必須項目(metricKey/version/valueType/unit/
+ * directionality/numerator/denominator/opportunity/calculatorKey/
+ * implementationVersion/parameterSchemaVersion/eligibility/exclusion/
+ * qualityPolicy/window/attribution/独立単位/最低表示母数/最低Planning母数/
+ * uncertainty/decay/effectiveFrom-To/lifecycle status)を追加し、唯一の実装済み
+ * 指標を10.3節の正式名称(DEFER_RATE_BY_ESTIMATE_BUCKET)へ改名した(旧名
+ * DEFER_RATE_BY_ESTIMATE。既存データはマイグレーションでbackfill)。
  *
- * metric単位OFF(v3.3.1整合性修正17.2節、consent.ts参照)の実装には、ユーザーごとに
- * どのmetricを無効化しているかの永続化先(新規テーブルまたは列)が必要だが、
- * その保存形式はv4.0の該当章を確認してから決める(本Phaseでは未実装のまま)。
+ * 10.3節が列挙する残り9指標(DEFERRED_RESPONSIBILITY_RATE等)は未登録のまま。
+ * 「各metricの完全な分子・分母・除外・品質・表示文はMetric Catalogを実装前
+ * ゲートとする」と原本が明記する通り、業務判断を要する未確定事項であり、
+ * 想像で定義しない。
  */
+
+export type MetricValueType = "RATE";
+export type MetricDirectionality = "HIGHER_IS_WORSE" | "HIGHER_IS_BETTER" | "NEUTRAL";
+export type MetricLifecycleStatus = "DRAFT" | "ACTIVE" | "DEPRECATED" | "RETIRED";
+/** v4.0 10.2節。単純イベント数だけで母数を満たしたと判定しないための独立集計単位。 */
+export type MetricIndependentUnit =
+  | "DISTINCT_RESPONSIBILITY"
+  | "OBSERVATION_DAY"
+  | "DISTINCT_COUNTERPARTY"
+  | "REPEAT_INSTANCE"
+  | "PLANNING_OPPORTUNITY";
 
 export interface MetricDefinition {
   metricKey: string;
+  version: string;
   labelJa: string;
   labelEn: string;
   description: string;
@@ -24,29 +38,81 @@ export interface MetricDefinition {
   appliesToResponsibilityType: string;
   /** この指標が参照するPemObservation.observationType。 */
   sourceObservationType: "TRANSITION";
+  valueType: MetricValueType;
+  unit: string;
+  directionality: MetricDirectionality;
+  /** 分子の定義(自然言語。計算式そのものはcalculatorKeyが指すコードが正)。 */
+  numerator: string;
+  /** 分母の定義。 */
+  denominator: string;
+  /** 「機会」の定義(この指標が発生し得た母集団)。 */
+  opportunity: string;
+  /** 実際に計算するコードの所在。 */
+  calculatorKey: string;
+  implementationVersion: string;
+  /** parameterJsonのstrict schema版。parameterJson自体を使っていない場合は"NONE"。 */
+  parameterSchemaVersion: string;
+  eligibility: string;
+  exclusion: string;
+  qualityPolicy: string;
   /** 集計対象の遡り期間(日数)。 */
   windowDays: number;
-  /** これ未満では観察を生成しない(AI・PEM設計書v1.0 9章「初期表示の推奨母数5」)。 */
-  minSampleSize: number;
-  /** 対照群との差がこのポイント(pp)未満なら「強い要因ではない」として観察化しない。 */
-  minGapPercentagePoints: number;
+  attribution: string;
+  independentUnit: MetricIndependentUnit;
+  /** これ未満では観察を生成しない(表示可否)。 */
+  minSampleForDisplay: number;
+  /** Planning適用に必要な最低母数。Planning統合が未実装のためnull許容。 */
+  minSampleForPlanning: number | null;
+  /** 不確実性の定量化方式。未実装のためnull許容。 */
+  uncertainty: string | null;
+  /** 時間経過による重み減衰方式。未実装のためnull許容。 */
+  decay: string | null;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  lifecycleStatus: MetricLifecycleStatus;
   introducedVersion: string;
+  /** 対照群との差がこのポイント(pp)未満なら「強い要因ではない」として観察化しない。
+   * v4.0 10章必須項目には無いが、既存の実装判断(lib/pem.ts)を保つための追加列。 */
+  minGapPercentagePoints: number;
 }
 
 export const METRIC_DEFINITIONS = {
-  DEFER_RATE_BY_ESTIMATE: {
-    metricKey: "DEFER_RATE_BY_ESTIMATE",
+  DEFER_RATE_BY_ESTIMATE_BUCKET: {
+    metricKey: "DEFER_RATE_BY_ESTIMATE_BUCKET",
+    version: "v1",
     labelJa: "所要時間見積による延期率の差",
-    labelEn: "Defer rate by time estimate",
+    labelEn: "Defer rate by time estimate bucket",
     description:
       "所要時間見積が30分以上、または未設定のTASKと、それ未満のTASKとで、延期される割合に" +
       "有意な差があるかを比較する(AI・PEM設計書v1.0 9章の代表例)。",
     appliesToResponsibilityType: "TASK",
     sourceObservationType: "TRANSITION",
+    valueType: "RATE",
+    unit: "PERCENTAGE_POINTS",
+    directionality: "HIGHER_IS_WORSE",
+    numerator:
+      "対象窓内で見積30分以上・または未設定のTASKのうち、直近の該当遷移がDEFERだった" +
+      "distinct responsibility数",
+    denominator: "対象窓内で見積30分以上・または未設定のTASKのdistinct responsibility数",
+    opportunity: "直近windowDays日以内にDEFERまたはCOMPLETEへ遷移したTASK",
+    calculatorKey: "lib/pem.ts#recomputeAggregates",
+    implementationVersion: "v1",
+    parameterSchemaVersion: "NONE",
+    eligibility: "responsibility.type === TASK かつ 直近windowDays日以内にDEFERまたはCOMPLETEへ遷移した",
+    exclusion: "PemEvidenceDeletionEventで除外されたPemObservation(TRANSITION)は集計対象外",
+    qualityPolicy: "削除済みEvidenceの除外以外の品質フィルタは未実装",
     windowDays: 28,
-    minSampleSize: 5,
-    minGapPercentagePoints: 20,
+    attribution: "subjectUserId(個人単位)",
+    independentUnit: "DISTINCT_RESPONSIBILITY",
+    minSampleForDisplay: 5,
+    minSampleForPlanning: null,
+    uncertainty: null,
+    decay: null,
+    effectiveFrom: "2026-08-24",
+    effectiveTo: null,
+    lifecycleStatus: "ACTIVE",
     introducedVersion: "v1.0",
+    minGapPercentagePoints: 20,
   },
 } as const satisfies Record<string, MetricDefinition>;
 

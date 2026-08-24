@@ -242,11 +242,22 @@ async function finalizeOnboarding(
   await db.$transaction(async (tx: any) => {
     for (const fact of facts) {
       if (fact.kind !== "FACT") continue;
-      await tx.pemObservation.create({
+      const createdObservation = await tx.pemObservation.create({
         data: {
           userId,
           observationType: "FACT",
           payload: { statement: fact.statement, source: "ONBOARDING" } as unknown as object,
+        },
+      });
+      // [2026-08-24追加・Phase 0E-2、v4.0 11章] FACT昇格と同時にBootstrap Assertion
+      // (SELF_REPORT)を記録する。
+      await tx.bootstrapAssertion.create({
+        data: {
+          userId,
+          assertionType: "SELF_REPORT",
+          statement: fact.statement,
+          sourceObservationId: createdObservation.id,
+          conversationId,
         },
       });
     }
@@ -255,7 +266,7 @@ async function finalizeOnboarding(
       // 母数ガード(§9「1件で恒常仮説を作らない」): 初回対話由来の仮説はsampleSize=1の
       // ため、confidenceを0.3以下に強制し「一時観察」相当として扱う(UI側での確度表示に
       // 反映させる想定。恒常仮説への昇格はFN-PEM-02の観察蓄積後に行う)。
-      await tx.pemHypothesis.create({
+      const createdHypothesis = await tx.pemHypothesis.create({
         data: {
           userId,
           statement: hyp.statement,
@@ -264,6 +275,17 @@ async function finalizeOnboarding(
           windowTo: now,
           confidence: Math.min(hyp.confidence, 0.3),
           userVerdict: "UNREVIEWED",
+        },
+      });
+      // [2026-08-24追加・Phase 0E-2、v4.0 11章] 仮説作成と同時にBootstrap Assertion
+      // (INITIAL_HYPOTHESIS)を記録する。
+      await tx.bootstrapAssertion.create({
+        data: {
+          userId,
+          assertionType: "INITIAL_HYPOTHESIS",
+          statement: hyp.statement,
+          sourceHypothesisId: createdHypothesis.id,
+          conversationId,
         },
       });
     }

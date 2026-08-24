@@ -2,6 +2,8 @@ import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
 import { METRIC_DEFINITIONS } from "@/lib/pem/metricDefinitionRegistry";
 import { getDeletedEvidenceIds } from "@/lib/pem/evidenceDeletion";
+import { propagateEvidenceDeletion } from "@/lib/pem/evidenceDeletionCascade";
+export { propagateEvidenceDeletion };
 
 /**
  * FN-PEM-02 観察更新(機能別詳細設計書v1.1 13章)。
@@ -31,11 +33,11 @@ const INGEST_BATCH_SIZE = 100;
  * 変更していない(ハードコードされていた定数をカタログへ移しただけの、
  * 挙動保存的なリファクタリング)。
  */
-const DEFER_RATE_METRIC = METRIC_DEFINITIONS.DEFER_RATE_BY_ESTIMATE;
+const DEFER_RATE_METRIC = METRIC_DEFINITIONS.DEFER_RATE_BY_ESTIMATE_BUCKET;
 /** 集計対象の遡り期間(§9「直近4週」)。 */
 const AGGREGATE_WINDOW_DAYS = DEFER_RATE_METRIC.windowDays;
 /** §9「初期表示の推奨母数5」。これ未満では観察を生成しない。 */
-const MIN_SAMPLE_SIZE = DEFER_RATE_METRIC.minSampleSize;
+const MIN_SAMPLE_SIZE = DEFER_RATE_METRIC.minSampleForDisplay;
 /** 2群間の延期率の差がこのポイント(pp)以上でなければ「強い要因ではない」として観察化しない。 */
 const MIN_GAP_PERCENTAGE_POINTS = DEFER_RATE_METRIC.minGapPercentagePoints;
 
@@ -154,16 +156,27 @@ export async function recomputeAggregates(): Promise<{ usersProcessed: number; o
         occurredAt: { gte: windowStart },
         id: { notIn: [...deletedObservationIds] },
       },
-      select: { payload: true },
+      select: { payload: true, occurredAt: true },
+      orderBy: { occurredAt: "asc" },
     });
+
+    // [2026-08-24是正・Phase 0D-2、v4.0 10.2節「単純イベント数だけで母数を満たしたと
+    // 判定しない」] 以前は遷移イベントをそのままカウントしていたため、同一
+    // Responsibilityが窓内で複数回DEFER/COMPLETEした場合に重複計上されていた
+    // (independentUnit=DISTINCT_RESPONSIBILITYを満たしていなかった)。
+    // Responsibilityごとに窓内で最も新しい該当遷移のみを採用してからカウントする。
+    const latestByResponsibility = new Map<string, TransitionPayload>();
+    for (const row of transitions as { payload: unknown; occurredAt: Date }[]) {
+      const p = row.payload as TransitionPayload;
+      if (p.type !== "TASK") continue;
+      if (p.action !== "DEFER" && p.action !== "COMPLETED" && p.toStatus !== "COMPLETED") continue;
+      latestByResponsibility.set(p.responsibilityId, p); // occurredAt昇順のため最後の代入が最新
+    }
 
     const long: DeferRateBucket = { deferred: 0, total: 0 };
     const short: DeferRateBucket = { deferred: 0, total: 0 };
 
-    for (const row of transitions as { payload: unknown }[]) {
-      const p = row.payload as TransitionPayload;
-      if (p.type !== "TASK") continue;
-      if (p.action !== "DEFER" && p.action !== "COMPLETED" && p.toStatus !== "COMPLETED") continue;
+    for (const p of latestByResponsibility.values()) {
       // 30分以上、または見積未設定(=曖昧)を「長い/曖昧な作業」とみなす(ワイヤーフレームUI-09の
       // 「30分を超える曖昧な作業」の例に対応)。
       const isLongOrAmbiguous = p.estimatedMinutesMax === null || p.estimatedMinutesMax >= 30;
