@@ -12,6 +12,14 @@
  *  - 対象はEXECUTION_LEDGER対象型(TASK/EVENT/CONCERN/HABIT/IDEA)のみ。
  *  - action->eventTypeマッピング、occurredAt補正ロジックはexecutionLedgerMapping.tsを参照
  *    (db非依存にしてある。tsx実行テストからそちらのみをimportする)。
+ *
+ * [2026-08-24是正・外部批評対応]
+ *  - Consent確認はtx経由(client引数)で行う(批評4.6「Consent確認がtransaction外」対応)。
+ *  - Registryが返す正本toStateと呼び出し元指定のtoStateを照合し、不一致は例外とする
+ *    (批評4.2「toStateを検証していない」対応)。DBへ保存する値はRegistry側の値を正本とする。
+ *  - 本関数が例外を投げた場合、呼び出し元(transitions/route.ts)は握り潰さず
+ *    トランザクション全体をrollbackさせる(批評4.1「記録エラーを握り潰している」対応)。
+ *    意図的スキップ(対象外型/action未対応/未同意)は従来通りnullを返す(例外にしない)。
  */
 import type { Prisma } from "@/generated/prisma/client";
 import {
@@ -68,7 +76,7 @@ export async function recordExecutionLedgerEvent(
   if (!eventType) {
     return null;
   }
-  if (!(await isConsentGranted(params.ctx, "PEM_DATA_COLLECTION"))) {
+  if (!(await isConsentGranted(params.ctx, "PEM_DATA_COLLECTION", params.tx))) {
     return null;
   }
 
@@ -84,7 +92,7 @@ export async function recordExecutionLedgerEvent(
     select: { eventSequenceCounter: true },
   });
 
-  assertExecutionLedgerWriteAllowed({
+  const { toState: canonicalToState } = assertExecutionLedgerWriteAllowed({
     eventType,
     evidenceClass: "FACT",
     actorType: params.actorType,
@@ -93,6 +101,15 @@ export async function recordExecutionLedgerEvent(
     responsibilityType: params.responsibilityType,
     consentGranted: () => true,
   });
+  // [是正] Registry(正本)が計算したtoStateと呼び出し元指定値を照合する。不一致は
+  // 呼び出し元のバグ(例: 別actionのtoStateを取り違えて渡した等)であり、静かに
+  // どちらかの値を採用するのではなく例外にして呼び出し元へ知らせる。
+  if (params.toState !== canonicalToState) {
+    throw new Error(
+      `PEM Execution Ledger: eventType=${eventType} のtoStateはRegistry上` +
+        `${canonicalToState}である必要があります(呼び出し元が指定した値: ${params.toState})`,
+    );
+  }
   const metadata = buildExecutionEventMetadata(params.reason);
 
   const created = await params.tx.responsibilityExecutionEvent.create({
@@ -104,7 +121,8 @@ export async function recordExecutionLedgerEvent(
       responsibilityId: params.responsibilityId,
       eventType,
       fromState: params.fromState as ExecutionLedgerState,
-      toState: params.toState as ExecutionLedgerState,
+      // Registry側の正本値を保存する(直前の照合により params.toState と等しいことは確認済み)。
+      toState: canonicalToState,
       responsibilityVersionBefore: params.versionBefore,
       responsibilityVersionAfter: params.versionAfter,
       responsibilitySequence: counterResult.eventSequenceCounter,

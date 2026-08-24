@@ -169,30 +169,30 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     });
     debugServer.event("POST /responsibilities/[id]/transitions", "ResponsibilityTransitioned.v1", { aggregateId: id });
 
-    try {
-      const pemCtx = await buildPemAuthorizationContext(auth.user.userId, auth.user.userId);
-      await recordExecutionLedgerEvent({
-        tx,
-        ctx: pemCtx,
-        responsibilityId: id,
-        responsibilityType: existing.type,
-        action,
-        fromState: existing.status,
-        toState: updated.status,
-        versionBefore: existing.version,
-        versionAfter: updated.version,
-        clientOccurredAt: new Date(parsed.data.occurredAt),
-        actorType: "USER",
-        source: "WEB",
-        correlationId: req.headers.get("x-correlation-id") ?? undefined,
-        reason,
-      });
-    } catch (e) {
-      debugServer.event("POST /responsibilities/[id]/transitions", "PemExecutionLedgerRecordFailed", {
-        aggregateId: id,
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
+    // [2026-08-24是正・外部批評4.1対応] 従来はここをtry/catchで囲み、記録失敗を
+    // debugServer.eventへ記録するだけで握り潰していた。これにより「Responsibility状態は
+    // 変わったがPEM正本には記録されていない」という無音の欠損が起こり得た。
+    // recordExecutionLedgerEvent自身は、意図的スキップ(対象外型/action未対応/未同意)を
+    // 例外ではなくnull返却で表現するため、ここでtry/catchを外しても正当なスキップは
+    // 壊れない。対象内かつ同意済みでの本物の失敗は、トランザクション全体を
+    // rollbackさせる(批評が推奨する「同意済みかつ対象内: 同一トランザクションで必須成功」)。
+    const pemCtx = await buildPemAuthorizationContext(auth.user.userId, auth.user.userId);
+    await recordExecutionLedgerEvent({
+      tx,
+      ctx: pemCtx,
+      responsibilityId: id,
+      responsibilityType: existing.type,
+      action,
+      fromState: existing.status,
+      toState: updated.status,
+      versionBefore: existing.version,
+      versionAfter: updated.version,
+      clientOccurredAt: new Date(parsed.data.occurredAt),
+      actorType: "USER",
+      source: "WEB",
+      correlationId: req.headers.get("x-correlation-id") ?? undefined,
+      reason,
+    });
 
     return updated;
   });

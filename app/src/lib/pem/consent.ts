@@ -13,6 +13,7 @@
  *    あちらはFN-PRV-02(会議同意)向けの別モデルで、コードから未参照。混同しないこと。
  */
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import {
   PEM_CONSENT_POLICY_VERSION,
   PEM_CONSENT_TYPES,
@@ -27,6 +28,16 @@ import { isMetricEnabledByDefault } from "./metricDefinitionRegistry";
 // (db.tsに依存しない純粋な定義にし、tsx実行テストがdb.ts解決を経由しなくて済むようにするため)。
 // この2つを本ファイルからimportし直してre-exportし、既存コードからの参照パスを変えない。
 export { PEM_CONSENT_POLICY_VERSION, PemConsentRequiredError };
+
+/**
+ * [是正・外部批評対応] Execution Ledger書き込み等、既存トランザクション内から
+ * 同意確認する場合はtxを渡す(TOCTOU軽減。批評4.6「Consent確認がtransaction外」対応)。
+ * 省略時はモジュールレベルの通常dbクライアントを使う(既存呼び出し元との後方互換)。
+ * [限界] これはtransaction分離の一貫性を改善するが、Read Committed分離レベル下では
+ * commit直前の一瞬の同意撤回まで排除する完全なTOCTOU対策ではない(SERIALIZABLE分離、
+ * またはcommit直前の再確認が別途必要。本パッチのスコープ外として明記する)。
+ */
+type PemDbClient = typeof db | Prisma.TransactionClient;
 
 export interface PemConsentState {
   consentType: PemConsentType;
@@ -62,8 +73,9 @@ export async function recordConsentEvent(
  */
 export async function getConsentState(
   ctx: PemAuthorizationContext,
+  client: PemDbClient = db,
 ): Promise<Record<PemConsentType, PemConsentState>> {
-  const events = await db.pemConsentEvent.findMany({
+  const events = await client.pemConsentEvent.findMany({
     where: { userId: ctx.subjectUserId },
     orderBy: { occurredAt: "asc" },
     select: { consentType: true, action: true, policyVersion: true, occurredAt: true },
@@ -91,8 +103,9 @@ export async function getConsentState(
 export async function isConsentGranted(
   ctx: PemAuthorizationContext,
   consentType: PemConsentType,
+  client: PemDbClient = db,
 ): Promise<boolean> {
-  const state = await getConsentState(ctx);
+  const state = await getConsentState(ctx, client);
   return state[consentType].action === "GRANTED";
 }
 
@@ -100,8 +113,9 @@ export async function isConsentGranted(
 export async function assertConsentGranted(
   ctx: PemAuthorizationContext,
   consentType: PemConsentType,
+  client: PemDbClient = db,
 ): Promise<void> {
-  if (!(await isConsentGranted(ctx, consentType))) {
+  if (!(await isConsentGranted(ctx, consentType, client))) {
     throw new PemConsentRequiredError(consentType);
   }
 }
