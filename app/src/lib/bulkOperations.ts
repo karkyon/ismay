@@ -1,6 +1,11 @@
+import { randomUUID, createHash } from "node:crypto";
+import type { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
 import { transitionsForType, isTypeSpecificTerminalStatus } from "@/lib/responsibility";
+import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
+import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
+import { projectAndPersistExecutionSessions } from "@/lib/pem/sessionPersistence";
 
 /**
  * FN-WK-04 一括操作(2026-08-23新設)。
@@ -55,13 +60,15 @@ interface TargetRow {
   status: string;
   completedAt: Date | null;
   deletedAt: Date | null;
+  /// [2026-08-25追加・Completion Gate 2] Execution Ledgerのversion整合に必要。
+  version: number;
 }
 
 /** workspaceIdスコープで対象を取得する(IDOR対策。他Workspaceのidが混ざっていても無視される)。 */
 async function fetchTargets(ids: string[], workspaceId: string): Promise<TargetRow[]> {
   return db.responsibility.findMany({
     where: { id: { in: ids }, workspaceId },
-    select: { id: true, type: true, status: true, completedAt: true, deletedAt: true },
+    select: { id: true, type: true, status: true, completedAt: true, deletedAt: true, version: true },
   });
 }
 
@@ -88,6 +95,15 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
   const skipped: BulkSkip[] = [];
   const snapshot: CompleteUndoPayload["snapshot"] = [];
   const now = new Date();
+  // [2026-08-25追加・Completion Gate 2、外部監査「Transition以外の状態変更経路の
+  // 棚卸し」対応] 単一アイテムのtransitions/route.tsと同じくExecution Ledgerへ
+  // 記録する。requestId/requestPayloadHashはバッチ全体で1つ発行する(バルク操作は
+  // 1回のクライアント要求が複数Responsibilityへ及ぶため)。
+  const pemCtx = await buildPemAuthorizationContext(userId, userId);
+  const bulkRequestId = randomUUID();
+  const bulkRequestPayloadHash = createHash("sha256")
+    .update(JSON.stringify({ action: "BULK_COMPLETE", ids }))
+    .digest("hex");
 
   for (const t of targets) {
     if (t.deletedAt) {
@@ -111,21 +127,45 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
       continue;
     }
     const nextStatus = typeof rule.to === "function" ? rule.to(t.status) : rule.to;
-    await db.responsibility.update({
-      where: { id: t.id },
-      data: { status: nextStatus, completedAt: now, updatedById: userId, version: { increment: 1 } },
-    });
-    await db.eventLog.create({
-      data: {
-        aggregateType: "Responsibility",
-        aggregateId: t.id,
-        eventType: "STATUS_CHANGED",
-        beforeJson: { status: t.status },
-        afterJson: { status: nextStatus, bulk: true },
+    // [2026-08-25改訂] 個別更新の羅列(部分失敗の余地あり)からトランザクションへ変更。
+    // Execution Ledger記録がRegistry不整合等で例外を投げた場合、このResponsibility
+    // 1件分のstatus変更・EventLog・Ledger記録が全てrollbackされる(他のidには影響しない)。
+    await db.$transaction(async (tx: Prisma.TransactionClient) => {
+      await tx.responsibility.update({
+        where: { id: t.id },
+        data: { status: nextStatus, completedAt: now, updatedById: userId, version: { increment: 1 } },
+      });
+      await tx.eventLog.create({
+        data: {
+          aggregateType: "Responsibility",
+          aggregateId: t.id,
+          eventType: "STATUS_CHANGED",
+          beforeJson: { status: t.status },
+          afterJson: { status: nextStatus, bulk: true },
+          actorType: "USER",
+          actorId: userId,
+          reason: "一括操作による完了",
+        },
+      });
+      const ledgerResult = await recordExecutionLedgerEvent({
+        tx,
+        ctx: pemCtx,
+        responsibilityId: t.id,
+        responsibilityType: t.type,
+        action: completeAction,
+        fromState: t.status,
+        toState: nextStatus,
+        versionBefore: t.version,
+        versionAfter: t.version + 1,
+        clientOccurredAt: now,
         actorType: "USER",
-        actorId: userId,
-        reason: "一括操作による完了",
-      },
+        source: "WEB",
+        requestId: bulkRequestId,
+        requestPayloadHash: bulkRequestPayloadHash,
+      });
+      if (ledgerResult) {
+        await projectAndPersistExecutionSessions(tx, pemCtx, t.id);
+      }
     });
     snapshot.push({ id: t.id, status: t.status, completedAt: t.completedAt?.toISOString() ?? null });
   }
@@ -246,6 +286,10 @@ export async function executeBulkAction(params: {
 
 /** POST /bulk/undo本体。undoペイロードの種類ごとに元へ戻す。 */
 export async function executeUndo(payload: UndoPayload, workspaceId: string): Promise<{ restored: number }> {
+  // [2026-08-25追加・Completion Gate 2] このCOMPLETE取り消しは、スナップショットに
+  // 保存された「任意の過去のstatus」へ直接書き戻す設計であり、Execution Event
+  // Registryの固定toState語彙(例: REOPENは必ずPLANNEDへ)と噛み合わないため、
+  // Execution Ledgerへは未接続のまま(既知のギャップ。想像で新しい語彙を作らない)。
   if (payload.action === "COMPLETE") {
     const ids = payload.snapshot.map((s) => s.id);
     const targets = await fetchTargets(ids, workspaceId);

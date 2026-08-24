@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import { Newsreader, Inter, IBM_Plex_Mono, Noto_Serif_JP } from "next/font/google";
 import "./globals.css";
 
@@ -37,7 +38,11 @@ export const metadata: Metadata = {
   description: "雑な入力から、まだタスクになっていない約束・責任を発見するAI個人参謀",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+// [2026-08-25是正・Completion Gate 2] LayoutProps<"/">はNext.js 15が`next build`を
+// 一度実行した後にのみ.next/types配下へ生成する型で、tsc単体実行(build未実行状態)では
+// 解決できずTS2304になっていた。next build未実行でも解決できる明示的な型へ置き換える
+// (Root Layoutが受け取るpropsは元々childrenのみのため、実質的に同じ意味)。
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html
       lang="ja"

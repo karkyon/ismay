@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
@@ -91,7 +92,7 @@ export async function POST(req: NextRequest) {
     return apiError("VALIDATION_FAILED", "音声ファイルの保存に失敗しました。しばらくしてから再度お試しください");
   }
 
-  const created = await db.$transaction(async (tx) => {
+  const created = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const updated = await tx.capture.update({
       where: { id: tempCapture.id },
       data: { audioObjectKey: objectKey, processingStatus: "QUEUED", version: { increment: 1 } },

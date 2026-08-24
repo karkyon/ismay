@@ -8,6 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { PEM_CONSENT_TYPES, PEM_CONSENT_ACTIONS, PEM_CONSENT_POLICY_VERSION } from "@/lib/pem/coreTypes";
+import { isExecutionLedgerApplicableType } from "@/lib/pem/eventDefinitionRegistry";
 
 let passed = 0;
 function check(name: string, fn: () => void): void {
@@ -34,6 +35,13 @@ check("PEM_CONSENT_TYPES/PEM_CONSENT_ACTIONSは既存語彙のまま不変", () 
     ].sort(),
   );
   assert.deepEqual([...PEM_CONSENT_ACTIONS].sort(), ["GRANTED", "WITHDRAWN"].sort());
+});
+
+check("bulkComplete用のExecution Ledger適用可否がisExecutionLedgerApplicableTypeと整合する", () => {
+  assert.equal(isExecutionLedgerApplicableType("TASK"), true);
+  assert.equal(isExecutionLedgerApplicableType("COMMITMENT"), false);
+  assert.equal(isExecutionLedgerApplicableType("WAITING"), false);
+  assert.equal(isExecutionLedgerApplicableType("RISK"), false);
 });
 
 console.log(`\n${passed}件すべて成功`);

@@ -359,7 +359,7 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     return apiError("RESOURCE_NOT_FOUND", "指定された責任が見つかりません");
   }
 
-  await db.$transaction(async (tx) => {
+  await db.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.responsibility.update({
       where: { id },
       data: { deletedAt: new Date(), version: { increment: 1 } },

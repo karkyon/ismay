@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import { ExtractionResultSchema } from "@/lib/ai/schema";
 import { getActiveExtractionProvider } from "@/lib/ai/config";
@@ -227,7 +228,7 @@ async function persistSuccess(
   usage: AiExtractionUsage,
   batch = false,
 ): Promise<number> {
-  return db.$transaction(async (tx) => {
+  return db.$transaction(async (tx: Prisma.TransactionClient) => {
     const run = await tx.aiRun.create({
       data: {
         captureId,
@@ -302,7 +303,7 @@ async function persistFailure(
   usage: AiExtractionUsage | undefined,
   batch = false,
 ): Promise<void> {
-  await db.$transaction(async (tx) => {
+  await db.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.aiRun.create({
       data: {
         captureId,
@@ -340,7 +341,7 @@ async function persistFailure(
 
 /** ai_runすら作れない(Domain policy/consent拒否)場合の失敗記録。aiRunは残さない。 */
 async function markFailed(captureId: string, processingVersion: number, reason: string): Promise<void> {
-  await db.$transaction(async (tx) => {
+  await db.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.capture.updateMany({
       where: { id: captureId, version: processingVersion, processingStatus: "PROCESSING" },
       data: { processingStatus: "FAILED", version: { increment: 1 } },

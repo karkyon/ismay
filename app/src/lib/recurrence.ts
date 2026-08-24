@@ -224,6 +224,11 @@ export async function generateRecurrences(now: Date = new Date()): Promise<{
  * 誤った期限を設定しかねないため、今回はtargetAtのみの更新に留める。
  * hardDeadlineAt付きの定期責任を使う場合は、都度手動で更新することを推奨する。
  */
+// [2026-08-25追加・Completion Gate 2] このリセットはWorker(SYSTEM)による定期
+// サイクルの自動処理であり、Execution Event RegistryのREOPENはallowedActors=
+// ["USER"]のみを許可する(本人操作限定)。「定期サイクルのリセットは本人操作としての
+// REOPENと同じ意味を持つか」は設計判断が必要なため、想像で許可actorを拡張せず、
+// 既知のギャップとしてExecution Ledger未接続のまま残す。
 async function resetForNextCycle(
   responsibilityId: string,
   type: string,

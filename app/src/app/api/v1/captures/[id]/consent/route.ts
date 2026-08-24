@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
@@ -49,7 +50,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const expiresAt = new Date(Date.now() + retentionDaysResolved * 24 * 60 * 60 * 1000);
 
   const result = await db
-    .$transaction(async (tx) => {
+    .$transaction(async (tx: Prisma.TransactionClient) => {
       const consent = await tx.consent.create({
         data: {
           captureId: capture.id,

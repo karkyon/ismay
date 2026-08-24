@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -28,7 +29,7 @@ export async function relayOutboxToJobs(): Promise<{ relayed: number }> {
   for (const event of pending) {
     const jobType = RELAYED_EVENT_TO_JOB_TYPE[event.eventName];
     try {
-      await db.$transaction(async (tx) => {
+      await db.$transaction(async (tx: Prisma.TransactionClient) => {
         await tx.job.create({
           data: {
             jobType,

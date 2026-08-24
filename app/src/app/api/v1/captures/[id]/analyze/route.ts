@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return apiOk({ id: capture.id, processingStatus: capture.processingStatus, version: capture.version });
   }
 
-  const result = await db.$transaction(async (tx) => {
+  const result = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const updateResult = await tx.capture.updateMany({
       where: { id: capture.id, version: capture.version },
       data: { processingStatus: "QUEUED", version: { increment: 1 } },

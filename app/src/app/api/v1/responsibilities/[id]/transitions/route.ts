@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
@@ -154,7 +155,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const reachesTerminal = nextStatus === "COMPLETED" || isTypeSpecificTerminalStatus(existing.type, nextStatus);
   const completedAtValue = reachesTerminal ? new Date() : action === "REOPEN" ? null : undefined;
 
-  const result = await db.$transaction(async (tx) => {
+  const result = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const updateResult = await tx.responsibility.updateMany({
       where: { id, version },
       data: {

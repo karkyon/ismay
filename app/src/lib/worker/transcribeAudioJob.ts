@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import { downloadAudioObject } from "@/lib/storage";
 import { getActiveTranscriptionProvider, getActiveSegmentProvider } from "@/lib/ai/config";
@@ -194,7 +195,7 @@ async function processCompletedTranscription(
 
   if (!segments || segments.length <= 1) {
     // 分割なし: 従来どおり1件のCaptureとして進める。
-    await db.$transaction(async (tx) => {
+    await db.$transaction(async (tx: Prisma.TransactionClient) => {
       const updated = await tx.capture.update({
         where: { id: capture.id },
         data: { rawText, processingStatus: "QUEUED", version: { increment: 1 } },
@@ -224,7 +225,7 @@ async function processCompletedTranscription(
 
   // 分割あり: 1件目は既存Captureのrawtextを差し替え、2件目以降は新規Captureを作成する。
   // それぞれ独立にQUEUED→AI抽出キューへ投入する(1件失敗しても他へ影響しない)。
-  await db.$transaction(async (tx) => {
+  await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const firstSegment = segments![0];
     const updated = await tx.capture.update({
       where: { id: capture.id },

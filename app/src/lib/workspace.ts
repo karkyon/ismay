@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 
 export interface DefaultWorkspaceContext {
   workspaceId: string;
@@ -46,7 +47,7 @@ export async function ensureDefaultWorkspace(
 
   const workspaceName = displayNameHint ? `${displayNameHint}のワークスペース` : "個人ワークスペース";
 
-  return db.$transaction(async (tx) => {
+  return db.$transaction(async (tx: Prisma.TransactionClient) => {
     const workspace = await tx.workspace.create({ data: { name: workspaceName } });
     await tx.workspaceMember.create({
       data: { workspaceId: workspace.id, userId, role: "OWNER" },

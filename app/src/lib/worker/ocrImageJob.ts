@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import { downloadImageObject } from "@/lib/storage";
 import { getActiveOcrProvider } from "@/lib/ai/config";
@@ -244,7 +245,7 @@ async function applyOcrOutcome(
 
   // OCR成功: rawTextへ書き込み、QUEUEDへ進めたうえで即AI抽出キューへ自動投入する
   // (transcribeAudioJob.tsと同じ「保存→自動解析」チェーンを画像でも実現する)。
-  await db.$transaction(async (tx) => {
+  await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const updated = await tx.capture.update({
       where: { id: captureId },
       data: { rawText: outcome.text, processingStatus: "QUEUED", version: { increment: 1 } },

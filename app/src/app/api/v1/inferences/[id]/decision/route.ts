@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
@@ -139,7 +140,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const finalTargetAt = edit.targetAt ?? targetFromCandidate;
   const finalStartAfterAt = edit.startAfterAt;
 
-  const created = await db.$transaction(async (tx) => {
+  const created = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const updatedInference = await tx.aiInference.updateMany({
       where: { id: inference.id, version: expectedInferenceVersion },
       data: {
