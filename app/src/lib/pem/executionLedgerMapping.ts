@@ -35,3 +35,17 @@ export function computeEffectiveOccurredAt(
   }
   return { effectiveOccurredAt: serverRecordedAt, occurredAtQuality: "LOW" };
 }
+
+/**
+ * Reason Capture(Phase 0C-1、v4.0 8.2節・8.3節)。
+ * 中断・延期・再開・放棄等での任意の理由入力を、Execution Event の metadata 列へ
+ * 格納する形へ変換する。reason未指定・空文字・空白のみの場合はmetadataを作らない
+ * (undefinedを返し、Prisma create時にmetadata列をnullのままにする)。
+ */
+export function buildExecutionEventMetadata(
+  reason: string | undefined | null,
+): { reason: string } | undefined {
+  const trimmed = reason?.trim();
+  if (!trimmed) return undefined;
+  return { reason: trimmed };
+}

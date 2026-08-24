@@ -185,6 +185,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         actorType: "USER",
         source: "WEB",
         correlationId: req.headers.get("x-correlation-id") ?? undefined,
+        reason,
       });
     } catch (e) {
       debugServer.event("POST /responsibilities/[id]/transitions", "PemExecutionLedgerRecordFailed", {

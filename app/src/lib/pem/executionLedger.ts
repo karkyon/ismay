@@ -25,9 +25,13 @@ import { isConsentGranted } from "./consent";
 // ResponsibilityType(狭いUnion)は使わない。既存 lib/responsibility.ts の
 // transitionsForType/isCommonStatusTypeと同様、type: stringとして扱う
 // (Responsibility.typeはPrisma上プレーンなString列のため)。
-import { TRANSITION_ACTION_TO_EVENT_TYPE, computeEffectiveOccurredAt } from "./executionLedgerMapping";
+import {
+  TRANSITION_ACTION_TO_EVENT_TYPE,
+  computeEffectiveOccurredAt,
+  buildExecutionEventMetadata,
+} from "./executionLedgerMapping";
 
-export { TRANSITION_ACTION_TO_EVENT_TYPE, computeEffectiveOccurredAt };
+export { TRANSITION_ACTION_TO_EVENT_TYPE, computeEffectiveOccurredAt, buildExecutionEventMetadata };
 
 export interface RecordExecutionLedgerEventParams {
   tx: Prisma.TransactionClient;
@@ -43,6 +47,8 @@ export interface RecordExecutionLedgerEventParams {
   actorType: ActorType;
   source: EventSource;
   correlationId?: string;
+  /** Phase 0C-1(v4.0 8.2節・8.3節): 中断・延期・再開・放棄等の任意の理由入力。 */
+  reason?: string;
 }
 
 /**
@@ -78,7 +84,7 @@ export async function recordExecutionLedgerEvent(
     select: { eventSequenceCounter: true },
   });
 
-  const { definition } = assertExecutionLedgerWriteAllowed({
+  assertExecutionLedgerWriteAllowed({
     eventType,
     evidenceClass: "FACT",
     actorType: params.actorType,
@@ -87,7 +93,7 @@ export async function recordExecutionLedgerEvent(
     responsibilityType: params.responsibilityType,
     consentGranted: () => true,
   });
-  void definition;
+  const metadata = buildExecutionEventMetadata(params.reason);
 
   const created = await params.tx.responsibilityExecutionEvent.create({
     data: {
@@ -110,6 +116,7 @@ export async function recordExecutionLedgerEvent(
       schemaVersion: "v4.0",
       correlationId: params.correlationId,
       idempotencyKey: `${params.responsibilityId}:${params.action}:${params.versionBefore}`,
+      metadata,
     },
     select: { id: true },
   });
