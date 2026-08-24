@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { debugServer, redactSensitive } from "@/lib/debugServer";
@@ -75,6 +76,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     });
   }
   const { action, reason, completedScope, remainingWork, newTargetAt, version } = parsed.data;
+  // [2026-08-24追加・Phase 0A是正2、v4.0 5.3節] Execution Ledgerのrequest_id/
+  // request_payload_hash列用。x-request-idヘッダがあれば優先し、無ければ要求ごとに発行する。
+  const pemRequestId = req.headers.get("x-request-id") ?? randomUUID();
+  const pemRequestPayloadHash = createHash("sha256").update(JSON.stringify(parsed.data)).digest("hex");
 
   // API・イベント設計書v1.1 4.3節: PARTIAL_COMPLETEはcompletedScope/remainingWorkの一方以上が必須
   if (action === "PARTIAL_COMPLETE" && !completedScope && !remainingWork) {
@@ -192,6 +197,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       source: "WEB",
       correlationId: req.headers.get("x-correlation-id") ?? undefined,
       reason,
+      requestId: pemRequestId,
+      requestPayloadHash: pemRequestPayloadHash,
     });
 
     return updated;

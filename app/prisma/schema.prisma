@@ -307,6 +307,11 @@ model Responsibility {
   cycleItems       CycleItem[]
 
   @@index([workspaceId, id])
+  /// [2026-08-24追加・Phase 0A是正2] ResponsibilityExecutionEventからの複合FK
+  /// (responsibilityId, workspaceId)の参照先として必要(v4.0 4.1節「tenantを跨ぐ
+  /// FK参照を禁止する」の機械的保証。既存の単一列idはunique(=PK)のため、
+  /// この複合uniqueを追加しても他の参照方法に影響しない)。
+  @@unique([id, workspaceId])
   @@map("responsibilities")
 }
 
@@ -714,14 +719,38 @@ model PemConsentEvent {
 }
 
 /// TBL(PEM Phase 0A) responsibility_execution_events - Execution Event Ledger本体 [出典: PEMサブシステム統合正本仕様書v4.0 5章]
+/// TBL(PEM Phase 0A) responsibility_execution_events - Execution Event Ledger本体
+/// [出典: PEMサブシステム統合正本仕様書v4.0 5章]
+/// [2026-08-24改訂・Phase 0A是正2] 5.3節Eventスキーマの必須列・複合unique・tenant複合FKを
+/// 追加した。ただし列を追加しただけで、実際に値を計算・伝播するアプリケーションロジックが
+/// 伴わない項目がある(clockOffset*・sourceDeviceId・clientEventId等。本ファイル冒頭の
+/// パッチスクリプトdocstring参照)。列の存在と機能の完成度は別である。
 model ResponsibilityExecutionEvent {
   id                           String   @id @default(uuid())
   workspaceId                  String   @map("workspace_id")
   subjectUserId                String   @map("subject_user_id")
   actorType                    String   @map("actor_type")
   actorUserId                  String?  @map("actor_user_id")
+  /// [新設] SYSTEM/WORKER由来イベントを生成した場合のサービス識別子。
+  /// 現状USER操作のみのため常にnull(v4.0 4章)。
+  actorServiceId                String?  @map("actor_service_id")
+  /// [新設] AI Agent由来イベントを生成した場合のAgent識別子。現状常にnull。
+  actorAgentId                   String?  @map("actor_agent_id")
+  /// [新設] 代理操作を行った場合、代理権限を与えた本人のuserId。現状代理操作機能が
+  /// 無いため常にnull。
+  delegatedByUserId              String?  @map("delegated_by_user_id")
+  /// [新設] 認証・認可判断の追跡ID(v4.0 4章)。PemAuthorizationContext.authenticationContextId
+  /// をそのまま保存する。[既知の簡略化] 現状のtransitions/route.tsは真の認証コンテキストID
+  /// ではなくuserIdを暫定的に渡しているため、値の質はその制約を引き継ぐ。
+  authenticationContextId        String?  @map("authentication_context_id")
+  /// [新設] API要求単位の追跡ID(v4.0 5.3節)。x-request-idヘッダがあれば優先、
+  /// 無ければ要求ごとにrandomUUID()で発行する(transitions/route.ts参照)。
+  requestId                      String   @map("request_id")
   responsibilityId             String   @map("responsibility_id")
-  responsibility                Responsibility @relation(fields: [responsibilityId], references: [id])
+  /// [2026-08-24改訂] 単一列(responsibilityId)参照から、(responsibilityId, workspaceId)の
+  /// 複合参照へ変更した。EventのworkspaceIdとResponsibilityのworkspaceIdが常に一致する
+  /// ことをDBレベルで保証する(v4.0 4.1節「tenantを跨ぐFK参照…を禁止する」)。
+  responsibility                Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
   /// START/RESUME/INTERRUPT/DEFER/SWITCH_OUT/COMPLETE/REOPEN/RESPONSIBILITY_ABANDON/AUTO_PAUSE_CONFIRMED
   eventType                     String   @map("event_type")
   fromState                     String   @map("from_state")
@@ -729,19 +758,53 @@ model ResponsibilityExecutionEvent {
   responsibilityVersionBefore   Int      @map("responsibility_version_before")
   responsibilityVersionAfter    Int      @map("responsibility_version_after")
   responsibilitySequence        Int      @map("responsibility_sequence")
+  /// [新設] 欠番・commit順不一致を許容する参考識別子(v4.0 5.3節)。意味的順序・配送順・
+  /// commit順の保証には使わない(responsibilitySequenceが意味的順序の正)。DB側の
+  /// シーケンスで採番する。
+  globalSequence                 BigInt   @unique(map: "ree_global_sequence_uq") @default(autoincrement()) @map("global_sequence")
   source                        String
-  clientOccurredAt              DateTime @map("client_occurred_at")
+  /// [新設] 端末識別子。オフライン同期・複数端末競合検知は未実装のため常にnull。
+  sourceDeviceId                  String?  @map("source_device_id")
+  /// [新設] 端末側の冪等キー(オフライン再送検知用)。未実装のため常にnull。
+  clientEventId                   String?  @map("client_event_id")
+  /// [新設] 端末側の順序番号。未実装のため常にnull。
+  clientSequence                   BigInt?  @map("client_sequence")
+  /// [改訂] v4.0 6.1節「SYSTEM/WORKER由来イベントではclientOccurredAtをnullとし、
+  /// サーバー時刻を採用する」に合わせ必須→任意化した(現状はUSER操作のみのため
+  /// 実質常に値が入るが、将来SYSTEM/WORKER経路が実装された際に備える)。
+  clientOccurredAt              DateTime? @map("client_occurred_at")
   serverRecordedAt              DateTime @default(now()) @map("server_recorded_at")
   effectiveOccurredAt           DateTime @map("effective_occurred_at")
   occurredAtQuality             String   @map("occurred_at_quality")
+  /// [新設] 既知のclock offset(秒)。オフライン同期のclock補正は未実装のため常にnull。
+  clockOffsetSeconds              Int?     @map("clock_offset_seconds")
+  clockOffsetMeasuredAt           DateTime? @map("clock_offset_measured_at")
+  idempotencyKey                String   @map("idempotency_key")
+  /// [新設] 同一idempotencyKeyでpayloadが異なる場合の409判定に使う要求本文のhash
+  /// (v4.0 5.5節)。transitions/route.tsがsha256で計算して渡す。
+  requestPayloadHash              String   @map("request_payload_hash")
   schemaVersion                 String   @map("schema_version")
   correlationId                 String?  @map("correlation_id")
   causationId                   String?  @map("causation_id")
-  idempotencyKey                String   @map("idempotency_key")
-  metadata                      Json?
+  /// [改訂] 従来Json?(任意)だったが、v4.0 5.3節はJson(必須)を要求する。
+  /// 既存null行はマイグレーションで{}へbackfillし、NOT NULL化した。
+  metadata                      Json     @default("{}")
+  /// [新設] 行の物理作成時刻。従来欠落していた。
+  createdAt                      DateTime @default(now()) @map("created_at")
 
-  @@unique([responsibilityId, responsibilitySequence])
-  @@unique([workspaceId, subjectUserId, idempotencyKey])
+  /// [改訂] tenantId(workspaceId)を含む複合uniqueへ変更(v4.0 5.3節、批評4.5対応)。
+  /// [2026-08-24再修正] 3つの@@unique全てに明示的なmap名を付与した。理由:
+  /// Prismaの自動生成制約名は「テーブル名+全フィールド名+_key」だが、本モデルは
+  /// workspaceId/subjectUserIdで始まる長いフィールド名の組み合わせが複数あり、
+  /// PostgreSQLの識別子長制限(63バイト)で切り詰められた結果、idempotencyKey用と
+  /// clientEventId用の自動生成名が衝突しPrisma検証エラー(P1012)になった
+  /// (実サーバーでの実行結果から判明)。migration.sqlで実際に使っている
+  /// 短い制約名と一致させる。
+  @@unique([workspaceId, responsibilityId, responsibilitySequence], map: "ree_workspace_responsibility_sequence_uq")
+  @@unique([workspaceId, subjectUserId, idempotencyKey], map: "ree_idempotency_uq")
+  /// [新設] v4.0 5.3節が要求する複合unique(clientEventIdは任意列のため、
+  /// 複数行がnullの場合はPostgreSQLの既定動作によりunique違反にならない)。
+  @@unique([workspaceId, subjectUserId, clientEventId], map: "ree_workspace_subject_client_event_uq")
   @@index([responsibilityId])
   @@map("responsibility_execution_events")
 }

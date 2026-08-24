@@ -57,6 +57,23 @@ export interface RecordExecutionLedgerEventParams {
   correlationId?: string;
   /** Phase 0C-1(v4.0 8.2節・8.3節): 中断・延期・再開・放棄等の任意の理由入力。 */
   reason?: string;
+  /** [2026-08-24追加・Phase 0A是正2、v4.0 5.3節] API要求単位の追跡ID。呼び出し元で
+   * x-request-idヘッダまたはrandomUUID()により発行したものを渡す。 */
+  requestId: string;
+  /** [新設・v4.0 5.5節] 要求本文のhash(同一idempotencyKeyでpayload相違を検出するため)。 */
+  requestPayloadHash: string;
+  /** [新設・v4.0 6.1節] 端末識別子。未配線の場合はundefined。 */
+  sourceDeviceId?: string;
+  /** [新設・v4.0 6.2節] 端末側冪等キー・順序番号。未配線の場合はundefined。 */
+  clientEventId?: string;
+  clientSequence?: bigint;
+  /** [新設・v4.0 6.1節] 既知のclock offset。未配線の場合はundefined。 */
+  clockOffsetSeconds?: number;
+  clockOffsetMeasuredAt?: Date;
+  /** [新設・v4.0 4章] SYSTEM/WORKER/AI/代理操作の識別子。現状すべて未配線。 */
+  actorServiceId?: string;
+  actorAgentId?: string;
+  delegatedByUserId?: string;
 }
 
 /**
@@ -118,6 +135,11 @@ export async function recordExecutionLedgerEvent(
       subjectUserId: params.ctx.subjectUserId,
       actorType: params.actorType,
       actorUserId: params.ctx.actorUserId,
+      actorServiceId: params.actorServiceId,
+      actorAgentId: params.actorAgentId,
+      delegatedByUserId: params.delegatedByUserId,
+      authenticationContextId: params.ctx.authenticationContextId,
+      requestId: params.requestId,
       responsibilityId: params.responsibilityId,
       eventType,
       fromState: params.fromState as ExecutionLedgerState,
@@ -127,13 +149,19 @@ export async function recordExecutionLedgerEvent(
       responsibilityVersionAfter: params.versionAfter,
       responsibilitySequence: counterResult.eventSequenceCounter,
       source: params.source,
+      sourceDeviceId: params.sourceDeviceId,
+      clientEventId: params.clientEventId,
+      clientSequence: params.clientSequence,
       clientOccurredAt: params.clientOccurredAt,
       serverRecordedAt,
       effectiveOccurredAt,
       occurredAtQuality,
+      clockOffsetSeconds: params.clockOffsetSeconds,
+      clockOffsetMeasuredAt: params.clockOffsetMeasuredAt,
       schemaVersion: "v4.0",
       correlationId: params.correlationId,
       idempotencyKey: `${params.responsibilityId}:${params.action}:${params.versionBefore}`,
+      requestPayloadHash: params.requestPayloadHash,
       metadata,
     },
     select: { id: true },
