@@ -10,6 +10,8 @@ import {
   isTypeSpecificTerminalStatus,
   ACTIONS_REQUIRING_REASON,
 } from "@/lib/responsibility";
+import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
+import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
 
 const TransitionSchema = z.object({
   action: z.enum([
@@ -166,6 +168,30 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       },
     });
     debugServer.event("POST /responsibilities/[id]/transitions", "ResponsibilityTransitioned.v1", { aggregateId: id });
+
+    try {
+      const pemCtx = await buildPemAuthorizationContext(auth.user.userId, auth.user.userId);
+      await recordExecutionLedgerEvent({
+        tx,
+        ctx: pemCtx,
+        responsibilityId: id,
+        responsibilityType: existing.type,
+        action,
+        fromState: existing.status,
+        toState: updated.status,
+        versionBefore: existing.version,
+        versionAfter: updated.version,
+        clientOccurredAt: new Date(parsed.data.occurredAt),
+        actorType: "USER",
+        source: "WEB",
+        correlationId: req.headers.get("x-correlation-id") ?? undefined,
+      });
+    } catch (e) {
+      debugServer.event("POST /responsibilities/[id]/transitions", "PemExecutionLedgerRecordFailed", {
+        aggregateId: id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
 
     return updated;
   });

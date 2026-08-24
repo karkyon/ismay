@@ -18,7 +18,7 @@
  *    retentionClass/introducedVersion/labelJa/labelEn/definition/allowedSourcesを追加。
  *  - 検証関数を1つ(assertExecutionLedgerWriteAllowed)へ統合し、呼び忘れを防止。
  */
-import { isCommonStatusType, type ResponsibilityType } from "@/lib/responsibility";
+import { isCommonStatusType } from "@/lib/responsibility";
 import {
   EXCLUDED_FROM_EXECUTION_LEDGER,
   EXECUTION_EVENT_TYPES,
@@ -55,7 +55,7 @@ export type ExecutionLedgerState = (typeof EXECUTION_LEDGER_STATES)[number];
  * (v4.0のExecution Ledgerは「実行中/中断/再開」という開始-進行-完了型の
  *  ライフサイクルを前提としており、これらの型には該当する概念が無いため)。
  */
-export function isExecutionLedgerApplicableType(type: ResponsibilityType): boolean {
+export function isExecutionLedgerApplicableType(type: string): boolean {
   return isCommonStatusType(type);
 }
 
@@ -161,10 +161,10 @@ export const EXECUTION_EVENT_DEFINITIONS = {
     eventType: "DEFER",
     labelJa: "延期",
     labelEn: "Defer",
-    definition: "作業中の責任を延期する。",
+    definition: "着手前または作業中の責任を延期する。",
     evidenceClass: "FACT",
     allowedLedger: "EXECUTION_LEDGER",
-    fromStates: ["IN_PROGRESS"],
+    fromStates: ["INBOX", "PLANNED", "IN_PROGRESS"],
     toState: "DEFERRED",
     isTerminal: false,
     allowedActors: ["USER"],
@@ -199,10 +199,10 @@ export const EXECUTION_EVENT_DEFINITIONS = {
     eventType: "COMPLETE",
     labelJa: "完了",
     labelEn: "Complete",
-    definition: "責任を完了する。",
+    definition: "作業中の責任を完了する。",
     evidenceClass: "FACT",
     allowedLedger: "EXECUTION_LEDGER",
-    fromStates: ["IN_PROGRESS", "DEFERRED"],
+    fromStates: ["IN_PROGRESS"],
     toState: "COMPLETED",
     isTerminal: true,
     allowedActors: ["USER"],
@@ -292,7 +292,7 @@ export interface ExecutionLedgerWriteCandidate {
   fromState: string;
   consentGranted: (consentType: PemConsentType) => boolean;
   /** true の場合のみ responsibilityType のExecution Ledger対象性チェックを行う。 */
-  responsibilityType?: ResponsibilityType;
+  responsibilityType?: string;
 }
 
 /**

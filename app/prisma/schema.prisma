@@ -282,6 +282,8 @@ model Responsibility {
   pinned           Boolean   @default(false)
   pinnedAt         DateTime? @map("pinned_at")
   version          Int       @default(0)
+  eventSequenceCounter Int   @default(0) @map("event_sequence_counter")
+  executionEvents  ResponsibilityExecutionEvent[]
   createdById      String    @map("created_by")
   createdBy        User      @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])
   updatedById      String    @map("updated_by")
@@ -704,6 +706,39 @@ model PemConsentEvent {
 
   @@index([userId, consentType])
   @@map("pem_consent_events")
+}
+
+/// TBL(PEM Phase 0A) responsibility_execution_events - Execution Event Ledger本体 [出典: PEMサブシステム統合正本仕様書v4.0 5章]
+model ResponsibilityExecutionEvent {
+  id                           String   @id @default(uuid())
+  workspaceId                  String   @map("workspace_id")
+  subjectUserId                String   @map("subject_user_id")
+  actorType                    String   @map("actor_type")
+  actorUserId                  String?  @map("actor_user_id")
+  responsibilityId             String   @map("responsibility_id")
+  responsibility                Responsibility @relation(fields: [responsibilityId], references: [id])
+  /// START/RESUME/INTERRUPT/DEFER/SWITCH_OUT/COMPLETE/REOPEN/RESPONSIBILITY_ABANDON/AUTO_PAUSE_CONFIRMED
+  eventType                     String   @map("event_type")
+  fromState                     String   @map("from_state")
+  toState                       String   @map("to_state")
+  responsibilityVersionBefore   Int      @map("responsibility_version_before")
+  responsibilityVersionAfter    Int      @map("responsibility_version_after")
+  responsibilitySequence        Int      @map("responsibility_sequence")
+  source                        String
+  clientOccurredAt              DateTime @map("client_occurred_at")
+  serverRecordedAt              DateTime @default(now()) @map("server_recorded_at")
+  effectiveOccurredAt           DateTime @map("effective_occurred_at")
+  occurredAtQuality             String   @map("occurred_at_quality")
+  schemaVersion                 String   @map("schema_version")
+  correlationId                 String?  @map("correlation_id")
+  causationId                   String?  @map("causation_id")
+  idempotencyKey                String   @map("idempotency_key")
+  metadata                      Json?
+
+  @@unique([responsibilityId, responsibilitySequence])
+  @@unique([workspaceId, subjectUserId, idempotencyKey])
+  @@index([responsibilityId])
+  @@map("responsibility_execution_events")
 }
 
 model PemHypothesis {
