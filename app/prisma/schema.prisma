@@ -285,6 +285,7 @@ model Responsibility {
   version          Int       @default(0)
   eventSequenceCounter Int   @default(0) @map("event_sequence_counter")
   executionEvents  ResponsibilityExecutionEvent[]
+  executionSessionIdentities ExecutionSessionIdentity[]
   createdById      String    @map("created_by")
   createdBy        User      @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])
   updatedById      String    @map("updated_by")
@@ -931,6 +932,64 @@ model PemEvidenceDeletionEvent {
 
   @@index([userId, targetType, targetId])
   @@map("pem_evidence_deletion_events")
+}
+
+/// TBL(PEM Phase 0B-2) execution_session_identities - 論理Session識別子
+/// [出典: PEMサブシステム統合正本仕様書v4.0 7.2節]
+/// 論理Session1つにつき1行。startEventId(START/RESUMEイベント)で一意に定まる。
+model ExecutionSessionIdentity {
+  id                String   @id @default(uuid())
+  workspaceId       String   @map("workspace_id")
+  subjectUserId     String   @map("subject_user_id")
+  responsibilityId  String   @map("responsibility_id")
+  /// [v4.0 4.1節] tenant跨ぎ参照をDBで禁止する複合FK(ResponsibilityExecutionEvent
+  /// と同じパターン。Phase 0A是正2参照)。
+  responsibility    Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  /// このSessionを開始したResponsibilityExecutionEvent.id(START/RESUME)。
+  startEventId      String   @map("start_event_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  revisions ExecutionSessionRevision[]
+
+  @@unique([workspaceId, startEventId], map: "esi_workspace_start_event_uq")
+  @@index([responsibilityId])
+  @@map("execution_session_identities")
+}
+
+/// TBL(PEM Phase 0B-2) execution_session_revisions - Session内容のinsert-only履歴
+/// [出典: PEMサブシステム統合正本仕様書v4.0 7.2節]
+/// insert-only。内容が変わった場合のみ新Revisionを追記し、旧行はUPDATEしない
+/// (v4.0「旧版をSUPERSEDEDへ直接更新せず」)。「現在版」はsessionIdentityId内で
+/// 最大のrevision番号を持つ行として投影で決定する(SUPERSEDEDは独立したstatus値
+/// として保存しない)。
+model ExecutionSessionRevision {
+  id                     String    @id @default(uuid())
+  sessionIdentityId      String    @map("session_identity_id")
+  sessionIdentity        ExecutionSessionIdentity @relation(fields: [sessionIdentityId], references: [id])
+  revision               Int
+  /// fold algorithm(sessionProjection.ts computeExecutionSessions)自体の版。
+  derivationVersion      String    @map("derivation_version")
+  /// OPEN/CLOSED_CONFIRMED/CLOSED_UNCONFIRMED(v4.0 7.1節・7.3節。値集合は原本に
+  /// 明記が無いため本文の記述から導出。sessionPersistence.ts参照)。
+  status                 String
+  startedAt              DateTime  @map("started_at")
+  endedAt                DateTime? @map("ended_at")
+  /// INTERRUPT/DEFER/SWITCH_OUT/COMPLETE/AUTO_PAUSE_CONFIRMED/TIMEOUT。
+  endReason              String?   @map("end_reason")
+  rawElapsedSeconds      Int       @map("raw_elapsed_seconds")
+  /// Activity Segmentによる補正後の実作業秒数(v4.0 7.4節、未実装のため常にnull)。
+  correctedActiveSeconds Int?      @map("corrected_active_seconds")
+  /// [既知の簡略化] Activity Evidence Ledger未実装のため常に"EXECUTION_LEDGER_ONLY"。
+  measurementMode        String    @map("measurement_mode")
+  measurementQuality     String    @map("measurement_quality")
+  qualityReasonCodes     Json      @default("[]") @map("quality_reason_codes")
+  timeZoneId             String?   @map("time_zone_id")
+  utcOffsetMinutes       Int?      @map("utc_offset_minutes")
+  supersedesRevisionId   String?   @map("supersedes_revision_id")
+  createdAt              DateTime  @default(now()) @map("created_at")
+
+  @@unique([sessionIdentityId, revision], map: "esr_identity_revision_uq")
+  @@map("execution_session_revisions")
 }
 
 /// TBL-019 evidences - 完了等の証拠候補 [推論]

@@ -41,9 +41,15 @@ export interface ExecutionSession {
   /** このセッションを終了させたイベント種別(進行中セッションはnull)。 */
   closedByEventType: string | null;
   isOpen: boolean;
-  /** 進行中セッション(isOpen=true)はnull。実作業時間はsumActiveDurationMsAsOfで計算する。 */
+  /** 進行中セッション(isOpen=true)、または異常検出時(anomalyDetected=true)はnull。
+   * 実作業時間はsumActiveDurationMsAsOfで計算する。 */
   durationMs: number | null;
   measurementQuality: MeasurementQuality;
+  /** [2026-08-24追加・Phase 0B-2、外部批評対応] 終了イベント時刻が開始イベント時刻より
+   * 前(負duration)だった場合にtrue。以前はMath.max(0,...)で静かに0へ丸めていたが、
+   * これは異常(Event到着順の乱れ等、v4.0 7.3節の「異常到着」)を隠してしまうため、
+   * 明示的にフラグ化しdurationMsをnull・measurementQualityをLOWにする。 */
+  anomalyDetected: boolean;
 }
 
 /**
@@ -100,10 +106,12 @@ export function computeExecutionSessions(
       continue;
     }
     if (event.fromState === SESSION_CLOSE_FROM_STATE) {
-      const durationMs = Math.max(
-        0,
-        event.effectiveOccurredAt.getTime() - openStart.effectiveOccurredAt.getTime(),
-      );
+      const rawDurationMs = event.effectiveOccurredAt.getTime() - openStart.effectiveOccurredAt.getTime();
+      // [2026-08-24是正・外部批評対応] 以前はMath.max(0, ...)で負のdurationを静かに
+      // 0へ丸めていた。今は異常として検出し、durationMsをnull・measurementQuality=LOW
+      // として明示する(v4.0 7.3節「異常到着はConflictへ送る」の簡易対応。正式な
+      // Conflict Queueは未実装のため、品質フラグでの可視化に留める)。
+      const anomalyDetected = rawDurationMs < 0;
       sessions.push({
         responsibilityId,
         startEventId: openStart.id,
@@ -112,8 +120,11 @@ export function computeExecutionSessions(
         endedAt: event.effectiveOccurredAt,
         closedByEventType: event.eventType,
         isOpen: false,
-        durationMs,
-        measurementQuality: derivePairQuality(openStart.occurredAtQuality, event.occurredAtQuality),
+        durationMs: anomalyDetected ? null : rawDurationMs,
+        measurementQuality: anomalyDetected
+          ? "LOW"
+          : derivePairQuality(openStart.occurredAtQuality, event.occurredAtQuality),
+        anomalyDetected,
       });
       openStart = event.toState === SESSION_OPEN_TO_STATE ? event : null;
     }
@@ -131,6 +142,7 @@ export function computeExecutionSessions(
       isOpen: true,
       durationMs: null,
       measurementQuality: derivePairQuality(openStart.occurredAtQuality, null),
+      anomalyDetected: false,
     });
   }
 
@@ -155,4 +167,20 @@ export function sumActiveDurationMsAsOf(
     const openMs = Math.max(0, asOf.getTime() - s.startedAt.getTime());
     return total + openMs;
   }, 0);
+}
+
+
+/**
+ * [2026-08-24追加・Phase 0B-2] v4.0 7.1節「executionPresence」。
+ * Responsibilityが IN_PROGRESS でもActive Sessionが存在しない状態を許可する、
+ * という原則に基づき、責任状態とは独立に「現在進行中のSessionがあるか」を表す。
+ * 最新Session Revisionのstatusから導出する(純粋関数。db依存はsessionPersistence.ts側)。
+ */
+export const EXECUTION_PRESENCE_VALUES = ["ACTIVE_SESSION", "NO_ACTIVE_SESSION", "UNKNOWN"] as const;
+export type ExecutionPresence = (typeof EXECUTION_PRESENCE_VALUES)[number];
+
+export function deriveExecutionPresence(latestRevisionStatus: string | null): ExecutionPresence {
+  if (latestRevisionStatus === null) return "UNKNOWN";
+  if (latestRevisionStatus === "OPEN") return "ACTIVE_SESSION";
+  return "NO_ACTIVE_SESSION";
 }

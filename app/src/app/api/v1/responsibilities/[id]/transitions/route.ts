@@ -12,6 +12,7 @@ import {
   ACTIONS_REQUIRING_REASON,
 } from "@/lib/responsibility";
 import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
+import { projectAndPersistExecutionSessions } from "@/lib/pem/sessionPersistence";
 import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
 
 const TransitionSchema = z.object({
@@ -182,7 +183,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     // 壊れない。対象内かつ同意済みでの本物の失敗は、トランザクション全体を
     // rollbackさせる(批評が推奨する「同意済みかつ対象内: 同一トランザクションで必須成功」)。
     const pemCtx = await buildPemAuthorizationContext(auth.user.userId, auth.user.userId);
-    await recordExecutionLedgerEvent({
+    const pemLedgerResult = await recordExecutionLedgerEvent({
       tx,
       ctx: pemCtx,
       responsibilityId: id,
@@ -200,6 +201,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       requestId: pemRequestId,
       requestPayloadHash: pemRequestPayloadHash,
     });
+    // [2026-08-24追加・Phase 0B-2] Execution Eventが実際に記録された場合のみ
+    // Session Identity/Revisionを再投影・永続化する(v4.0 7.2節・7.3節)。
+    // recordExecutionLedgerEventがnullを返す(対象外型/action未対応/未同意による
+    // 意図的スキップ)場合は、記録された事実が無いため呼ばない。
+    if (pemLedgerResult) {
+      await projectAndPersistExecutionSessions(tx, pemCtx, id);
+    }
 
     return updated;
   });
