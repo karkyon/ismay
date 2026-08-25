@@ -128,6 +128,28 @@ export const PEM_CONSENT_ACTIONS = ["GRANTED", "WITHDRAWN"] as const;
 export type PemConsentAction = (typeof PEM_CONSENT_ACTIONS)[number];
 
 /**
+ * [2026-08-25新設・Completion Gate 2.1] Correction Type
+ * (出典: ISMAY_PEM_v3_3_1整合性修正_用語コード定義書_v1_0 8章、
+ *  ISMAY_PEMサブシステム_統合正本仕様書_v4_0 8.1節「元Evidenceを更新せず、
+ *  Correction Eventを追記する」)。
+ * 現状REVOKE(COMPLETE取消)のみを生成する。REPLACE/SPLIT/MERGE_REQUESTは
+ * 対応する機能が未実装のため、型としては保持しつつ現状生成しない
+ * (想像で未実装機能の挙動を作り込まない)。
+ */
+export const CORRECTION_TYPES = ["REPLACE", "REVOKE", "SPLIT", "MERGE_REQUEST"] as const;
+export type CorrectionType = (typeof CORRECTION_TYPES)[number];
+
+/**
+ * [2026-08-25新設・Completion Gate 2.1] ResponsibilityLifecycleEvent.kind。
+ * CORRECTION: 8.1節のCorrection Event(現状はCOMPLETE取消のREVOKEのみ)。
+ * RECURRENCE_RESET: 定期責任の次サイクルリセット(recurrence.ts resetForNextCycle)。
+ * SYSTEM(Worker)による自動処理であり、Execution Ledgerの権限は無いが
+ * insert-onlyの記録は必要なため、Correctionとは別kindとして区別する。
+ */
+export const LIFECYCLE_EVENT_KINDS = ["CORRECTION", "RECURRENCE_RESET"] as const;
+export type LifecycleEventKind = (typeof LIFECYCLE_EVENT_KINDS)[number];
+
+/**
  * 同意文言・範囲の版(Phase 0S)。改定時はここを上げ、既存GRANTEDを自動的に有効とみなさない運用にする。
  * db.ts(実Prismaクライアント)に依存しないここへ置くことで、tsx実行テストがdb.ts解決
  * (サンドボックスでは`prisma generate`不可のため失敗する)を経由せずに検証できるようにする。

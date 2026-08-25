@@ -16,8 +16,11 @@ export type ErrorCode =
   | "CREDENTIALS_INVALID"
   | "ACCOUNT_LOCKED"
   /** [2026-08-25追加・Completion Gate 1、v4.0 5.5節] 同一idempotencyKeyで
-   * 異なるrequestPayloadHashのリクエストが再送された場合。 */
-  | "IDEMPOTENCY_KEY_CONFLICT";
+   * 異なるrequestPayloadHashのリクエストが再送された場合。
+   * [2026-08-25是正・Completion Gate 2.1] 当初IDEMPOTENCY_KEY_CONFLICTという独自語彙で
+   * 実装したが、ISMAY_PEM_v3_3_1整合性修正_用語コード定義書_v1_0の正式語彙は
+   * IDEMPOTENCY_KEY_REUSEDである。想像で別名を発明せず、正本の語彙へ合わせる。 */
+  | "IDEMPOTENCY_KEY_REUSED";
 
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   VALIDATION_FAILED: 400,
@@ -29,7 +32,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   ACCOUNT_LOCKED: 403,
   RESOURCE_NOT_FOUND: 404,
   VERSION_CONFLICT: 409,
-  IDEMPOTENCY_KEY_CONFLICT: 409,
+  IDEMPOTENCY_KEY_REUSED: 409,
   STATE_TRANSITION_INVALID: 422,
   RATE_LIMITED: 429,
   AI_TEMPORARILY_UNAVAILABLE: 503,

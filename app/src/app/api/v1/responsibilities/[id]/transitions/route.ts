@@ -142,8 +142,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         return apiOk(current);
       }
       // 同一key・異なるpayload: 呼び出し元の実装不備の疑いがあるため409で拒否する。
+      // [2026-08-25是正・Completion Gate 2.1] エラーコードをv4.0正式語彙の
+      // IDEMPOTENCY_KEY_REUSEDへ統一(response.ts参照)。
       return apiError(
-        "IDEMPOTENCY_KEY_CONFLICT",
+        "IDEMPOTENCY_KEY_REUSED",
         "同一のリクエストキーで内容の異なるリクエストが送信されました",
       );
     }

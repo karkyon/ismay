@@ -288,6 +288,8 @@ model Responsibility {
   eventSequenceCounter Int   @default(0) @map("event_sequence_counter")
   executionEvents  ResponsibilityExecutionEvent[]
   executionSessionIdentities ExecutionSessionIdentity[]
+  /// [2026-08-25新設・Completion Gate 2.1、v4.0 8.1節] Correction/lifecycle記録。
+  lifecycleEvents  ResponsibilityLifecycleEvent[]
   createdById      String    @map("created_by")
   createdBy        User      @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])
   updatedById      String    @map("updated_by")
@@ -824,6 +826,12 @@ model ResponsibilityExecutionEvent {
   metadata                      Json     @default("{}")
   /// [新設] 行の物理作成時刻。従来欠落していた。
   createdAt                      DateTime @default(now()) @map("created_at")
+  /// [2026-08-25新設・Completion Gate 2.1] このEventを取り消したCorrection(REVOKE等)。
+  /// 通常1件だが、将来の再訂正(訂正の訂正)に備え配列とする。
+  correctionsOfThisEvent        ResponsibilityLifecycleEvent[] @relation("LifecycleCorrectionOfEvent")
+  /// [2026-08-25新設・Completion Gate 2.1] このEvent自身が、あるCorrectionの結果として
+  /// 生成された場合の逆参照(例: COMPLETE取消により生成されたREOPEN Event)。
+  resultingFromLifecycleEvents  ResponsibilityLifecycleEvent[] @relation("LifecycleResultingEvent")
 
   /// [改訂] tenantId(workspaceId)を含む複合uniqueへ変更(v4.0 5.3節、批評4.5対応)。
   /// [2026-08-24再修正] 3つの@@unique全てに明示的なmap名を付与した。理由:
@@ -838,8 +846,72 @@ model ResponsibilityExecutionEvent {
   /// [新設] v4.0 5.3節が要求する複合unique(clientEventIdは任意列のため、
   /// 複数行がnullの場合はPostgreSQLの既定動作によりunique違反にならない)。
   @@unique([workspaceId, subjectUserId, clientEventId], map: "ree_workspace_subject_client_event_uq")
+  /// [2026-08-25新設・Completion Gate 2.1] ResponsibilityLifecycleEventが
+  /// correction_of_event_id/resulting_event_idで本Eventを参照する際、tenant(workspaceId)を
+  /// 含む複合FKにするための参照先(v4.0 4.1節「DB制約とアプリケーション認可による二重化」)。
+  /// idは既にPKで単独unique だが、複合FKの参照先には対象列の複合uniqueが必要。
+  @@unique([id, workspaceId], map: "ree_id_workspace_uq")
   @@index([responsibilityId])
   @@map("responsibility_execution_events")
+}
+
+/// [2026-08-25新設・Completion Gate 2.1]
+/// 出典: ISMAY_PEMサブシステム_統合正本仕様書_v4_0 8.1節「Correction」
+///  「元Evidenceを更新せず、Correction Eventを追記する」、
+///  ISMAY_PEM_v3_3_1整合性修正_用語コード定義書_v1_0 8章(Correction Type)。
+///
+/// ResponsibilityExecutionEvent(Execution Ledger)はimmutableな正本Eventのみを保持し、
+/// 「過去のEventを訂正する」という行為自体はここへ別レコードとして追記する
+/// (Execution Ledgerの行を直接UPDATEしない。insert-only)。
+///
+/// kind=CORRECTIONの場合: 一括完了の取消(Undo)のように、確定していた完了を取り消す
+/// 操作を記録する。correctionOfEventIdは取消対象の元Event(通常はCOMPLETE Event)、
+/// resultingEventIdはその結果として新たに記録されたExecution Event(通常はREOPEN Event)
+/// を指す。Lifecycle Eventが記録されるのは、訂正対象の元Execution Eventを実際に
+/// 特定できた場合(=Execution Ledger対象型かつCOMPLETE Eventが見つかった場合)のみ。
+///
+/// kind=RECURRENCE_RESETの場合: 定期責任のサイクルリセット(recurrence.ts
+/// resetForNextCycle)。SYSTEM(Worker)による自動処理であり、Execution LedgerのREOPENは
+/// allowedActors=["USER"]のため使えないが、状態が変わった事実そのものはinsert-onlyで
+/// 記録する必要があるため、Correctionとは別kindとしてここに記録する。
+model ResponsibilityLifecycleEvent {
+  id                   String    @id @default(uuid())
+  workspaceId          String    @map("workspace_id")
+  subjectUserId        String    @map("subject_user_id")
+  responsibilityId     String    @map("responsibility_id")
+  /// [tenant境界の二重防御] ResponsibilityExecutionEventと同じ複合FK参照方式。
+  responsibility       Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+
+  /// CORRECTION / RECURRENCE_RESET(coreTypes.ts LIFECYCLE_EVENT_KINDS)。
+  kind                 String    @map("kind")
+  /// REPLACE / REVOKE / SPLIT / MERGE_REQUEST(coreTypes.ts CORRECTION_TYPES)。
+  /// kind=RECURRENCE_RESETの場合は常にnull。
+  correctionType       String?   @map("correction_type")
+  correctionOfEventId  String?   @map("correction_of_event_id")
+  /// [tenant境界二重化] workspaceIdを含む複合FK(参照先はResponsibilityExecutionEventの
+  /// 複合unique[id, workspaceId])。
+  correctionOfEvent    ResponsibilityExecutionEvent? @relation("LifecycleCorrectionOfEvent", fields: [correctionOfEventId, workspaceId], references: [id, workspaceId])
+  resultingEventId     String?   @map("resulting_event_id")
+  resultingEvent       ResponsibilityExecutionEvent? @relation("LifecycleResultingEvent", fields: [resultingEventId, workspaceId], references: [id, workspaceId])
+
+  fromState            String    @map("from_state")
+  toState              String    @map("to_state")
+
+  reason               String?
+  actorType            String    @map("actor_type")
+  actorUserId          String?   @map("actor_user_id")
+
+  /// 同一の訂正対象への重複記録を防ぐ(bulkCompleteUndoDecision.ts参照)。
+  idempotencyKey       String    @map("idempotency_key")
+  /// 同一idempotencyKeyでpayloadが異なる場合の409(IDEMPOTENCY_KEY_REUSED)判定に使う。
+  requestPayloadHash   String    @map("request_payload_hash")
+
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  @@unique([workspaceId, subjectUserId, idempotencyKey], map: "rle_idempotency_uq")
+  @@index([responsibilityId])
+  @@index([correctionOfEventId, workspaceId])
+  @@map("responsibility_lifecycle_events")
 }
 
 model PemHypothesis {

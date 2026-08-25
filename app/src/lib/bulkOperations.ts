@@ -6,6 +6,18 @@ import { transitionsForType, isTypeSpecificTerminalStatus } from "@/lib/responsi
 import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
 import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
 import { projectAndPersistExecutionSessions } from "@/lib/pem/sessionPersistence";
+import { isExecutionLedgerApplicableType } from "@/lib/pem/eventDefinitionRegistry";
+import {
+  buildCompleteUndoIdempotencyKey,
+  buildCompleteUndoRequestPayloadHash,
+  decideCompleteUndoAction,
+  IdempotencyKeyReusedError,
+} from "@/lib/bulkCompleteUndoDecision";
+
+// [2026-08-25是正・db非依存テストとの分離] 実際の判定ロジック(純粋関数、
+// db.ts非依存)はbulkCompleteUndoDecision.tsへ移した。呼び出し元
+// (bulk/undo/route.ts、テストコード)のimport経路の互換性のため、ここから再exportする。
+export { buildCompleteUndoIdempotencyKey, buildCompleteUndoRequestPayloadHash, IdempotencyKeyReusedError };
 
 /**
  * FN-WK-04 一括操作(2026-08-23新設)。
@@ -284,26 +296,170 @@ export async function executeBulkAction(params: {
   }
 }
 
-/** POST /bulk/undo本体。undoペイロードの種類ごとに元へ戻す。 */
-export async function executeUndo(payload: UndoPayload, workspaceId: string): Promise<{ restored: number }> {
-  // [2026-08-25追加・Completion Gate 2] このCOMPLETE取り消しは、スナップショットに
-  // 保存された「任意の過去のstatus」へ直接書き戻す設計であり、Execution Event
-  // Registryの固定toState語彙(例: REOPENは必ずPLANNEDへ)と噛み合わないため、
-  // Execution Ledgerへは未接続のまま(既知のギャップ。想像で新しい語彙を作らない)。
-  if (payload.action === "COMPLETE") {
-    const ids = payload.snapshot.map((s) => s.id);
-    const targets = await fetchTargets(ids, workspaceId);
-    const validIds = new Set(targets.map((t) => t.id));
-    let restored = 0;
-    for (const s of payload.snapshot) {
-      if (!validIds.has(s.id)) continue;
-      await db.responsibility.update({
-        where: { id: s.id },
-        data: { status: s.status, completedAt: s.completedAt ? new Date(s.completedAt) : null, version: { increment: 1 } },
+/**
+ * [2026-08-25新設・Completion Gate 2.1、v4.0 8.1節「Correction」是正]
+ * 従来はスナップショットの任意のstatusへ直接書き戻すだけで、Execution Ledgerの正本
+ * (ResponsibilityExecutionEvent)には一切触れない「無音の改変」だった。これは
+ * v4.0 8.1節が要求する「元Evidenceを更新せず、Correction Eventを追記する」に反する。
+ *
+ * 是正方針(想像で新しい語彙を発明しない):
+ *  - Execution Ledger対象型(TASK/EVENT/CONCERN/HABIT/IDEA)かつ、取消対象のCOMPLETE
+ *    Eventが実際にExecution Ledger上に見つかる場合のみ、既存のREOPEN語彙
+ *    (Registry固定: COMPLETED/NOT_NEEDED→PLANNED)をそのまま再利用してExecution
+ *    Ledgerへ記録する。「元のstatusへ戻す」という従来の挙動は、単一アイテムの
+ *    REOPENアクション(常にPLANNEDへ戻り、元のstatusは復元しない)と挙動を揃える形で
+ *    置き換える。
+ *  - 上記に該当しない場合(COMMITMENT/WAITING/RISK等のExecution Ledger対象外型、
+ *    または対象イベントが見つからない場合)は、従来通りスナップショットのstatusへ
+ *    直接復元する(Execution Ledgerに対応語彙が無いため、これ以上の対応はしない)。
+ *  - ResponsibilityLifecycleEventが記録されるのは、訂正対象の元COMPLETE Eventを
+ *    実際に特定できた場合のみ(「いずれの場合も必ず記録する」わけではない)。
+ *
+ * 冪等性の判定はbulkCompleteUndoDecision.tsのdecideCompleteUndoActionへ分離済み
+ * (既存Lifecycle Eventの有無を必ず現在statusの検査より先に確認する。理由は
+ * decideCompleteUndoActionのコメントを参照)。
+ */
+async function executeCompleteUndo(
+  payload: CompleteUndoPayload,
+  workspaceId: string,
+  userId: string,
+): Promise<{ restored: number }> {
+  const ids = payload.snapshot.map((s) => s.id);
+  const targets = await fetchTargets(ids, workspaceId);
+  const targetById = new Map(targets.map((t) => [t.id, t]));
+  const pemCtx = await buildPemAuthorizationContext(userId, userId);
+
+  let restored = 0;
+  for (const s of payload.snapshot) {
+    const t = targetById.get(s.id);
+    if (!t) continue; // 対象が存在しない(他Workspace混入等。fetchTargetsで既に除外済み)
+
+    const didCount = await db.$transaction(async (tx: Prisma.TransactionClient) => {
+      // Execution Ledger対象型の場合のみ、取消対象の元COMPLETE Eventを探す。
+      // [P0-1是正] このEvent探索・idempotencyKey算出は、現在のstatusに関わらず
+      // 必ず先に行う(status検査はdecideCompleteUndoActionの中でのみ行う)。
+      const originalCompleteEvent = isExecutionLedgerApplicableType(t.type)
+        ? await tx.responsibilityExecutionEvent.findFirst({
+            where: { workspaceId, responsibilityId: t.id, eventType: "COMPLETE" },
+            orderBy: { responsibilitySequence: "desc" },
+            select: { id: true },
+          })
+        : null;
+
+      const requestPayloadHash = buildCompleteUndoRequestPayloadHash({
+        responsibilityId: t.id,
+        snapshotStatus: s.status,
+        snapshotCompletedAt: s.completedAt,
       });
-      restored++;
-    }
-    return { restored };
+      // Execution Ledger対象外型、またはCOMPLETE Eventが見つからない場合(例:
+      // PEM同意未取得により記録自体がスキップされていた)は、取消対象イベントを
+      // 特定できないためidempotencyKeyを発行できない。この場合もUndo機能自体は
+      // 提供するが、Lifecycle Eventとしては記録しない(既知のギャップ)。
+      const undoIdempotencyKey = originalCompleteEvent
+        ? buildCompleteUndoIdempotencyKey(t.id, originalCompleteEvent.id)
+        : null;
+
+      const existingLifecycleEvent = undoIdempotencyKey
+        ? await tx.responsibilityLifecycleEvent.findFirst({
+            where: { workspaceId, subjectUserId: userId, idempotencyKey: undoIdempotencyKey },
+            select: { requestPayloadHash: true },
+          })
+        : null;
+
+      const decision = decideCompleteUndoAction({
+        currentStatus: t.status,
+        existingLifecycleEvent,
+        requestPayloadHash,
+      });
+
+      if (decision.kind === "REPLAY_SUCCESS") {
+        // 同一key・同一payloadの再送: 何もせず、初回と同じ成功として数える。
+        return true;
+      }
+      if (decision.kind === "REJECT_REUSED") {
+        throw new IdempotencyKeyReusedError(
+          "同一の取消対象に対して内容の異なる取消要求が送信されました",
+        );
+      }
+      if (decision.kind === "SKIP_NOT_COMPLETED") {
+        // 取消対象イベントが特定できない(Ledger対象外型等)場合はundoIdempotencyKeyが
+        // nullのため冪等判定自体が働かない。その場合は従来通りCOMPLETED以外を
+        // 単純にスキップする。
+        return false;
+      }
+
+      // decision.kind === "APPLY"
+      const useReopenVocabulary = Boolean(originalCompleteEvent);
+      const nextStatus = useReopenVocabulary ? "PLANNED" : s.status;
+      const nextCompletedAt = nextStatus === "PLANNED" ? null : s.completedAt ? new Date(s.completedAt) : null;
+
+      const updateResult = await tx.responsibility.updateMany({
+        where: { id: t.id, version: t.version },
+        data: { status: nextStatus, completedAt: nextCompletedAt, updatedById: userId, version: { increment: 1 } },
+      });
+      // 楽観ロック競合(取消の直前に他操作でversionが進んでいた): このidはスキップする。
+      if (updateResult.count === 0) return false;
+
+      let resultingEventId: string | null = null;
+      if (useReopenVocabulary) {
+        const reopenEvent = await recordExecutionLedgerEvent({
+          tx,
+          ctx: pemCtx,
+          responsibilityId: t.id,
+          responsibilityType: t.type,
+          action: "REOPEN",
+          fromState: "COMPLETED",
+          toState: "PLANNED",
+          versionBefore: t.version,
+          versionAfter: t.version + 1,
+          clientOccurredAt: new Date(),
+          actorType: "USER",
+          source: "WEB",
+          requestId: randomUUID(),
+          requestPayloadHash,
+          reason: "一括完了の取消(Undo)",
+        });
+        resultingEventId = reopenEvent?.id ?? null;
+        if (reopenEvent) {
+          await projectAndPersistExecutionSessions(tx, pemCtx, t.id);
+        }
+      }
+
+      if (undoIdempotencyKey && originalCompleteEvent) {
+        await tx.responsibilityLifecycleEvent.create({
+          data: {
+            workspaceId,
+            subjectUserId: userId,
+            responsibilityId: t.id,
+            kind: "CORRECTION",
+            correctionType: "REVOKE",
+            correctionOfEventId: originalCompleteEvent.id,
+            resultingEventId,
+            fromState: "COMPLETED",
+            toState: nextStatus,
+            reason: "一括完了の取消(Undo)",
+            actorType: "USER",
+            actorUserId: userId,
+            idempotencyKey: undoIdempotencyKey,
+            requestPayloadHash,
+          },
+        });
+      }
+      return true;
+    });
+    if (didCount) restored++;
+  }
+  return { restored };
+}
+
+/** POST /bulk/undo本体。undoペイロードの種類ごとに元へ戻す。 */
+export async function executeUndo(
+  payload: UndoPayload,
+  workspaceId: string,
+  userId: string,
+): Promise<{ restored: number }> {
+  if (payload.action === "COMPLETE") {
+    return executeCompleteUndo(payload, workspaceId, userId);
   }
   if (payload.action === "DELETE") {
     const targets = await fetchTargets(payload.ids, workspaceId);

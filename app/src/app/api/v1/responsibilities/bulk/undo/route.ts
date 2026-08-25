@@ -4,7 +4,7 @@ import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
-import { executeUndo, type UndoPayload } from "@/lib/bulkOperations";
+import { executeUndo, IdempotencyKeyReusedError, type UndoPayload } from "@/lib/bulkOperations";
 
 /**
  * API-RESP-06付随: POST /responsibilities/bulk/undo(2026-08-23新設)。
@@ -50,8 +50,17 @@ export async function POST(req: NextRequest) {
   }
 
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
-  const result = await executeUndo(parsed.data as UndoPayload, workspaceId);
-  debugServer.event("POST /responsibilities/bulk/undo", "取り消し完了", { restored: result.restored });
-
-  return apiOk(result);
+  // [2026-08-25改訂・Completion Gate 2.1] executeUndoがCOMPLETE取消時にExecution
+  // Ledger/ResponsibilityLifecycleEventを記録するようになったため、記録の主体
+  // (userId)を渡す必要がある。
+  try {
+    const result = await executeUndo(parsed.data as UndoPayload, workspaceId, auth.user.userId);
+    debugServer.event("POST /responsibilities/bulk/undo", "取り消し完了", { restored: result.restored });
+    return apiOk(result);
+  } catch (err) {
+    if (err instanceof IdempotencyKeyReusedError) {
+      return apiError("IDEMPOTENCY_KEY_REUSED", err.message);
+    }
+    throw err;
+  }
 }

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import type { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
 import { initialStatusFor, isTypeSpecificTerminalStatus } from "@/lib/responsibility";
@@ -164,7 +166,16 @@ export async function generateRecurrences(now: Date = new Date()): Promise<{
 
     const responsibility = await db.responsibility.findFirst({
       where: { id: r.responsibilityId, deletedAt: null },
-      select: { id: true, type: true, status: true, completedAt: true, version: true, workspaceId: true, title: true },
+      select: {
+        id: true,
+        type: true,
+        status: true,
+        completedAt: true,
+        version: true,
+        workspaceId: true,
+        title: true,
+        createdById: true,
+      },
     });
     if (!responsibility) continue; // 責任自体が削除済み(想定外だがスキップして継続)
 
@@ -175,7 +186,14 @@ export async function generateRecurrences(now: Date = new Date()): Promise<{
 
     if (!isOpen) {
       // 前回インスタンスは完了済み → 通常どおり次サイクルへリセットする。
-      await resetForNextCycle(responsibility.id, responsibility.type, responsibility.version, nextOccurrence);
+      await resetForNextCycle(
+        responsibility.id,
+        responsibility.workspaceId,
+        responsibility.createdById,
+        responsibility.type,
+        responsibility.status,
+        nextOccurrence,
+      );
       await db.recurrenceRule.update({ where: { id: r.id }, data: { lastGeneratedAt: nextOccurrence } });
       await logGenerated(responsibility.id, responsibility.workspaceId, "RESET");
       reset++;
@@ -189,7 +207,14 @@ export async function generateRecurrences(now: Date = new Date()): Promise<{
       carried++;
     } else if (r.carryoverPolicy === "DROP") {
       // 破棄: 未完了だった分を打ち切り、次サイクルへリセットする。
-      await resetForNextCycle(responsibility.id, responsibility.type, responsibility.version, nextOccurrence);
+      await resetForNextCycle(
+        responsibility.id,
+        responsibility.workspaceId,
+        responsibility.createdById,
+        responsibility.type,
+        responsibility.status,
+        nextOccurrence,
+      );
       await db.recurrenceRule.update({ where: { id: r.id }, data: { lastGeneratedAt: nextOccurrence } });
       await logGenerated(responsibility.id, responsibility.workspaceId, "DROP_AND_RESET");
       dropped++;
@@ -228,21 +253,59 @@ export async function generateRecurrences(now: Date = new Date()): Promise<{
 // サイクルの自動処理であり、Execution Event RegistryのREOPENはallowedActors=
 // ["USER"]のみを許可する(本人操作限定)。「定期サイクルのリセットは本人操作としての
 // REOPENと同じ意味を持つか」は設計判断が必要なため、想像で許可actorを拡張せず、
-// 既知のギャップとしてExecution Ledger未接続のまま残す。
+// Execution Ledger(ResponsibilityExecutionEvent)には接続しないままとする。
+// [2026-08-25是正・Completion Gate 2.1] ただし「状態が変わった事実そのものが
+// どこにも記録されない」ことは別問題であり是正が必要(v4.0のinsert-only原則)。
+// Execution Ledgerとは別の ResponsibilityLifecycleEvent(kind=RECURRENCE_RESET)へ、
+// SYSTEM actorとして記録する。
 async function resetForNextCycle(
   responsibilityId: string,
+  workspaceId: string,
+  subjectUserId: string,
   type: string,
-  version: number,
+  fromStatus: string,
   nextOccurrence: Date,
 ): Promise<void> {
-  await db.responsibility.update({
-    where: { id: responsibilityId },
-    data: {
-      status: initialStatusFor(type),
-      completedAt: null,
-      targetAt: nextOccurrence,
-      version: { increment: 1 },
-    },
+  const toStatus = initialStatusFor(type);
+  const requestPayloadHash = createHash("sha256")
+    .update(JSON.stringify({ action: "RECURRENCE_RESET", responsibilityId, nextOccurrence: nextOccurrence.toISOString() }))
+    .digest("hex");
+  const idempotencyKey = `${responsibilityId}:RECURRENCE_RESET:${nextOccurrence.toISOString()}`;
+
+  await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    const existing = await tx.responsibilityLifecycleEvent.findFirst({
+      where: { workspaceId, subjectUserId, idempotencyKey },
+      select: { id: true },
+    });
+    if (existing) return;
+
+    await tx.responsibility.update({
+      where: { id: responsibilityId },
+      data: {
+        status: toStatus,
+        completedAt: null,
+        targetAt: nextOccurrence,
+        version: { increment: 1 },
+      },
+    });
+    await tx.responsibilityLifecycleEvent.create({
+      data: {
+        workspaceId,
+        subjectUserId,
+        responsibilityId,
+        kind: "RECURRENCE_RESET",
+        correctionType: null,
+        correctionOfEventId: null,
+        resultingEventId: null,
+        fromState: fromStatus,
+        toState: toStatus,
+        reason: "定期責任サイクルの自動リセット",
+        actorType: "SYSTEM",
+        actorUserId: null,
+        idempotencyKey,
+        requestPayloadHash,
+      },
+    });
   });
 }
 
