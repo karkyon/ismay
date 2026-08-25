@@ -28,15 +28,18 @@ export function buildCompleteUndoIdempotencyKey(responsibilityId: string, correc
 }
 
 /**
- * [Completion Gate 2.1・外部監査P0-2是正]
+ * [Completion Gate 2.1・外部監査P0-2是正、再評価対応で拡張]
  * 冪等判定用のrequestPayloadHash。当初はsnapshotStatusのみをhash対象としており、
  * completedAtだけが異なる別内容のUndo要求を「同一payload」と誤判定していた。
- * Undoが実際に書き戻す値(status・completedAt)を全てhash対象に含める。
+ * さらに[外部監査再評価]、どのCOMPLETE Eventを取消対象にしているか
+ * (completeEventId)もhash対象へ含める。これが無いと、同一のstatus/completedAtだが
+ * 異なるcompleteEventIdを指す2つの要求が「同一payload」と誤判定されうる。
  */
 export function buildCompleteUndoRequestPayloadHash(params: {
   responsibilityId: string;
   snapshotStatus: string;
   snapshotCompletedAt: string | null;
+  snapshotCompleteEventId: string | null;
 }): string {
   return createHash("sha256")
     .update(
@@ -45,6 +48,7 @@ export function buildCompleteUndoRequestPayloadHash(params: {
         id: params.responsibilityId,
         snapshotStatus: params.snapshotStatus,
         snapshotCompletedAt: params.snapshotCompletedAt,
+        snapshotCompleteEventId: params.snapshotCompleteEventId,
       }),
     )
     .digest("hex");
@@ -99,6 +103,25 @@ export function decideCompleteUndoAction(params: {
  * 投げるに留め、実際のHTTP 409応答への変換はbulk/undo/route.ts側で行う。
  */
 export class IdempotencyKeyReusedError extends Error {}
+
+/**
+ * [外部監査再評価・Gate阻害是正の核心をテスト可能な形で分離]
+ * COMPLETE取消で書き戻すstatusの決定ロジック。Execution Ledger対象型
+ * (ledgerApplicable)であれば、取消対象のCOMPLETE Eventを実際に特定できたか
+ * どうかに関わらず、常にPLANNEDへ固定する(単一アイテムのREOPENアクションと同じ
+ * 意味論)。対象外型のみ、クライアントが返したstatusをそのまま使う。
+ *
+ * [経緯] 当初はこの決定を「Eventを特定できたか」に連動させており、
+ * completeEventIdを省略/nullで送るだけで、Execution Ledger対象型であっても
+ * 任意のstatusを直接書き込め、v4.0が要求する「COMPLETED→REOPEN→PLANNED」という
+ * 許可遷移を迂回できてしまっていた(外部監査で指摘、Gate阻害と判定)。
+ */
+export function decideCompleteUndoNextStatus(params: {
+  ledgerApplicable: boolean;
+  clientSnapshotStatus: string;
+}): string {
+  return params.ledgerApplicable ? "PLANNED" : params.clientSnapshotStatus;
+}
 
 /**
  * [2026-08-25新設・外部監査P1-3是正] snapshot内のid重複を除去する(先勝ち)。

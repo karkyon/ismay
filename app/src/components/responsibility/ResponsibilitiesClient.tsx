@@ -466,11 +466,22 @@ export function ResponsibilitiesClient() {
   async function undoBulkAction() {
     if (!bulkUndo) return;
     setBulkBusy(true);
+    setBulkError("");
     try {
-      await apiFetch("/api/v1/responsibilities/bulk/undo", {
+      const res = await apiFetch("/api/v1/responsibilities/bulk/undo", {
         method: "POST",
         body: JSON.stringify(bulkUndo.undo),
       });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        // [2026-08-25是正・外部監査再評価対応] 従来はres.okを確認せず、失敗時
+        // (409 IDEMPOTENCY_KEY_REUSED、400 VALIDATION_FAILED等)もbulkUndoを
+        // 消してUIから取消操作自体を隠してしまい、ユーザーへ失敗理由が一切
+        // 伝わらなかった。失敗時はbulkUndoを保持し(再試行や状況確認ができるよう)、
+        // runBulkActionと同じ形でエラーメッセージを表示する。
+        setBulkError(body?.error?.message ?? "取り消しに失敗しました");
+        return;
+      }
       setBulkUndo(null);
       await loadList();
     } finally {
@@ -1119,7 +1130,7 @@ export function ResponsibilitiesClient() {
       )}
 
       {bulkUndo && (
-        <div className="mb-4 bg-canvas border border-line rounded-xl px-4 py-2.5 flex items-center gap-3 text-sm">
+        <div className="mb-4 bg-canvas border border-line rounded-xl px-4 py-2.5 flex flex-wrap items-center gap-3 text-sm">
           <span className="text-ink">{bulkUndo.label}を実行しました</span>
           <button onClick={undoBulkAction} disabled={bulkBusy} className="text-brand-700 font-medium hover:underline ml-auto">
             元に戻す
@@ -1127,6 +1138,10 @@ export function ResponsibilitiesClient() {
           <button onClick={() => setBulkUndo(null)} className="text-faint hover:text-ink">
             ✕
           </button>
+          {/* [2026-08-25追加・外部監査再評価対応] selectionModeは既に終了している
+              (runBulkActionがexitSelectionMode()を呼ぶ)ため、undoBulkActionの
+              失敗理由はここに表示しないとユーザーに一切伝わらない。 */}
+          {bulkError && <p className="w-full text-xs text-red-600">{bulkError}</p>}
         </div>
       )}
 

@@ -32,6 +32,7 @@ import {
   buildCompleteUndoIdempotencyKey,
   buildCompleteUndoRequestPayloadHash,
   decideCompleteUndoAction,
+  decideCompleteUndoNextStatus,
   dedupeSnapshotById,
   validateSnapshotStatuses,
   IdempotencyKeyReusedError,
@@ -81,19 +82,42 @@ check(
       responsibilityId: "resp-1",
       snapshotStatus: "IN_PROGRESS",
       snapshotCompletedAt: "2026-08-01T00:00:00.000Z",
+      snapshotCompleteEventId: "event-1",
     });
     const hashB = buildCompleteUndoRequestPayloadHash({
       responsibilityId: "resp-1",
       snapshotStatus: "IN_PROGRESS",
       snapshotCompletedAt: "2026-08-02T00:00:00.000Z",
+      snapshotCompleteEventId: "event-1",
     });
     const hashA2 = buildCompleteUndoRequestPayloadHash({
       responsibilityId: "resp-1",
       snapshotStatus: "IN_PROGRESS",
       snapshotCompletedAt: "2026-08-01T00:00:00.000Z",
+      snapshotCompleteEventId: "event-1",
     });
     assert.notEqual(hashA, hashB, "completedAtが異なれば別hashになる");
     assert.equal(hashA, hashA2, "同一入力からは同一hashが決定論的に生成される");
+  },
+);
+
+check(
+  "buildCompleteUndoRequestPayloadHash【外部監査再評価対応】: completeEventIdの差分も" +
+    "検出する(status/completedAtが同じでも取消対象Eventが異なれば別hashになる必要がある)",
+  () => {
+    const hashA = buildCompleteUndoRequestPayloadHash({
+      responsibilityId: "resp-1",
+      snapshotStatus: "COMPLETED",
+      snapshotCompletedAt: null,
+      snapshotCompleteEventId: "event-1",
+    });
+    const hashB = buildCompleteUndoRequestPayloadHash({
+      responsibilityId: "resp-1",
+      snapshotStatus: "COMPLETED",
+      snapshotCompletedAt: null,
+      snapshotCompleteEventId: "event-2",
+    });
+    assert.notEqual(hashA, hashB, "completeEventIdが異なれば別hashになる");
   },
 );
 
@@ -206,6 +230,30 @@ check(
     assert.throws(
       () => validateSnapshotStatuses([{ id: "resp-1", status: "IN_PROGRESS" }], typeById),
       InvalidUndoSnapshotError,
+    );
+  },
+);
+
+check(
+  "decideCompleteUndoNextStatus【外部監査再評価・Gate阻害是正の回帰防止】: " +
+    "Execution Ledger対象型では、クライアントが何を送ってきても常にPLANNEDに" +
+    "固定される(completeEventId省略時に任意statusへ直接書き込めてしまい" +
+    "COMPLETED→REOPEN→PLANNEDの許可遷移を迂回できた問題の是正)",
+  () => {
+    assert.equal(
+      decideCompleteUndoNextStatus({ ledgerApplicable: true, clientSnapshotStatus: "IN_PROGRESS" }),
+      "PLANNED",
+      "クライアントがIN_PROGRESSを送ってきてもPLANNEDに固定される",
+    );
+    assert.equal(
+      decideCompleteUndoNextStatus({ ledgerApplicable: true, clientSnapshotStatus: "ANYTHING_MALICIOUS" }),
+      "PLANNED",
+      "不正な値を送ってきてもPLANNEDに固定される(ledgerApplicableな限りclientSnapshotStatusは無視される)",
+    );
+    assert.equal(
+      decideCompleteUndoNextStatus({ ledgerApplicable: false, clientSnapshotStatus: "ACTIVE" }),
+      "ACTIVE",
+      "Execution Ledger対象外型(COMMITMENT等)は従来通りクライアント供給値を使う",
     );
   },
 );

@@ -11,6 +11,7 @@ import {
   buildCompleteUndoIdempotencyKey,
   buildCompleteUndoRequestPayloadHash,
   decideCompleteUndoAction,
+  decideCompleteUndoNextStatus,
   dedupeSnapshotById,
   validateSnapshotStatuses,
   IdempotencyKeyReusedError,
@@ -422,35 +423,78 @@ async function executeCompleteUndo(
 
   const pemCtx = await buildPemAuthorizationContext(userId, userId);
 
-  // [P1-2是正] バッチ全体を1つのトランザクションに統一する。途中でエラーが
-  // 投げられれば(IdempotencyKeyReusedError等)、バッチ全体がロールバックされ、
-  // 「前半だけUndo済み」という部分適用が起こらない。
-  const restored = await db.$transaction(async (tx: Prisma.TransactionClient) => {
+  // [P1-2是正、外部監査再評価「200件バッチのtransaction timeoutリスク」対応]
+  // バッチ全体を1つのトランザクションに統一する。途中でエラーが投げられれば
+  // (IdempotencyKeyReusedError等)、バッチ全体がロールバックされ、「前半だけ
+  // Undo済み」という部分適用が起こらない。要求数が多いとPrismaの既定interactive
+  // transactionタイムアウト(5秒)に達する恐れがあるため、30秒へ緩和する応急対応も
+  // 行う。200件規模での実測(所要時間・タイムアウト有無)はまだ実施できていない
+  // 既知の残課題であり、omega-dev2上での実測が必要(想像で「これで十分」と断定しない)。
+  const restored = await db.$transaction(
+    async (tx: Prisma.TransactionClient) => {
     let count = 0;
     for (const s of snapshot) {
       const t = targetById.get(s.id);
       if (!t) continue; // 対象が存在しない(他Workspace混入等。fetchTargetsで既に除外済み)
 
-      // [P1-1是正] 「最新のCOMPLETE Eventを検索する」のではなく、bulkComplete時に
-      // 固定されたcompleteEventIdを検証して使う。旧形式(completeEventId未設定)の
-      // 場合は、不確かな推測をせず「対象イベント無し」として扱う。
-      const originalCompleteEvent =
-        isExecutionLedgerApplicableType(t.type) && s.completeEventId
-          ? await tx.responsibilityExecutionEvent.findFirst({
-              where: {
-                id: s.completeEventId,
-                workspaceId,
-                responsibilityId: t.id,
-                eventType: "COMPLETE",
-              },
-              select: { id: true },
-            })
-          : null;
+      // [外部監査再評価・Gate阻害是正] 「最新のCOMPLETE Eventを検索する」のではなく、
+      // bulkComplete時に固定されたcompleteEventIdを検証して使う。
+      //
+      // completeEventIdが明示的に指定されている場合は、それが実在し・このresponsibility・
+      // このworkspace・このuserId(subjectUserId)・現在のversionに厳密に一致することを
+      // 要求する(以前はworkspaceId/responsibilityId/eventTypeのみの緩い一致だった)。
+      // 一致しなければ「対象イベント無し」として静かに単純復元へ倒すのではなく、
+      // InvalidUndoSnapshotErrorでバッチ全体を拒否する(値の不整合を握り潰さない)。
+      //
+      // completeEventId自体が未指定(旧形式クライアント等)の場合のみ、
+      // 「対象イベント無し」の後方互換パスとして扱う(originalCompleteEvent=null)。
+      let originalCompleteEvent: { id: string } | null = null;
+      if (s.completeEventId) {
+        originalCompleteEvent = await tx.responsibilityExecutionEvent.findFirst({
+          where: {
+            id: s.completeEventId,
+            workspaceId,
+            responsibilityId: t.id,
+            eventType: "COMPLETE",
+            subjectUserId: userId,
+            responsibilityVersionAfter: t.version,
+          },
+          select: { id: true },
+        });
+        if (!originalCompleteEvent) {
+          throw new InvalidUndoSnapshotError(
+            `id=${t.id}: completeEventId "${s.completeEventId}" に一致するCOMPLETE Eventが` +
+              `見つかりません(workspace/responsibility/actor/versionのいずれかが不一致です)`,
+          );
+        }
+      }
+
+      // [外部監査再評価・Gate阻害是正の核心]
+      // 従来は`useReopenVocabulary = Boolean(originalCompleteEvent)`とし、これが
+      // そのままnextStatusの決定(PLANNEDへ固定するか、クライアント供給のs.statusを
+      // そのまま書き込むか)にも使われていた。このため、completeEventIdを省略/nullで
+      // 送るだけで、Execution Ledger対象型(TASK等)であっても「クライアントが指定した
+      // 任意のstatus」を直接書き込めてしまい、v4.0が要求する
+      // 「COMPLETED→REOPEN→PLANNED」という許可遷移を迂回できた(重大な指摘)。
+      //
+      // 是正: nextStatusの決定を「Execution Ledgerへ記録できるか」から完全に分離する。
+      // Execution Ledger対象型(ledgerApplicable)であれば、Eventを特定できるか否かに
+      // 関わらず、常にPLANNEDへ固定する(単一アイテムのREOPENアクションと同じ意味論)。
+      // Eventを特定できた場合のみ、追加でExecution Ledger/Lifecycle Eventへ記録する。
+      const ledgerApplicable = isExecutionLedgerApplicableType(t.type);
+      const canRecordReopen = ledgerApplicable && Boolean(originalCompleteEvent);
+      const nextStatus = decideCompleteUndoNextStatus({
+        ledgerApplicable,
+        clientSnapshotStatus: s.status,
+      });
+      const nextCompletedAt = nextStatus === "PLANNED" ? null : s.completedAt ? new Date(s.completedAt) : null;
 
       const requestPayloadHash = buildCompleteUndoRequestPayloadHash({
         responsibilityId: t.id,
         snapshotStatus: s.status,
         snapshotCompletedAt: s.completedAt,
+        // [外部監査再評価対応] 取消対象イベントをhash対象へ含める。
+        snapshotCompleteEventId: s.completeEventId ?? null,
       });
       const undoIdempotencyKey = originalCompleteEvent
         ? buildCompleteUndoIdempotencyKey(t.id, originalCompleteEvent.id)
@@ -484,9 +528,7 @@ async function executeCompleteUndo(
       }
 
       // decision.kind === "APPLY"
-      const useReopenVocabulary = Boolean(originalCompleteEvent);
-      const nextStatus = useReopenVocabulary ? "PLANNED" : s.status;
-      const nextCompletedAt = nextStatus === "PLANNED" ? null : s.completedAt ? new Date(s.completedAt) : null;
+      // (nextStatus/nextCompletedAt/canRecordReopenは上で既に算出済み)
 
       const updateResult = await tx.responsibility.updateMany({
         where: { id: t.id, version: t.version },
@@ -521,7 +563,7 @@ async function executeCompleteUndo(
       });
 
       let resultingEventId: string | null = null;
-      if (useReopenVocabulary) {
+      if (canRecordReopen) {
         const reopenEvent = await recordExecutionLedgerEvent({
           tx,
           ctx: pemCtx,
@@ -570,7 +612,9 @@ async function executeCompleteUndo(
       count++;
     }
     return count;
-  });
+    },
+    { timeout: 30000 },
+  );
 
   return { restored };
 }
