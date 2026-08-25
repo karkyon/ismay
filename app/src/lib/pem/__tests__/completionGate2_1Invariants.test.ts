@@ -27,11 +27,15 @@ import assert from "node:assert/strict";
 import { apiError } from "@/lib/auth/response";
 import { CORRECTION_TYPES, LIFECYCLE_EVENT_KINDS } from "@/lib/pem/coreTypes";
 import { isExecutionLedgerApplicableType } from "@/lib/pem/eventDefinitionRegistry";
+import { isValidStatusForType } from "@/lib/responsibility";
 import {
   buildCompleteUndoIdempotencyKey,
   buildCompleteUndoRequestPayloadHash,
   decideCompleteUndoAction,
+  dedupeSnapshotById,
+  validateSnapshotStatuses,
   IdempotencyKeyReusedError,
+  InvalidUndoSnapshotError,
 } from "@/lib/bulkCompleteUndoDecision";
 
 let passed = 0;
@@ -172,6 +176,48 @@ check(
     assert.equal(isExecutionLedgerApplicableType("DECISION"), false);
     assert.equal(isExecutionLedgerApplicableType("WAITING"), false);
     assert.equal(isExecutionLedgerApplicableType("RISK"), false);
+  },
+);
+
+check(
+  "dedupeSnapshotById【外部監査P1-3是正】: id重複を先勝ちで除去し、restored件数の" +
+    "水増しを防ぐ",
+  () => {
+    const input: { id: string; v: number }[] = [
+      { id: "a", v: 1 },
+      { id: "b", v: 2 },
+      { id: "a", v: 3 }, // 重複(2件目)
+    ];
+    const result = dedupeSnapshotById(input);
+    assert.equal(result.length, 2);
+    assert.deepEqual(result.map((r) => r.id).sort(), ["a", "b"]);
+    assert.equal(result.find((r) => r.id === "a")?.v, 1, "先勝ち(最初の値)を採用する");
+  },
+);
+
+check(
+  "validateSnapshotStatuses【外部監査P1-5是正】: 不正statusはInvalidUndoSnapshotErrorで" +
+    "バッチ全体を拒否する(部分適用を避けるため事前検証とする)",
+  () => {
+    const typeById = new Map([["resp-1", "COMMITMENT"]]);
+    assert.doesNotThrow(() =>
+      validateSnapshotStatuses([{ id: "resp-1", status: "ACTIVE" }], typeById),
+    );
+    assert.throws(
+      () => validateSnapshotStatuses([{ id: "resp-1", status: "IN_PROGRESS" }], typeById),
+      InvalidUndoSnapshotError,
+    );
+  },
+);
+
+check("isValidStatusForType【外部監査P1-5是正】: 共通状態型と種別固有型それぞれで" +
+    "定義済みの値のみ有効と判定する(用語・状態・コード定義書v1.1 3章)",
+  () => {
+    assert.equal(isValidStatusForType("TASK", "IN_PROGRESS"), true);
+    assert.equal(isValidStatusForType("TASK", "ACTIVE"), false, "ACTIVEはCOMMITMENT用でTASKには無い");
+    assert.equal(isValidStatusForType("COMMITMENT", "ACTIVE"), true);
+    assert.equal(isValidStatusForType("COMMITMENT", "IN_PROGRESS"), false, "IN_PROGRESSは共通状態型用でCOMMITMENTには無い");
+    assert.equal(isValidStatusForType("COMMITMENT", "not_a_real_status"), false);
   },
 );
 

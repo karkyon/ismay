@@ -16,6 +16,7 @@
  * このファイルへ分離することで是正する。
  */
 import { createHash } from "node:crypto";
+import { isValidStatusForType } from "@/lib/responsibility";
 
 /**
  * [Completion Gate 2.1] COMPLETE取消のidempotencyKey。
@@ -98,3 +99,42 @@ export function decideCompleteUndoAction(params: {
  * 投げるに留め、実際のHTTP 409応答への変換はbulk/undo/route.ts側で行う。
  */
 export class IdempotencyKeyReusedError extends Error {}
+
+/**
+ * [2026-08-25新設・外部監査P1-3是正] snapshot内のid重複を除去する(先勝ち)。
+ * 重複を許すと、2件目以降が「同一key・同一payloadの冪等再送」として扱われ、
+ * restored件数が水増しされ得た。bulkOperations.ts executeCompleteUndoの
+ * トランザクション開始前に呼ぶ。
+ */
+export function dedupeSnapshotById<T extends { id: string }>(snapshot: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const s of snapshot) {
+    if (seen.has(s.id)) continue;
+    seen.add(s.id);
+    result.push(s);
+  }
+  return result;
+}
+
+/**
+ * [2026-08-25新設・外部監査P1-5是正] Undo要求に含まれるstatusが、対象の実際の型に
+ * とって有効な値かを検証する。用語・状態・コード定義書v1.1 3章が定義する値集合を
+ * そのまま使う(想像で新しい値集合を作らない)。
+ */
+export class InvalidUndoSnapshotError extends Error {}
+
+export function validateSnapshotStatuses(
+  snapshot: readonly { id: string; status: string }[],
+  typeById: ReadonlyMap<string, string>,
+): void {
+  for (const s of snapshot) {
+    const type = typeById.get(s.id);
+    if (!type) continue; // 対象がこのWorkspaceに存在しない場合は後段の処理で無視される
+    if (!isValidStatusForType(type, s.status)) {
+      throw new InvalidUndoSnapshotError(
+        `id=${s.id}: status "${s.status}" は種別 "${type}" にとって不正な値です`,
+      );
+    }
+  }
+}

@@ -42,6 +42,24 @@ export function isCommonStatusType(type: string): boolean {
   return (COMMON_STATUS_TYPES as readonly string[]).includes(type);
 }
 
+/**
+ * [2026-08-25新設・外部監査P1是正] 指定statusがその責任種別で有効な値かを検証する。
+ * 出典: 用語・状態・コード定義書v1.1 3章(COMMON_STATUS/TYPE_SPECIFIC_STATUS)。
+ *
+ * bulkOperations.ts executeCompleteUndoが、種別固有型(COMMITMENT等、Execution
+ * Ledger対象外)についてクライアントから受け取ったsnapshot.statusを検証無しで
+ * 直接DBへ書き戻していた問題の是正に使う。「型として定義されている値集合」以外を
+ * 許可しない、という既存のTYPE_SPECIFIC_STATUS定義をそのまま検証に転用するだけであり、
+ * 新しい値集合を想像で作らない。
+ */
+export function isValidStatusForType(type: string, status: string): boolean {
+  if (isCommonStatusType(type)) {
+    return (COMMON_STATUS as readonly string[]).includes(status);
+  }
+  const allowed = TYPE_SPECIFIC_STATUS[type as ResponsibilityType];
+  return allowed ? (allowed as readonly string[]).includes(status) : false;
+}
+
 /** 作成時の初期状態。 */
 export function initialStatusFor(type: string): string {
   switch (type) {
