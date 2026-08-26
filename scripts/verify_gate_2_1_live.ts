@@ -34,6 +34,10 @@
  *       同一receiptId再送でrestored:1を返すこと(冪等性未達の是正確認)
  *   15. Undo Receipt方式の核心確認3: PEM未同意時に完了したTASKでも
  *       同一receiptId再送でrestored:1を返すこと
+ *   16. 世代確認: 古い未使用レシートで後続の別完了サイクルを誤って取り消せない
+ *       こと(外部監査P0-1是正確認)
+ *   17. 競合制御: 同一receiptIdへの同時Undo要求が全て同一の成功結果を返すこと
+ *       (外部監査P0-2是正確認)
  *
  * 前提: このスクリプトはapp/ディレクトリの.env(DATABASE_URL)とlib/dbを
  * そのまま使うため、`~/projects/ismay/app`直下から実行すること。
@@ -581,16 +585,26 @@ async function main(): Promise<void> {
     // =====================================================================
     // 9. バッチ内の1件が不正receiptIdのとき、他方もロールバックされる(原子性)
     // =====================================================================
+    // [2026-08-26改訂・外部監査P1-2是正]
+    // bulkOperations.ts側でバッチ内の処理順序をreceiptId昇順に固定した
+    // (デッドロック防止のため)。当初この試験は不正receiptIdに
+    // "00000000-..."(数値的に極小、ほぼ必ず先頭にソートされる)を使っており、
+    // 「Bが一度も処理されないまま即座に例外になる」ため、実際にはロール
+    // バックの証明になっていなかった(外部監査で指摘)。是正: 不正receiptIdを
+    // "ffffffff-..."(数値的に極大、ほぼ必ず末尾にソートされる)に変更し、
+    // Bが先に実際に処理(状態変更・Consumption作成等)された後にAの処理で
+    // 例外が起き、その結果Bの変更も含めてロールバックされることを検証する。
     {
       const a = await createTaskAndComplete(jar, "Gate2.1検証(9): バッチ原子性 A");
       const b = await createTaskAndComplete(jar, "Gate2.1検証(9): バッチ原子性 B");
       createdResponsibilityIds.push(a.responsibilityId, b.responsibilityId);
+      const bReceiptId = b.undo.snapshot[0].receiptId;
 
       const mixedUndo = {
         action: "COMPLETE",
         snapshot: [
-          { id: a.responsibilityId, receiptId: "00000000-0000-4000-8000-000000000001" }, // 不正
-          b.undo.snapshot[0], // 正当
+          { id: a.responsibilityId, receiptId: "ffffffff-ffff-4fff-8fff-ffffffffffff" }, // 不正・昇順で必ず最後
+          b.undo.snapshot[0], // 正当・昇順で必ず先に処理される
         ],
       };
       const mixedRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", mixedUndo);
@@ -601,11 +615,26 @@ async function main(): Promise<void> {
       );
       const bAfter = await db.responsibility.findUnique({ where: { id: b.responsibilityId } });
       ok(
-        "9. 混在バッチ拒否後: Bの状態が変化していない(部分適用されていない)" +
-          "(Bは元々COMPLETEDのままのはず)",
+        "9. 混在バッチ拒否後【原子性の実証】: Bの状態が変化していない" +
+          "(Bは元々COMPLETEDのままのはず。receiptId昇順処理によりBが先に実際に" +
+          "処理された後、Aの失敗でロールバックされたことの確認)",
         bAfter?.status === "COMPLETED",
         `actual=${bAfter?.status}`,
       );
+      const bConsumption = await db.bulkCompleteUndoConsumption.findUnique({ where: { receiptId: bReceiptId } });
+      ok("9. 混在バッチ拒否後: Bの冪等記録も残っていない", bConsumption === null);
+      const bLifecycleEvents = await db.responsibilityLifecycleEvent.findMany({
+        where: { responsibilityId: b.responsibilityId },
+      });
+      ok("9. 混在バッチ拒否後: BのLifecycle Eventも残っていない", bLifecycleEvents.length === 0);
+      const bEventLogs = await db.eventLog.findMany({
+        where: { aggregateId: b.responsibilityId, eventType: "STATUS_CHANGED" },
+      });
+      ok("9. 混在バッチ拒否後: BのSTATUS_CHANGED EventLogも残っていない", bEventLogs.length === 0);
+      const bOutboxEvents = await db.outboxEvent.findMany({
+        where: { aggregateId: b.responsibilityId, eventName: "ResponsibilityTransitioned.v1" },
+      });
+      ok("9. 混在バッチ拒否後: BのOutboxEventも残っていない", bOutboxEvents.length === 0);
       // 後始末: Bを正しくUndoしておく。
       await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", b.undo);
     }
@@ -766,6 +795,118 @@ async function main(): Promise<void> {
         action: "GRANTED",
         source: "SETTINGS",
       });
+    }
+
+    // =====================================================================
+    // 16. Undo Receipt方式の世代確認: 古い未使用レシートで、後続の別完了
+    //     サイクルを誤って取り消せないこと
+    // =====================================================================
+    // [2026-08-26追加・外部監査P0-1是正の確認]
+    // シナリオ: 1)完了→Receipt A発行 2)個別REOPEN 3)再START 4)もう一度完了→
+    // Receipt B発行 5)古い未使用のReceipt AでUndoを試みる。是正前は、
+    // 現在statusがReceipt Bの完了により再びCOMPLETEDになっているため、
+    // status一致だけで判定するとReceipt Aが誤って「有効」と判定され、
+    // 無関係なReceipt Bの完了を取り消してしまっていた
+    // (Responsibility状態とCorrection履歴が不整合になる)。
+    {
+      const task = await createTaskAndComplete(jar, "Gate2.1検証(16): 世代確認");
+      createdResponsibilityIds.push(task.responsibilityId);
+      const receiptA = task.undo.snapshot[0].receiptId;
+
+      // 個別REOPEN(単一アイテムのtransitions API)。
+      const currentRow1 = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
+      const reopenRes = await api(jar, "POST", `/api/v1/responsibilities/${task.responsibilityId}/transitions`, {
+        action: "REOPEN",
+        occurredAt: new Date().toISOString(),
+        version: currentRow1?.version,
+      });
+      ok("16. 事前準備: 個別REOPENに成功", reopenRes.status === 200, `status=${reopenRes.status} body=${JSON.stringify(reopenRes.json)}`);
+
+      // 再START。
+      const currentRow2 = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
+      const startRes = await api(jar, "POST", `/api/v1/responsibilities/${task.responsibilityId}/transitions`, {
+        action: "START",
+        occurredAt: new Date().toISOString(),
+        version: currentRow2?.version,
+      });
+      ok("16. 事前準備: 再STARTに成功", startRes.status === 200, `status=${startRes.status}`);
+
+      // もう一度完了(Bulk Complete)。Receipt Bが発行される。
+      const bulk2 = await api(jar, "POST", "/api/v1/responsibilities/bulk", {
+        ids: [task.responsibilityId],
+        action: "COMPLETE",
+      });
+      ok("16. 事前準備: 2回目のbulk completeに成功", bulk2.status === 200 && bulk2.json?.data?.affected === 1);
+      const receiptB = bulk2.json.data.undo.snapshot[0].receiptId;
+      ok("16. 事前確認: Receipt AとReceipt Bは別のid", receiptA !== receiptB);
+
+      // 古い未使用のReceipt AでUndoを試みる。
+      const staleUndo = { action: "COMPLETE", snapshot: [{ id: task.responsibilityId, receiptId: receiptA }] };
+      const staleRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", staleUndo);
+      const afterStale = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
+      ok(
+        "16. 世代確認の核心【最重要】: 古いReceipt AによるUndoは、後続の別完了" +
+          "サイクル(Receipt B)を誤って取り消さない(statusがCOMPLETEDのまま" +
+          "変化しない。responsibilityVersionAfterがReceipt Aの世代と現在versionの" +
+          "不一致を検出しSKIP_NOT_COMPLETED相当になるべき)",
+        afterStale?.status === "COMPLETED",
+        `status=${staleRes.status} body=${JSON.stringify(staleRes.json)} afterStatus=${afterStale?.status}` +
+          "(PLANNEDならReceipt Bの完了を誤って取り消してしまっている)",
+      );
+      const staleConsumption = await db.bulkCompleteUndoConsumption.findUnique({ where: { receiptId: receiptA } });
+      // SKIP_NOT_COMPLETEDの場合、count++はされるがConsumptionは作られない実装のため、
+      // Consumption自体の有無ではなくResponsibility.statusの不変性を主指標とする
+      // (上のassertが最重要)。
+
+      // 正しいReceipt BでのUndoは正常に機能することを確認する。
+      const validRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", {
+        action: "COMPLETE",
+        snapshot: [{ id: task.responsibilityId, receiptId: receiptB }],
+      });
+      ok(
+        "16. Receipt Bでの正規のUndoは正常に機能する: restored===1",
+        validRes.status === 200 && validRes.json?.data?.restored === 1,
+        `status=${validRes.status} body=${JSON.stringify(validRes.json)}`,
+      );
+      const afterValid = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
+      ok("16. Receipt Bでの正規のUndo後: statusがPLANNEDへ復元されている", afterValid?.status === "PLANNED");
+    }
+
+    // =====================================================================
+    // 17. Undo Receipt方式の競合制御: 同一receiptIdへの同時Undo要求でも
+    //     全ての応答が同一の成功結果を返すこと
+    // =====================================================================
+    // [2026-08-26追加・外部監査P0-2是正の確認]
+    // 同一receiptIdへ複数のUndo要求をほぼ同時に送信する。是正前は、両方とも
+    // 「冪等記録なし」を確認できてしまい、片方はresponsibility側の楽観ロック
+    // 競合で更新0件(SKIP相当、restored:0)になり得た。是正後はFOR UPDATE行
+    // ロックにより直列化され、全ての要求がrestored:1(同一の成功結果)を
+    // 返すべきである。
+    {
+      const task = await createTaskAndComplete(jar, "Gate2.1検証(17): 同時再送");
+      createdResponsibilityIds.push(task.responsibilityId);
+      const CONCURRENCY = 5;
+      const results = await Promise.all(
+        Array.from({ length: CONCURRENCY }, () =>
+          api(jar, "POST", "/api/v1/responsibilities/bulk/undo", task.undo),
+        ),
+      );
+      const restoredValues = results.map((r) => r.json?.data?.restored);
+      ok(
+        "17. 競合制御の核心【最重要】: 同一receiptIdへの" + CONCURRENCY + "件同時Undo要求が" +
+          "すべてHTTP 200かつrestored===1を返す(同一要求は同じ成功応答という" +
+          "v4.0 5.5節の契約が並行実行下でも成立する)",
+        results.every((r) => r.status === 200) && restoredValues.every((v) => v === 1),
+        `statuses=${JSON.stringify(results.map((r) => r.status))} restoredValues=${JSON.stringify(restoredValues)}`,
+      );
+      const consumptions = await db.bulkCompleteUndoConsumption.findMany({
+        where: { receiptId: task.undo.snapshot[0].receiptId },
+      });
+      ok("17. 同時再送後: 冪等記録は1件だけ作成される(重複作成されない)", consumptions.length === 1);
+      const lifecycleEventsAfter = await db.responsibilityLifecycleEvent.findMany({
+        where: { responsibilityId: task.responsibilityId },
+      });
+      ok("17. 同時再送後: Lifecycle Eventも1件だけ(重複作成されない)", lifecycleEventsAfter.length === 1);
     }
   } catch (err) {
     failed++;

@@ -149,11 +149,22 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
     // Execution Ledger記録がRegistry不整合等で例外を投げた場合、このResponsibility
     // 1件分のstatus変更・EventLog・Ledger記録・レシート作成が全てrollbackされる
     // (他のidには影響しない)。
+    // [2026-08-26追加・外部監査P1-1是正]
+    // fetchTargetsでtを取得した後、この更新を実行するまでの間に別操作が状態を
+    // 変えている可能性がある(このループ自体はバッチ全体を1トランザクションに
+    // していないため、他のidの処理中に別クライアントがこのidを操作できる)。
+    // 従来はwhereにidしか指定していなかったため、取得直後のt.status(既に古い
+    // かもしれない)をfromStatusとしてレシートへ書き込んでしまい、実際の状態と
+    // 食い違うレシートが作られ得た。version/status/workspaceId/deletedAtを
+    // whereへ含め、更新0件(競合検出)ならレシートも作らずskip扱いにする。
     const receiptId = await db.$transaction(async (tx: Prisma.TransactionClient) => {
-      await tx.responsibility.update({
-        where: { id: t.id },
+      const updateResult = await tx.responsibility.updateMany({
+        where: { id: t.id, workspaceId, version: t.version, status: t.status, deletedAt: null },
         data: { status: nextStatus, completedAt: now, updatedById: userId, version: { increment: 1 } },
       });
+      if (updateResult.count === 0) {
+        return null; // 競合検出。この時点までのtx内変更は無い(まだ何も書いていない)。
+      }
       await tx.eventLog.create({
         data: {
           aggregateType: "Responsibility",
@@ -191,6 +202,9 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
       // (COMMITMENT等の種別固有型、PEM未同意時の完了でも同一契約が成立する)。
       // fromStatus(=t.status、完了前の真の状態)はサーバーがここで確定させ、
       // クライアントへ生の値として渡すことは無い(receiptIdだけを渡す)。
+      // responsibilityVersionAfter(=t.version+1、上のupdateManyで実際に到達した
+      // version)は、Undo時に「このレシートが今のResponsibilityにとって最新の
+      // 完了サイクルに対応しているか」を判定するために使う(外部監査P0-1是正)。
       const receipt = await tx.bulkCompleteReceipt.create({
         data: {
           workspaceId,
@@ -199,12 +213,17 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
           operationId: bulkRequestId,
           fromStatus: t.status,
           toStatus: nextStatus,
+          responsibilityVersionAfter: t.version + 1,
           completeEventId: ledgerResult?.id ?? null,
         },
         select: { id: true },
       });
       return receipt.id;
     });
+    if (receiptId === null) {
+      skipped.push({ id: t.id, reason: "更新直前に他の操作と競合しました(個別に操作してください)" });
+      continue;
+    }
     snapshot.push({ id: t.id, receiptId });
   }
 
@@ -381,7 +400,12 @@ async function executeCompleteUndo(
   userId: string,
 ): Promise<{ restored: number }> {
   // [P1-3是正] 重複id除去は、DBアクセスより前に行う。
-  const snapshot = dedupeSnapshotById(payload.snapshot);
+  // [2026-08-26追加・外部監査P0-2是正]
+  // このバッチ内での処理順序をreceiptId昇順に固定する。後述のFOR UPDATE行ロックを
+  // 複数レシートに跨って取得する際、異なるバッチが異なる順序でロックを取得すると
+  // デッドロックが起こり得るため、全ての呼び出しが同じ(receiptId昇順)順序で
+  // ロックを取得するよう統一する。restoredの集計順序には影響しない。
+  const snapshot = dedupeSnapshotById(payload.snapshot).sort((a, b) => a.receiptId.localeCompare(b.receiptId));
   const ids = snapshot.map((s) => s.id);
   const targets = await fetchTargets(ids, workspaceId);
   const targetById = new Map(targets.map((t) => [t.id, t]));
@@ -401,27 +425,55 @@ async function executeCompleteUndo(
         const t = targetById.get(s.id);
         if (!t) continue; // 対象が存在しない(他Workspace混入等。fetchTargetsで既に除外済み)
 
-        // [2026-08-26新設・外部監査で指摘された根本問題の是正の核心]
+        // [2026-08-26新設・外部監査で指摘された根本問題の是正の核心、
+        //  2026-08-26さらに是正・外部監査P0-2(同時再送の競合)対応]
         // クライアントから受け取るのはreceiptIdのみ。実際の復元先(fromStatus)・
         // Execution Ledger接続(completeEventId)は常にこのレシートから読み、
         // クライアントが送ってくる値は一切信用しない。receiptIdが実在しない、
         // またはこのresponsibility/workspace/actorに属さない場合は
         // VALIDATION_FAILEDとしてバッチ全体を拒否する(値の不整合を握り潰さない)。
-        const receipt = await tx.bulkCompleteReceipt.findFirst({
-          where: {
-            id: s.receiptId,
-            workspaceId,
-            subjectUserId: userId,
-            responsibilityId: t.id,
-          },
-          select: { id: true, fromStatus: true, toStatus: true, completeEventId: true },
-        });
-        if (!receipt) {
+        //
+        // [経緯・P0-2] 当初は`findFirst`(通常のSELECT、行ロック無し)でレシートを
+        // 読んだ後、別途冪等記録の有無を確認し、無ければ更新→冪等記録作成という
+        // 順序だった。同一receiptIdへの2つのUndo要求がほぼ同時に実行されると、
+        // 両方とも「冪等記録なし」を確認できてしまい、片方はresponsibility.
+        // updateManyのversion条件で更新0件(→SKIP相当)になり得た。これは
+        // 「同一要求の再送は同じ成功応答を返す」というv4.0 5.5節の契約に反する。
+        // 是正: `SELECT ... FOR UPDATE`でレシート行自体をロックしてから読む。
+        // 同一レシートへの同時Undo要求は、片方のトランザクションが完了(commit)
+        // するまでもう片方がこのロック取得で待たされるため、後続の冪等記録確認が
+        // 必ず正しい最新状態を見られるようになる(直列化される)。
+        const receiptRows = await tx.$queryRaw<
+          {
+            id: string;
+            from_status: string;
+            to_status: string;
+            complete_event_id: string | null;
+            responsibility_version_after: number;
+          }[]
+        >`
+          SELECT id, from_status, to_status, complete_event_id, responsibility_version_after
+          FROM bulk_complete_receipts
+          WHERE id = ${s.receiptId}
+            AND workspace_id = ${workspaceId}
+            AND subject_user_id = ${userId}
+            AND responsibility_id = ${t.id}
+          FOR UPDATE
+        `;
+        const receiptRow = receiptRows[0];
+        if (!receiptRow) {
           throw new InvalidUndoSnapshotError(
             `id=${t.id}: receiptId "${s.receiptId}" に一致するUndo Receiptが` +
               `見つかりません(workspace/responsibility/actorのいずれかが不一致です)`,
           );
         }
+        const receipt = {
+          id: receiptRow.id,
+          fromStatus: receiptRow.from_status,
+          toStatus: receiptRow.to_status,
+          completeEventId: receiptRow.complete_event_id,
+          responsibilityVersionAfter: receiptRow.responsibility_version_after,
+        };
 
         const requestPayloadHash = buildCompleteUndoRequestPayloadHash({ receiptId: receipt.id });
 
@@ -429,17 +481,30 @@ async function executeCompleteUndo(
         // PEM Execution Ledgerの記録有無に一切依存しないため、種別固有型や
         // PEM未同意時の完了でも「同一要求の再送は同じ成功応答を返す」という
         // v4.0 5.5節の契約が一様に成立する(外部監査で指摘されていた問題の是正)。
+        // 上のFOR UPDATEロックにより、ここで読む値は同一レシートへの並行要求
+        // 間で正しく直列化されている。
         const existingConsumption = await tx.bulkCompleteUndoConsumption.findUnique({
           where: { receiptId: receipt.id },
           select: { requestPayloadHash: true },
         });
 
-        // [2026-08-26新設] 「現在完了状態か」は、型ごとの完了到達statusを
-        // 再定義するのではなく、このレシート自体が表すtoStatusと現在のstatusが
-        // 一致するかで判定する。これにより型ごとの判定ロジックを重複して
-        // 実装・保守する必要が無くなり、レシートが古くなっていれば(他の操作で
-        // 状態が変わっていれば)自然にSKIP_NOT_COMPLETEDとなる。
-        const currentlyCompleted = t.status === receipt.toStatus;
+        // [2026-08-26新設、さらに2026-08-26改訂・外部監査P0-1是正]
+        // 「現在完了状態か」は、レシート自体が表すtoStatusと現在のstatusが
+        // 一致するかで判定していたが、これだけでは「古い(既に別サイクルで
+        // Undo/再完了された)レシートが、たまたま現在のstatusと同じtoStatusを
+        // 持っている」場合に誤って「現在も有効」と判定されてしまう恐れがあった。
+        // 例: TASK完了→Receipt A(toStatus=COMPLETED)→個別REOPEN→再START→
+        // 再度完了→Receipt B(toStatus=COMPLETED)→古いReceipt AでUndoを送ると、
+        // 現在statusは(Receipt Bによって)再びCOMPLETEDなので、
+        // status一致だけで判定するとReceipt Aが誤って「有効」とみなされ、
+        // 無関係な別の完了サイクル(B)を取り消してしまっていた
+        // (Responsibility状態とCorrection履歴が不整合になる、外部監査で指摘)。
+        // 是正: responsibilityVersionAfter(この完了操作が直後に到達したversion)
+        // が現在のversionと一致するかも必ず確認する。versionは完了・Undoの
+        // たびに必ず+1されるため、これと一致することで「まさにこのレシートが
+        // 生んだ状態そのものか」を一意に判定できる。
+        const currentlyCompleted =
+          t.status === receipt.toStatus && t.version === receipt.responsibilityVersionAfter;
         const decision = decideCompleteUndoAction({
           currentlyCompleted,
           existingConsumption,

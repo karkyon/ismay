@@ -945,6 +945,16 @@ model BulkCompleteReceipt {
   fromStatus        String    @map("from_status")
   /// 完了操作が実際に到達したstatus。
   toStatus          String    @map("to_status")
+  /// [2026-08-26新設・外部監査P0-1是正]
+  /// この完了操作の直後にResponsibilityが持っていたversion。「このレシートが
+  /// 今のResponsibilityにとって最新の完了サイクルに対応しているか」の世代確認に
+  /// 使う。単純に`t.status === receipt.toStatus`だけで「現在完了状態か」を
+  /// 判定すると、古い(既にUndo済みだが再度同じtoStatusへ完了した)レシートが
+  /// 誤って「現在も有効」と判定され、無関係な別の完了サイクルを取り消して
+  /// しまう恐れがあった(外部監査で指摘)。versionは完了・Undoのたびに必ず
+  /// +1されるため、これと一致するかどうかが「まさにこの完了操作が生んだ状態か」
+  /// を一意に判定できる。
+  responsibilityVersionAfter Int @map("responsibility_version_after")
   /// このBulk Complete操作でExecution Ledgerへ実際に記録されたCOMPLETE Eventのid
   /// (Execution Ledger対象外型、またはPEM同意未取得等で記録できなかった場合はnull)。
   completeEventId   String?   @map("complete_event_id")
@@ -953,6 +963,10 @@ model BulkCompleteReceipt {
 
   consumption BulkCompleteUndoConsumption?
 
+  /// [2026-08-26新設・外部監査「DB整合性上の不足」是正] BulkCompleteUndoConsumption
+  /// からの複合FK参照先。tenant/actor情報がDB制約レベルでも一致することを保証する
+  /// (アプリケーションコードのWHERE句だけに頼らない)。
+  @@unique([id, workspaceId, subjectUserId], map: "bcr_id_workspace_subject_uq")
   @@index([responsibilityId])
   @@index([workspaceId, subjectUserId])
   @@map("bulk_complete_receipts")
@@ -963,13 +977,30 @@ model BulkCompleteReceipt {
 /// 全ての型・全ての同意状態で一様に機能する冪等性の正本。
 model BulkCompleteUndoConsumption {
   id                  String   @id @default(uuid())
+  /// [receiptId単独のunique制約] 「1レシートにつき冪等記録は1件だけ」という
+  /// 唯一性そのものを保証する(冪等性の核心)。下の複合unique(3列)とは別目的の
+  /// 制約であり、両方が同時に必要。
   receiptId           String   @unique @map("receipt_id")
-  receipt             BulkCompleteReceipt @relation(fields: [receiptId], references: [id])
   workspaceId         String   @map("workspace_id")
   subjectUserId       String   @map("subject_user_id")
+  /// [2026-08-26改訂・外部監査「DB整合性上の不足」是正、および前回のPrisma
+  /// バリデーションエラー(P1012)の是正]
+  /// 従来はreceiptId単独でのFKだったため、DB制約だけではこのConsumptionの
+  /// workspaceId/subjectUserIdが参照先Receiptのそれと一致することを保証
+  /// できていなかった。BulkCompleteReceipt側に追加した複合unique
+  /// (id, workspaceId, subjectUserId)を参照する複合FKへ変更し、tenant/actorの
+  /// 不一致をDB制約レベルで拒否する。
+  /// [P1012是正] Prismaは一対一リレーションの参照元(このモデル)に、@relationの
+  /// fieldsと完全一致するunique制約を要求する。receiptId単独のunique(上記)
+  /// だけでは(receiptId, workspaceId, subjectUserId)という3列の組み合わせを
+  /// カバーしないため、Prismaの検証(P1012)に失敗していた。このモデル自身にも
+  /// 同じ3列の複合uniqueを追加する(receiptId単独のuniqueとは目的が異なるため
+  /// 両立させる。実データとしては両方とも常に満たされる)。
+  receipt             BulkCompleteReceipt @relation(fields: [receiptId, workspaceId, subjectUserId], references: [id, workspaceId, subjectUserId])
   requestPayloadHash  String   @map("request_payload_hash")
   createdAt           DateTime @default(now()) @map("created_at")
 
+  @@unique([receiptId, workspaceId, subjectUserId], map: "bcuc_receipt_workspace_subject_uq")
   @@map("bulk_complete_undo_consumptions")
 }
 
