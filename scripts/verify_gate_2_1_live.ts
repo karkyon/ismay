@@ -155,12 +155,31 @@ async function createTaskAndComplete(
   jar: CookieJar,
   title: string,
 ): Promise<{ responsibilityId: string; undo: any }> {
-  const createRes = await api(jar, "POST", "/api/v1/responsibilities", {
-    type: "TASK",
-    title,
-  });
+  return createAndComplete(jar, "TASK", title);
+}
+
+/**
+ * [2026-08-26追加・外部監査再々評価対応]
+ * TASK以外の種別(COMMITMENT/WAITING/RISK)も実DBで検証するための汎用ヘルパー。
+ * 経緯: 以前はcreateTaskAndComplete(TASK専用)しか無く、実DB回帰試験がTASKしか
+ * 検証していなかったため、「decideCompleteUndoActionが型に関わらず
+ * currentStatus==="COMPLETED"を要求しており、COMMITMENT/WAITING/RISKのUndoが
+ * 常にrestored:0になる」という重大なバグを実DB試験で検出できていなかった
+ * (外部監査で指摘)。
+ *
+ * COMMITMENT(初期status=ACTIVE)・WAITING(初期status=WAITING)・RISK(初期status=OPEN)は、
+ * いずれも初期状態がそのまま完了操作の遷移元として有効なため、TASKと異なり
+ * START相当の事前遷移は不要(responsibility.ts initialStatusFor/COMMITMENT_
+ * TRANSITIONS等参照)。
+ */
+async function createAndComplete(
+  jar: CookieJar,
+  type: string,
+  title: string,
+): Promise<{ responsibilityId: string; undo: any }> {
+  const createRes = await api(jar, "POST", "/api/v1/responsibilities", { type, title });
   if (createRes.status !== 200 && createRes.status !== 201) {
-    throw new Error(`責任作成に失敗: status=${createRes.status} body=${JSON.stringify(createRes.json)}`);
+    throw new Error(`責任作成に失敗(type=${type}): status=${createRes.status} body=${JSON.stringify(createRes.json)}`);
   }
   const responsibilityId: string = createRes.json.data.id;
 
@@ -169,13 +188,17 @@ async function createTaskAndComplete(
   // (responsibility.ts参照)。INBOXから直接bulk completeを呼ぶと
   // 「現在の状態からは一括完了できません」でskipされる(実際に発生・確認した)。
   // 先に単一遷移APIでSTART(INBOX→IN_PROGRESS)を実行してから完了させる。
-  const startRes = await api(jar, "POST", `/api/v1/responsibilities/${responsibilityId}/transitions`, {
-    action: "START",
-    occurredAt: new Date().toISOString(),
-    version: createRes.json.data.version,
-  });
-  if (startRes.status !== 200) {
-    throw new Error(`START遷移に失敗: status=${startRes.status} body=${JSON.stringify(startRes.json)}`);
+  // COMMITMENT/WAITING/RISKは初期状態がそのまま完了操作の遷移元として有効なため、
+  // この事前遷移は不要。
+  if (type === "TASK" || type === "EVENT" || type === "CONCERN" || type === "HABIT" || type === "IDEA") {
+    const startRes = await api(jar, "POST", `/api/v1/responsibilities/${responsibilityId}/transitions`, {
+      action: "START",
+      occurredAt: new Date().toISOString(),
+      version: createRes.json.data.version,
+    });
+    if (startRes.status !== 200) {
+      throw new Error(`START遷移に失敗: status=${startRes.status} body=${JSON.stringify(startRes.json)}`);
+    }
   }
 
   const bulkRes = await api(jar, "POST", "/api/v1/responsibilities/bulk", {
@@ -183,7 +206,7 @@ async function createTaskAndComplete(
     action: "COMPLETE",
   });
   if (bulkRes.status !== 200 || bulkRes.json.data.affected !== 1) {
-    throw new Error(`bulk complete失敗: status=${bulkRes.status} body=${JSON.stringify(bulkRes.json)}`);
+    throw new Error(`bulk complete失敗(type=${type}): status=${bulkRes.status} body=${JSON.stringify(bulkRes.json)}`);
   }
   return { responsibilityId, undo: bulkRes.json.data.undo };
 }
@@ -585,6 +608,127 @@ async function main(): Promise<void> {
       );
       // 後始末: Bを正しくUndoしておく。
       await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", b.undo);
+    }
+
+    // =====================================================================
+    // 10. 種別固有型(COMMITMENT/WAITING/RISK)のUndo
+    // =====================================================================
+    // [2026-08-26追加・外部監査再々評価で発見した重大バグの確認]
+    // decideCompleteUndoActionが型に関わらずcurrentStatus==="COMPLETED"を
+    // 要求していたため、COMMITMENT/WAITING/RISKの完了到達status
+    // (FULFILLED/RESOLVED/CLOSED)ではUndoが常にSKIP_NOT_COMPLETEDとなり、
+    // restored:0のまま何も起きない不具合があった。TASKしか実DB試験していなかった
+    // ため見逃していた。是正後、この3型それぞれで実際にUndoが機能することを
+    // 実DBで確認する。
+    {
+      const commitment = await createAndComplete(jar, "COMMITMENT", "Gate2.1検証(10): COMMITMENT Undo");
+      createdResponsibilityIds.push(commitment.responsibilityId);
+      const undoRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", commitment.undo);
+      ok(
+        "10. COMMITMENT Undo: restored===1(以前は常に0だった重大バグの回帰防止)",
+        undoRes.status === 200 && undoRes.json?.data?.restored === 1,
+        `status=${undoRes.status} body=${JSON.stringify(undoRes.json)}`,
+      );
+      const after = await db.responsibility.findUnique({ where: { id: commitment.responsibilityId } });
+      ok(
+        "10. COMMITMENT Undo: statusがACTIVE(元の状態)へ復元されている",
+        after?.status === "ACTIVE",
+        `actual=${after?.status}`,
+      );
+    }
+    {
+      const waiting = await createAndComplete(jar, "WAITING", "Gate2.1検証(10): WAITING Undo");
+      createdResponsibilityIds.push(waiting.responsibilityId);
+      const undoRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", waiting.undo);
+      ok(
+        "10. WAITING Undo: restored===1(以前は常に0だった重大バグの回帰防止)",
+        undoRes.status === 200 && undoRes.json?.data?.restored === 1,
+        `status=${undoRes.status} body=${JSON.stringify(undoRes.json)}`,
+      );
+      const after = await db.responsibility.findUnique({ where: { id: waiting.responsibilityId } });
+      ok(
+        "10. WAITING Undo: statusがWAITING(元の状態)へ復元されている",
+        after?.status === "WAITING",
+        `actual=${after?.status}`,
+      );
+    }
+    {
+      const risk = await createAndComplete(jar, "RISK", "Gate2.1検証(10): RISK Undo");
+      createdResponsibilityIds.push(risk.responsibilityId);
+      const undoRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", risk.undo);
+      ok(
+        "10. RISK Undo: restored===1(以前は常に0だった重大バグの回帰防止)",
+        undoRes.status === 200 && undoRes.json?.data?.restored === 1,
+        `status=${undoRes.status} body=${JSON.stringify(undoRes.json)}`,
+      );
+      const after = await db.responsibility.findUnique({ where: { id: risk.responsibilityId } });
+      ok(
+        "10. RISK Undo: statusがOPEN(元の状態)へ復元されている",
+        after?.status === "OPEN",
+        `actual=${after?.status}`,
+      );
+    }
+
+    // =====================================================================
+    // 11. 不正なBROKEN復元(遷移元として不正)は400で拒否される
+    // =====================================================================
+    {
+      const commitment = await createAndComplete(jar, "COMMITMENT", "Gate2.1検証(11): 不正なBROKEN復元");
+      createdResponsibilityIds.push(commitment.responsibilityId);
+      const snap = commitment.undo.snapshot[0];
+      const maliciousUndo = {
+        action: "COMPLETE",
+        snapshot: [{ ...snap, status: "BROKEN" }], // BROKENは有効値だがFULFILLの遷移元としては不正
+      };
+      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", maliciousUndo);
+      ok(
+        "11. 不正なBROKEN復元: HTTP 400 VALIDATION_FAILEDで拒否される",
+        res.status === 400 && res.json?.error?.code === "VALIDATION_FAILED",
+        `status=${res.status} body=${JSON.stringify(res.json)}`,
+      );
+      // 後始末: 正しいundoで戻しておく。
+      await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", commitment.undo);
+    }
+
+    // =====================================================================
+    // 12. version進行後のcompleteEventId省略は監査回避を許さない
+    // =====================================================================
+    // [2026-08-26追加・外部監査再々評価で発見した抜け道の確認]
+    // Bulk Complete後にタイトル編集等でversionだけが進んだ場合でも、
+    // completeEventId省略によるCorrection追跡回避が許可されないことを確認する。
+    {
+      const task = await createTaskAndComplete(jar, "Gate2.1検証(12): version進行後の省略");
+      createdResponsibilityIds.push(task.responsibilityId);
+      const snap = task.undo.snapshot[0];
+
+      // タイトル編集でversionだけを進める(completedAt/statusはCOMPLETEDのまま)。
+      const currentRow = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
+      const editRes = await api(jar, "PATCH", `/api/v1/responsibilities/${task.responsibilityId}`, {
+        title: "Gate2.1検証(12): タイトル編集済み",
+        version: currentRow?.version,
+      });
+      ok("12. 事前準備: タイトル編集でversionを進めることに成功", editRes.status === 200, `status=${editRes.status}`);
+
+      const maliciousUndo = {
+        action: "COMPLETE",
+        snapshot: [{ id: snap.id, status: "IN_PROGRESS", completedAt: null, completeEventId: null }],
+      };
+      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", maliciousUndo);
+      ok(
+        "12. version進行後のcompleteEventId省略【最重要】: 400 VALIDATION_FAILEDで拒否される" +
+          "(COMPLETE Eventがversion不一致でも実在する限りCorrection追跡回避を許さない)",
+        res.status === 400 && res.json?.error?.code === "VALIDATION_FAILED",
+        `status=${res.status} body=${JSON.stringify(res.json)}`,
+      );
+      const after = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
+      ok(
+        "12. version進行後のcompleteEventId省略: 拒否された結果statusはCOMPLETEDのまま",
+        after?.status === "COMPLETED",
+        `actual=${after?.status}`,
+      );
+      // 後始末: 正しいundoで戻す(versionが進んでいるためstaleとして拒否される可能性が
+      // あるが、これはこのAPIの既知の仕様(古いcompleteEventIdはstale)であり、
+      // このresponsibilityは削除でクリーンアップされるため後始末不要。
     }
   } catch (err) {
     failed++;

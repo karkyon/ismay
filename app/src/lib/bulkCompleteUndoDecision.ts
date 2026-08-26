@@ -78,9 +78,20 @@ export type CompleteUndoDecision =
  * (初回操作によって現在のstatusが既に変わっているため)現在のstatusを一切見ずに
  * REPLAY_SUCCESS/REJECT_REUSEDを返す。既存が無い場合にのみ、初回要求として
  * 現在のstatusを検査する。
+ *
+ * [2026-08-26是正・外部監査再々評価で発見した重大バグ]
+ * 当初はcurrentStatus(string)を受け取り、"COMPLETED"と文字列比較していた。
+ * しかしCOMMITMENT/WAITING/RISKの完了到達statusはそれぞれ"FULFILLED"/
+ * "RESOLVED"/"CLOSED"であり"COMPLETED"ではないため、これらの型ではUndoが
+ * 常にSKIP_NOT_COMPLETEDとなり、一度もAPPLYへ到達しない(=Undo自体が機能しない)
+ * という重大な不具合になっていた(外部監査で指摘、TASKしか実DB試験していなかった
+ * ため見逃していた)。
+ * 是正: type依存の判断(どのstatusが「完了」に相当するか)を呼び出し元
+ * (bulkOperations.ts、completeToStatusForTypeを使う)へ押し出し、この純粋関数
+ * 自体はcurrentlyCompleted(boolean)のみを受け取るようシグネチャを変更した。
  */
 export function decideCompleteUndoAction(params: {
-  currentStatus: string;
+  currentlyCompleted: boolean;
   existingLifecycleEvent: { requestPayloadHash: string } | null;
   requestPayloadHash: string;
 }): CompleteUndoDecision {
@@ -89,7 +100,7 @@ export function decideCompleteUndoAction(params: {
       ? { kind: "REPLAY_SUCCESS" }
       : { kind: "REJECT_REUSED" };
   }
-  if (params.currentStatus !== "COMPLETED") {
+  if (!params.currentlyCompleted) {
     return { kind: "SKIP_NOT_COMPLETED" };
   }
   return { kind: "APPLY" };

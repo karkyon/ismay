@@ -2,7 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import type { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
-import { transitionsForType, isTypeSpecificTerminalStatus, completeActionFor } from "@/lib/responsibility";
+import { transitionsForType, isTypeSpecificTerminalStatus, completeActionFor, completeToStatusForType } from "@/lib/responsibility";
 import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
 import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
 import { projectAndPersistExecutionSessions } from "@/lib/pem/sessionPersistence";
@@ -477,31 +477,43 @@ async function executeCompleteUndo(
           );
         }
       } else if (ledgerApplicable) {
-        // [2026-08-26新設・外部監査Gate阻害1是正]
+        // [2026-08-26新設・外部監査Gate阻害1是正、再評価で発見された抜け道の是正]
         // completeEventIdが省略されている場合、従来はそのまま「対象イベント無し」の
         // 後方互換パスとして扱っていた。しかしこれは、悪意あるまたは壊れたクライアントが
         // completeEventIdを単に省略するだけでCorrection追跡(REOPEN Execution Event・
         // REVOKE Lifecycle Event)を回避できてしまう抜け道だった(外部監査で指摘、
         // Gate阻害)。
-        // 是正: completeEventIdが無くても、現在のversionに対応するCOMPLETE Eventが
+        // 是正: completeEventIdが無くても、このresponsibilityに対するCOMPLETE Eventが
         // 実際にDB上に存在するかを必ずサーバー側で確認する。存在するのに
         // completeEventIdが省略されている場合は、正規の後方互換ケース(旧形式
         // クライアント)ではなく評価回避の疑いがあるため拒否する。
         // 「本当に存在しない」場合(PEM同意未取得で記録自体がスキップされていた場合)
         // のみ、後方互換の単純復元パスを許可する。
+        //
+        // [2026-08-26是正・外部監査再評価で発見] 当初はこの存在確認にも
+        // `responsibilityVersionAfter: t.version`(現在versionとの完全一致)を
+        // 条件へ含めていた。これにより、Bulk Complete後にタイトル編集等の
+        // 無関係な操作でversionだけが進んだ場合、実際にはCOMPLETE Eventが
+        // 存在するにもかかわらず「対象イベント無し」と誤判定され、
+        // completeEventIdを省略するだけでCorrection追跡を回避できる抜け道が
+        // 残っていた(正しいcompleteEventIdを送るとstaleとして拒否されるのに、
+        // 省略すると素通りできるという非対称性があった)。
+        // 是正: この存在確認からもversion条件を外す(workspace/responsibility/
+        // eventType/actorの一致のみで判定する。completeEventIdが指定されている
+        // 場合の実在確認クエリと同じ条件へ揃えた)。
         const existingCompleteEvent = await tx.responsibilityExecutionEvent.findFirst({
           where: {
             workspaceId,
             responsibilityId: t.id,
             eventType: "COMPLETE",
             subjectUserId: userId,
-            responsibilityVersionAfter: t.version,
           },
+          orderBy: { responsibilitySequence: "desc" },
           select: { id: true },
         });
         if (existingCompleteEvent) {
           throw new InvalidUndoSnapshotError(
-            `id=${t.id}: 現在のversion(${t.version})に対応するCOMPLETE Event` +
+            `id=${t.id}: このresponsibilityに対するCOMPLETE Event` +
               `(id=${existingCompleteEvent.id})がDB上に存在するにもかかわらず、` +
               `completeEventIdが指定されていません。取消対象のcompleteEventIdを` +
               `明示的に指定してください`,
@@ -546,8 +558,16 @@ async function executeCompleteUndo(
           })
         : null;
 
+      // [2026-08-26是正・外部監査再々評価で発見した重大バグ]
+      // 従来はt.status(文字列)をそのままdecideCompleteUndoActionへ渡し、
+      // そちらで"COMPLETED"固定文字列と比較していた。COMMITMENT/WAITING/RISKの
+      // 完了到達statusは"COMPLETED"ではない(completeToStatusForType参照)ため、
+      // これらの型ではUndoが常にSKIP_NOT_COMPLETEDとなり一度も適用されない
+      // 重大な不具合になっていた。型別の完了到達statusと一致するかどうかを
+      // ここで判定し、真偽値として渡す。
+      const currentlyCompleted = t.status === completeToStatusForType(t.type);
       const decision = decideCompleteUndoAction({
-        currentStatus: t.status,
+        currentlyCompleted,
         existingLifecycleEvent,
         requestPayloadHash,
       });

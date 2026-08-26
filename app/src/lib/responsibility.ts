@@ -97,6 +97,35 @@ export function completeFromStatusesForType(type: string): readonly string[] {
   return rule?.from ?? [];
 }
 
+/**
+ * [2026-08-26新設・外部監査再々評価で発見した重大バグの是正]
+ * 種別ごとの完了操作(completeActionFor)が到達するstatus。共通状態型は
+ * "COMPLETED"だが、COMMITMENT/WAITING/RISKはそれぞれ"FULFILLED"/"RESOLVED"/
+ * "CLOSED"であり、"COMPLETED"ではない。
+ *
+ * [経緯] executeCompleteUndo(bulkOperations.ts)のdecideCompleteUndoAction呼び出しが
+ * `currentStatus: t.status`をそのまま渡し、decideCompleteUndoAction側は
+ * `currentStatus !== "COMPLETED"`でSKIP_NOT_COMPLETEDを判定していた。このため、
+ * COMMITMENT等の種別固有型は完了してもstatusが"COMPLETED"になることが無く、
+ * 常にSKIP_NOT_COMPLETEDとなり、Undo自体が一度も実行されない(restored:0のまま
+ * 何も起きない)という重大な不具合になっていた(外部監査で指摘、実データでは未検証)。
+ * 是正: type別の完了到達statusをここで定義し、それと一致するかどうかで
+ * 「現在完了状態か」を判定する(decideCompleteUndoActionのシグネチャ自体も
+ * currentStatus: stringからcurrentlyCompleted: booleanへ変更し、type依存の
+ * 判断を呼び出し元(bulkOperations.ts)に押し出した。純粋関数自体は型に依存しない
+ * まま保つ)。
+ *
+ * COMMON_TRANSITIONS等に既に定義されている"to"値をそのまま使うだけであり、
+ * 想像で新しい値集合を作らない(全ての完了actionの"to"は文字列固定であり、
+ * 関数ではないことをソースで確認済み)。
+ */
+export function completeToStatusForType(type: string): string {
+  const completeAction = completeActionFor(type);
+  const rule = transitionsForType(type).find((r) => r.action === completeAction);
+  if (!rule) return "COMPLETED"; // 完了actionが定義されない型(DECISION)は通常ここへ来ない
+  return typeof rule.to === "string" ? rule.to : "COMPLETED";
+}
+
 /** 作成時の初期状態。 */
 export function initialStatusFor(type: string): string {
   switch (type) {

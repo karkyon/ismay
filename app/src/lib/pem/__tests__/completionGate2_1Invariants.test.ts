@@ -27,7 +27,7 @@ import assert from "node:assert/strict";
 import { apiError } from "@/lib/auth/response";
 import { CORRECTION_TYPES, LIFECYCLE_EVENT_KINDS } from "@/lib/pem/coreTypes";
 import { isExecutionLedgerApplicableType } from "@/lib/pem/eventDefinitionRegistry";
-import { isValidStatusForType, completeFromStatusesForType } from "@/lib/responsibility";
+import { isValidStatusForType, completeFromStatusesForType, completeToStatusForType } from "@/lib/responsibility";
 import {
   buildCompleteUndoIdempotencyKey,
   buildCompleteUndoRequestPayloadHash,
@@ -128,7 +128,7 @@ check(
     "(初回Undo要求)",
   () => {
     const decision = decideCompleteUndoAction({
-      currentStatus: "COMPLETED",
+      currentlyCompleted: true,
       existingLifecycleEvent: null,
       requestPayloadHash: "hash-a",
     });
@@ -141,7 +141,7 @@ check(
     "SKIP_NOT_COMPLETED",
   () => {
     const decision = decideCompleteUndoAction({
-      currentStatus: "IN_PROGRESS",
+      currentlyCompleted: false,
       existingLifecycleEvent: null,
       requestPayloadHash: "hash-a",
     });
@@ -157,7 +157,7 @@ check(
     "是正前はここでSKIP_NOT_COMPLETED相当となりrestored:0を返す不具合があった)",
   () => {
     const decision = decideCompleteUndoAction({
-      currentStatus: "PLANNED", // 初回UndoでCOMPLETED→PLANNEDへ既に変わった後
+      currentlyCompleted: false, // 初回UndoでCOMPLETED→PLANNEDへ既に変わった後
       existingLifecycleEvent: { requestPayloadHash: "hash-a" },
       requestPayloadHash: "hash-a",
     });
@@ -170,7 +170,7 @@ check(
     "(currentStatusに関わらず拒否する)",
   () => {
     const decision = decideCompleteUndoAction({
-      currentStatus: "PLANNED",
+      currentlyCompleted: false,
       existingLifecycleEvent: { requestPayloadHash: "hash-a" },
       requestPayloadHash: "hash-b",
     });
@@ -379,6 +379,41 @@ check(
     assert.doesNotThrow(() =>
       validateSnapshotStatuses([{ id: "resp-1", status: "IN_PROGRESS", completedAt: null }], typeById),
     );
+  },
+);
+
+check(
+  "completeToStatusForType【外部監査再々評価で発見した重大バグの回帰防止】: " +
+    "共通状態型は\"COMPLETED\"だが、COMMITMENT/WAITING/RISKはそれぞれ" +
+    "\"FULFILLED\"/\"RESOLVED\"/\"CLOSED\"であり\"COMPLETED\"ではない" +
+    "(この値の食い違いにより、以前はCOMMITMENT等のUndoが一度も適用されず" +
+    "常にrestored:0になっていた。TASKしか実DB試験していなかったため見逃していた)",
+  () => {
+    assert.equal(completeToStatusForType("TASK"), "COMPLETED");
+    assert.equal(completeToStatusForType("EVENT"), "COMPLETED");
+    assert.equal(completeToStatusForType("COMMITMENT"), "FULFILLED");
+    assert.equal(completeToStatusForType("WAITING"), "RESOLVED");
+    assert.equal(completeToStatusForType("RISK"), "CLOSED");
+  },
+);
+
+check(
+  "decideCompleteUndoAction【外部監査再々評価で発見した重大バグの回帰防止・核心】: " +
+    "COMMITMENTがFULFILLED状態(completeToStatusForTypeと一致)のとき、" +
+    "currentlyCompleted=trueとして正しくAPPLYと判定される" +
+    "(是正前は呼び出し元がcurrentStatus:\"FULFILLED\"をハードコードされた" +
+    "\"COMPLETED\"と比較しており、常にSKIP_NOT_COMPLETEDになっていた)",
+  () => {
+    const type = "COMMITMENT";
+    const currentStatus = "FULFILLED"; // COMMITMENTの実際の完了到達status
+    const currentlyCompleted = currentStatus === completeToStatusForType(type);
+    assert.equal(currentlyCompleted, true, "呼び出し元での型別判定が正しく機能する");
+    const decision = decideCompleteUndoAction({
+      currentlyCompleted,
+      existingLifecycleEvent: null,
+      requestPayloadHash: "hash-a",
+    });
+    assert.deepEqual(decision, { kind: "APPLY" });
   },
 );
 
