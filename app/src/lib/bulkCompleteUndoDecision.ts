@@ -124,6 +124,29 @@ export function decideCompleteUndoNextStatus(params: {
 }
 
 /**
+ * [2026-08-26新設・実行時に発見した不具合の是正]
+ * 取消対象のCOMPLETE Eventが「まだ最新の状態を表しているか(その後に他の変更が
+ * 加わっていないか)」の鮮度確認。decideCompleteUndoActionがAPPLY(真に新規の
+ * 取消要求)と判定した場合にのみ呼ぶこと。
+ *
+ * [経緯] 当初はこのversion一致確認を、COMPLETE Eventを検索するクエリ自体の条件に
+ * 含めていた(`responsibilityVersionAfter: t.version`)。これは「同一payload再送」
+ * 「混在バッチでのIDEMPOTENCY_KEY_REUSED検出」を壊すバグだった。初回Undoが成功すると
+ * responsibility.versionは加算されるため、2回目の呼び出しで再取得したt.versionは
+ * 初回完了時点のresponsibilityVersionAfterと一致しなくなり、本来到達すべき
+ * decideCompleteUndoActionの冪等判定(REPLAY_SUCCESS/REJECT_REUSED)より前に、
+ * イベント自体が「見つからない」ものとして扱われエラーになっていた
+ * (omega-dev2での実行で実際に再現・特定した)。
+ * 是正: version一致確認は、イベントの実在確認から切り離し、APPLY分岐でのみ行う。
+ */
+export function isCompleteEventStale(params: {
+  responsibilityVersionAfter: number;
+  currentVersion: number;
+}): boolean {
+  return params.responsibilityVersionAfter !== params.currentVersion;
+}
+
+/**
  * [2026-08-25新設・外部監査P1-3是正] snapshot内のid重複を除去する(先勝ち)。
  * 重複を許すと、2件目以降が「同一key・同一payloadの冪等再送」として扱われ、
  * restored件数が水増しされ得た。bulkOperations.ts executeCompleteUndoの

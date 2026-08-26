@@ -34,6 +34,7 @@ import {
   decideCompleteUndoAction,
   decideCompleteUndoNextStatus,
   dedupeSnapshotById,
+  isCompleteEventStale,
   validateSnapshotStatuses,
   IdempotencyKeyReusedError,
   InvalidUndoSnapshotError,
@@ -266,6 +267,27 @@ check("isValidStatusForType【外部監査P1-5是正】: 共通状態型と種�
     assert.equal(isValidStatusForType("COMMITMENT", "ACTIVE"), true);
     assert.equal(isValidStatusForType("COMMITMENT", "IN_PROGRESS"), false, "IN_PROGRESSは共通状態型用でCOMMITMENTには無い");
     assert.equal(isValidStatusForType("COMMITMENT", "not_a_real_status"), false);
+  },
+);
+
+check(
+  "isCompleteEventStale【実行時に発見した不具合の回帰防止】: 一致すればfalse、" +
+    "不一致ならtrueを返す(この判定はdecideCompleteUndoActionがAPPLYと判定した" +
+    "場合にのみ使うこと。冪等再送(REPLAY_SUCCESS/REJECT_REUSED)の判定より前に" +
+    "version不一致で弾くと、正しく機能していた冪等判定に到達できず、同一payload" +
+    "再送や混在バッチでのREJECT_REUSED検出が壊れることを実際にomega-dev2での" +
+    "実行で確認した)",
+  () => {
+    assert.equal(
+      isCompleteEventStale({ responsibilityVersionAfter: 3, currentVersion: 3 }),
+      false,
+      "一致すればfalse(新規適用してよい)",
+    );
+    assert.equal(
+      isCompleteEventStale({ responsibilityVersionAfter: 3, currentVersion: 4 }),
+      true,
+      "不一致ならtrue(このEventは既に古い状態を指しているため拒否すべき)",
+    );
   },
 );
 

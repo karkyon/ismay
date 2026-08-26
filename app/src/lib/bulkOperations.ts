@@ -13,6 +13,7 @@ import {
   decideCompleteUndoAction,
   decideCompleteUndoNextStatus,
   dedupeSnapshotById,
+  isCompleteEventStale,
   validateSnapshotStatuses,
   IdempotencyKeyReusedError,
   InvalidUndoSnapshotError,
@@ -441,14 +442,29 @@ async function executeCompleteUndo(
       // bulkComplete時に固定されたcompleteEventIdを検証して使う。
       //
       // completeEventIdが明示的に指定されている場合は、それが実在し・このresponsibility・
-      // このworkspace・このuserId(subjectUserId)・現在のversionに厳密に一致することを
-      // 要求する(以前はworkspaceId/responsibilityId/eventTypeのみの緩い一致だった)。
-      // 一致しなければ「対象イベント無し」として静かに単純復元へ倒すのではなく、
+      // このworkspace・このuserId(subjectUserId)に一致することを要求する(以前は
+      // workspaceId/responsibilityId/eventTypeのみの緩い一致だった)。一致しなければ
+      // 「対象イベント無し」として静かに単純復元へ倒すのではなく、
       // InvalidUndoSnapshotErrorでバッチ全体を拒否する(値の不整合を握り潰さない)。
       //
       // completeEventId自体が未指定(旧形式クライアント等)の場合のみ、
       // 「対象イベント無し」の後方互換パスとして扱う(originalCompleteEvent=null)。
-      let originalCompleteEvent: { id: string } | null = null;
+      //
+      // [2026-08-26是正・実行時に発見した不具合]
+      // 当初はこのクエリに`responsibilityVersionAfter: t.version`(現在バージョン)も
+      // 条件へ含めていたが、これは「同一payload再送」「混在バッチでのREJECT_REUSED
+      // 検出」を実際に壊すバグだった。初回Undoが成功するとresponsibility.versionは
+      // 加算されるため、2回目の呼び出しで再取得したt.versionは初回完了時点の
+      // responsibilityVersionAfterと一致しなくなり、本来decideCompleteUndoActionの
+      // 冪等判定(REPLAY_SUCCESS/REJECT_REUSED)へ到達すべき所より前に
+      // InvalidUndoSnapshotErrorで弾かれてしまっていた(omega-dev2での実行で
+      // 実際に再現・特定した)。
+      // 是正: イベントの実在確認(id/workspace/responsibility/eventType/actor)には
+      // versionを含めない。version一致確認は、後述のdecision.kind==="APPLY"
+      // (=既存Lifecycle Eventが無い、真に新規の取消要求)の場合にのみ行う
+      // (「このCOMPLETE Eventの後に他の変更が加わっていないか」という鮮度確認は、
+      // 新規適用時にのみ意味を持ち、冪等再送の検出より後で良い)。
+      let originalCompleteEvent: { id: string; responsibilityVersionAfter: number } | null = null;
       if (s.completeEventId) {
         originalCompleteEvent = await tx.responsibilityExecutionEvent.findFirst({
           where: {
@@ -457,14 +473,13 @@ async function executeCompleteUndo(
             responsibilityId: t.id,
             eventType: "COMPLETE",
             subjectUserId: userId,
-            responsibilityVersionAfter: t.version,
           },
-          select: { id: true },
+          select: { id: true, responsibilityVersionAfter: true },
         });
         if (!originalCompleteEvent) {
           throw new InvalidUndoSnapshotError(
             `id=${t.id}: completeEventId "${s.completeEventId}" に一致するCOMPLETE Eventが` +
-              `見つかりません(workspace/responsibility/actor/versionのいずれかが不一致です)`,
+              `見つかりません(workspace/responsibility/actorのいずれかが不一致です)`,
           );
         }
       }
@@ -529,6 +544,21 @@ async function executeCompleteUndo(
 
       // decision.kind === "APPLY"
       // (nextStatus/nextCompletedAt/canRecordReopenは上で既に算出済み)
+      //
+      // [2026-08-26新設] 真に新規の取消要求の場合のみ、参照したCOMPLETE Eventが
+      // 「まだ最新の状態を表しているか(その後に他の変更が加わっていないか)」を
+      // 確認する。REPLAY_SUCCESS/REJECT_REUSEDの場合はこのチェックを行わない
+      // (versionは初回適用で既に進んでいるのが正常なため)。
+      if (originalCompleteEvent && isCompleteEventStale({
+        responsibilityVersionAfter: originalCompleteEvent.responsibilityVersionAfter,
+        currentVersion: t.version,
+      })) {
+        throw new InvalidUndoSnapshotError(
+          `id=${t.id}: completeEventId "${s.completeEventId}" は実在しますが、` +
+            `その後に他の変更が加わっており現在のversion(${t.version})と一致しません` +
+            `(このCOMPLETE Eventは既に古い状態を指しています)`,
+        );
+      }
 
       const updateResult = await tx.responsibility.updateMany({
         where: { id: t.id, version: t.version },
