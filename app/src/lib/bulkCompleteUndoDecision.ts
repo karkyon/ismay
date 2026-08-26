@@ -16,7 +16,7 @@
  * このファイルへ分離することで是正する。
  */
 import { createHash } from "node:crypto";
-import { isValidStatusForType } from "@/lib/responsibility";
+import { completeFromStatusesForType } from "@/lib/responsibility";
 
 /**
  * [Completion Gate 2.1] COMPLETE取消のidempotencyKey。
@@ -164,22 +164,40 @@ export function dedupeSnapshotById<T extends { id: string }>(snapshot: readonly 
 }
 
 /**
- * [2026-08-25新設・外部監査P1-5是正] Undo要求に含まれるstatusが、対象の実際の型に
- * とって有効な値かを検証する。用語・状態・コード定義書v1.1 3章が定義する値集合を
- * そのまま使う(想像で新しい値集合を作らない)。
+ * [2026-08-25新設・外部監査P1-5是正、2026-08-26拡張・外部監査Gate阻害2是正]
+ * Undo要求に含まれるstatus/completedAtが妥当かを検証する。
+ *
+ * [経緯・Gate阻害2] 当初はisValidStatusForType(その型として存在する値かどうかの
+ * 単純なenum検査)しか行っていなかった。これでは、例えばCOMMITMENTのUndoに
+ * "status":"BROKEN"を指定すると、BROKEN自体はCOMMITMENTの有効な状態値であるため
+ * 通過してしまい、FULFILL(完了操作)の遷移元として正しいACTIVE/AT_RISK以外の
+ * 値でも復元できてしまっていた(外部監査で指摘、Gate阻害)。
+ * 是正: completeFromStatusesForType(その型の完了操作の遷移元として定義済みの
+ * 値集合。COMMON_TRANSITIONS等に既に定義されているfrom配列をそのまま使うだけで、
+ * 想像で新しい値集合を作らない)で検証する。
+ *
+ * あわせて、完了操作の遷移元(=未完了の状態)へ復元するのにcompletedAtが
+ * 設定されているのは矛盾するため、completedAtはnullであることも要求する。
  */
 export class InvalidUndoSnapshotError extends Error {}
 
 export function validateSnapshotStatuses(
-  snapshot: readonly { id: string; status: string }[],
+  snapshot: readonly { id: string; status: string; completedAt: string | null }[],
   typeById: ReadonlyMap<string, string>,
 ): void {
   for (const s of snapshot) {
     const type = typeById.get(s.id);
     if (!type) continue; // 対象がこのWorkspaceに存在しない場合は後段の処理で無視される
-    if (!isValidStatusForType(type, s.status)) {
+    const validFromStatuses = completeFromStatusesForType(type);
+    if (!validFromStatuses.includes(s.status)) {
       throw new InvalidUndoSnapshotError(
-        `id=${s.id}: status "${s.status}" は種別 "${type}" にとって不正な値です`,
+        `id=${s.id}: status "${s.status}" は種別 "${type}" の完了操作の遷移元として不正です` +
+          `(許可値: ${validFromStatuses.join(", ") || "(定義なし)"})`,
+      );
+    }
+    if (s.completedAt !== null) {
+      throw new InvalidUndoSnapshotError(
+        `id=${s.id}: 完了前の状態(status="${s.status}")へ復元するのにcompletedAtがnullではありません`,
       );
     }
   }

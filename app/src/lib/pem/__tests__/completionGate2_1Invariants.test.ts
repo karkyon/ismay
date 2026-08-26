@@ -27,7 +27,7 @@ import assert from "node:assert/strict";
 import { apiError } from "@/lib/auth/response";
 import { CORRECTION_TYPES, LIFECYCLE_EVENT_KINDS } from "@/lib/pem/coreTypes";
 import { isExecutionLedgerApplicableType } from "@/lib/pem/eventDefinitionRegistry";
-import { isValidStatusForType } from "@/lib/responsibility";
+import { isValidStatusForType, completeFromStatusesForType } from "@/lib/responsibility";
 import {
   buildCompleteUndoIdempotencyKey,
   buildCompleteUndoRequestPayloadHash,
@@ -221,15 +221,57 @@ check(
 );
 
 check(
-  "validateSnapshotStatuses【外部監査P1-5是正】: 不正statusはInvalidUndoSnapshotErrorで" +
-    "バッチ全体を拒否する(部分適用を避けるため事前検証とする)",
+  "validateSnapshotStatuses【外部監査P1-5是正、Gate阻害2是正で強化】: " +
+    "完了操作の遷移元として許可されているstatusのみ通過させる。単純なenum検査では" +
+    "なく、completeFromStatusesForTypeで検証する",
   () => {
     const typeById = new Map([["resp-1", "COMMITMENT"]]);
+    // ACTIVE/AT_RISKはCOMMITMENT/FULFILLの遷移元として正しい。
     assert.doesNotThrow(() =>
-      validateSnapshotStatuses([{ id: "resp-1", status: "ACTIVE" }], typeById),
+      validateSnapshotStatuses([{ id: "resp-1", status: "ACTIVE", completedAt: null }], typeById),
+    );
+    assert.doesNotThrow(() =>
+      validateSnapshotStatuses([{ id: "resp-1", status: "AT_RISK", completedAt: null }], typeById),
+    );
+    // IN_PROGRESSはCOMMITMENTに存在しない値そのものなので不正。
+    assert.throws(
+      () => validateSnapshotStatuses([{ id: "resp-1", status: "IN_PROGRESS", completedAt: null }], typeById),
+      InvalidUndoSnapshotError,
+    );
+  },
+);
+
+check(
+  "validateSnapshotStatuses【外部監査再評価Gate阻害2是正の核心】: BROKENはCOMMITMENTの" +
+    "有効な状態値だが、FULFILL(完了操作)の遷移元としては不正なため拒否される" +
+    "(単純なenum検査(isValidStatusForType)だけでは通過してしまっていた不具合の是正。" +
+    "外部監査で指摘: 「FULFILLED→BROKENのような不正な復元が可能」)",
+  () => {
+    const typeById = new Map([["resp-1", "COMMITMENT"]]);
+    assert.equal(isValidStatusForType("COMMITMENT", "BROKEN"), true, "BROKEN自体はCOMMITMENTの有効な値");
+    assert.equal(
+      completeFromStatusesForType("COMMITMENT").includes("BROKEN"),
+      false,
+      "しかしFULFILLの遷移元としては定義されていない",
     );
     assert.throws(
-      () => validateSnapshotStatuses([{ id: "resp-1", status: "IN_PROGRESS" }], typeById),
+      () => validateSnapshotStatuses([{ id: "resp-1", status: "BROKEN", completedAt: null }], typeById),
+      InvalidUndoSnapshotError,
+    );
+  },
+);
+
+check(
+  "validateSnapshotStatuses: completedAtがnullでない場合はInvalidUndoSnapshotErrorで拒否する" +
+    "(完了操作の遷移元=未完了状態へ復元するのに完了日時が設定されているのは矛盾するため)",
+  () => {
+    const typeById = new Map([["resp-1", "COMMITMENT"]]);
+    assert.throws(
+      () =>
+        validateSnapshotStatuses(
+          [{ id: "resp-1", status: "ACTIVE", completedAt: "2026-08-01T00:00:00.000Z" }],
+          typeById,
+        ),
       InvalidUndoSnapshotError,
     );
   },

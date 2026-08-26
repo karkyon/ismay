@@ -60,6 +60,43 @@ export function isValidStatusForType(type: string, status: string): boolean {
   return allowed ? (allowed as readonly string[]).includes(status) : false;
 }
 
+/**
+ * [2026-08-26移設・外部監査Gate阻害2是正]
+ * 種別ごとの「完了」に相当するaction名。元はbulkOperations.tsのプライベート定数
+ * だったが、completeFromStatusesForTypeからも使うため、db非依存の語彙を集約する
+ * ここ(responsibility.ts)へ移設した。
+ * [2026-08-23バグ修正の経緯] 種別ごとの「完了」に相当するactionは統一されていない
+ * (COMMON=COMPLETE、COMMITMENT=FULFILL、WAITING=RESOLVE、RISK=CLOSE)。
+ */
+const COMPLETE_ACTION_BY_TYPE: Record<string, string> = {
+  COMMITMENT: "FULFILL",
+  WAITING: "RESOLVE",
+  RISK: "CLOSE",
+};
+export function completeActionFor(type: string): string {
+  return COMPLETE_ACTION_BY_TYPE[type] ?? "COMPLETE";
+}
+
+/**
+ * [2026-08-26新設・外部監査Gate阻害2是正]
+ * 種別ごとの「完了操作(completeActionFor)の遷移元として許可されているstatus」の
+ * 一覧を返す。COMMON_TRANSITIONS/COMMITMENT_TRANSITIONS等に既に定義されている
+ * from配列をそのまま使うだけであり、想像で新しい値集合を作らない。
+ *
+ * [経緯] executeCompleteUndoの検証は、当初isValidStatusForType(その型に存在する
+ * 値かどうかの単純なenum検査)しか行っていなかった。これでは、例えば
+ * COMMITMENTのUndoに"status":"BROKEN"を指定すると、BROKEN自体はCOMMITMENTの
+ * 有効な状態値であるため通過してしまい、FULFILLの遷移元として正しい
+ * ACTIVE/AT_RISK以外の値でも復元できてしまっていた(外部監査で指摘、Gate阻害2)。
+ * 是正: 「型として存在する値か」ではなく「その型の完了操作の遷移元として
+ * 許可されている値か」を検証する。
+ */
+export function completeFromStatusesForType(type: string): readonly string[] {
+  const completeAction = completeActionFor(type);
+  const rule = transitionsForType(type).find((r) => r.action === completeAction);
+  return rule?.from ?? [];
+}
+
 /** 作成時の初期状態。 */
 export function initialStatusFor(type: string): string {
   switch (type) {

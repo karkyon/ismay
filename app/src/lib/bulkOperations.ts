@@ -2,7 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import type { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
-import { transitionsForType, isTypeSpecificTerminalStatus } from "@/lib/responsibility";
+import { transitionsForType, isTypeSpecificTerminalStatus, completeActionFor } from "@/lib/responsibility";
 import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
 import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
 import { projectAndPersistExecutionSessions } from "@/lib/pem/sessionPersistence";
@@ -107,22 +107,10 @@ async function fetchTargets(ids: string[], workspaceId: string): Promise<TargetR
 }
 
 /**
- * [2026-08-23バグ修正] 種別ごとの「完了」に相当するactionは統一されていない
- * (COMMON=COMPLETE、COMMITMENT=FULFILL、WAITING=RESOLVE、RISK=CLOSE)。
- * 当初の実装は固定で"COMPLETE"のみを探しており、種別固有型は常に
- * 「現在の状態からは一括完了できません」としてスキップされてしまっていた
- * (実質的にTASK/EVENT/CONCERN/HABIT/IDEAでしか一括完了が機能していなかった)。
- * これは設計コメント「COMPLETEはDECISIONのみ対象外とする」という意図と矛盾する
- * 実装上の見落としであり、全ソース総点検で発見・修正した。
+ * [2026-08-26移設] completeActionForはresponsibility.tsへ移設した
+ * (completeFromStatusesForTypeからも使うため、db非依存の語彙を集約する
+ * responsibility.ts側で一元管理する)。
  */
-const COMPLETE_ACTION_BY_TYPE: Record<string, string> = {
-  COMMITMENT: "FULFILL",
-  WAITING: "RESOLVE",
-  RISK: "CLOSE",
-};
-function completeActionFor(type: string): string {
-  return COMPLETE_ACTION_BY_TYPE[type] ?? "COMPLETE";
-}
 
 async function bulkComplete(ids: string[], workspaceId: string, userId: string): Promise<BulkResult> {
   const targets = await fetchTargets(ids, workspaceId);
@@ -464,6 +452,11 @@ async function executeCompleteUndo(
       // (=既存Lifecycle Eventが無い、真に新規の取消要求)の場合にのみ行う
       // (「このCOMPLETE Eventの後に他の変更が加わっていないか」という鮮度確認は、
       // 新規適用時にのみ意味を持ち、冪等再送の検出より後で良い)。
+      // [外部監査再評価・Gate阻害是正の核心の前提]
+      // ledgerApplicableはtypeのみで決まるため、completeEventId省略時の
+      // 監査記録回避チェック(直後)より前にここで算出しておく。
+      const ledgerApplicable = isExecutionLedgerApplicableType(t.type);
+
       let originalCompleteEvent: { id: string; responsibilityVersionAfter: number } | null = null;
       if (s.completeEventId) {
         originalCompleteEvent = await tx.responsibilityExecutionEvent.findFirst({
@@ -482,6 +475,37 @@ async function executeCompleteUndo(
               `見つかりません(workspace/responsibility/actorのいずれかが不一致です)`,
           );
         }
+      } else if (ledgerApplicable) {
+        // [2026-08-26新設・外部監査Gate阻害1是正]
+        // completeEventIdが省略されている場合、従来はそのまま「対象イベント無し」の
+        // 後方互換パスとして扱っていた。しかしこれは、悪意あるまたは壊れたクライアントが
+        // completeEventIdを単に省略するだけでCorrection追跡(REOPEN Execution Event・
+        // REVOKE Lifecycle Event)を回避できてしまう抜け道だった(外部監査で指摘、
+        // Gate阻害)。
+        // 是正: completeEventIdが無くても、現在のversionに対応するCOMPLETE Eventが
+        // 実際にDB上に存在するかを必ずサーバー側で確認する。存在するのに
+        // completeEventIdが省略されている場合は、正規の後方互換ケース(旧形式
+        // クライアント)ではなく評価回避の疑いがあるため拒否する。
+        // 「本当に存在しない」場合(PEM同意未取得で記録自体がスキップされていた場合)
+        // のみ、後方互換の単純復元パスを許可する。
+        const existingCompleteEvent = await tx.responsibilityExecutionEvent.findFirst({
+          where: {
+            workspaceId,
+            responsibilityId: t.id,
+            eventType: "COMPLETE",
+            subjectUserId: userId,
+            responsibilityVersionAfter: t.version,
+          },
+          select: { id: true },
+        });
+        if (existingCompleteEvent) {
+          throw new InvalidUndoSnapshotError(
+            `id=${t.id}: 現在のversion(${t.version})に対応するCOMPLETE Event` +
+              `(id=${existingCompleteEvent.id})がDB上に存在するにもかかわらず、` +
+              `completeEventIdが指定されていません。取消対象のcompleteEventIdを` +
+              `明示的に指定してください`,
+          );
+        }
       }
 
       // [外部監査再評価・Gate阻害是正の核心]
@@ -496,7 +520,6 @@ async function executeCompleteUndo(
       // Execution Ledger対象型(ledgerApplicable)であれば、Eventを特定できるか否かに
       // 関わらず、常にPLANNEDへ固定する(単一アイテムのREOPENアクションと同じ意味論)。
       // Eventを特定できた場合のみ、追加でExecution Ledger/Lifecycle Eventへ記録する。
-      const ledgerApplicable = isExecutionLedgerApplicableType(t.type);
       const canRecordReopen = ledgerApplicable && Boolean(originalCompleteEvent);
       const nextStatus = decideCompleteUndoNextStatus({
         ledgerApplicable,

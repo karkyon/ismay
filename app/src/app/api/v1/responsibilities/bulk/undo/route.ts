@@ -32,6 +32,12 @@ const CompleteUndoSchema = z.object({
         completeEventId: z.string().uuid().nullable().optional(),
       }),
     )
+    // [2026-08-26追加・外部監査「Undo APIのsnapshotに.max(200)が無い」是正]
+    // Bulk API(POST /responsibilities/bulk)はids.min(1).max(200)を要求しているが、
+    // Undo APIには対応する上限が無く、200件を超えるsnapshotを直接送れてしまって
+    // いた。同じ上限をここにも課す。
+    .min(1)
+    .max(200)
     // [2026-08-25新設・外部監査P1-3是正] snapshot内のid重複を拒否する
     // (重複を許すとrestored件数が水増しされ得るため)。
     .refine(
@@ -41,11 +47,11 @@ const CompleteUndoSchema = z.object({
 });
 const DeleteUndoSchema = z.object({
   action: z.literal("DELETE"),
-  ids: z.array(z.string().uuid()),
+  ids: z.array(z.string().uuid()).min(1).max(200),
 });
 const TagUndoSchema = z.object({
   action: z.enum(["ADD_TAG", "REMOVE_TAG"]),
-  ids: z.array(z.string().uuid()),
+  ids: z.array(z.string().uuid()).min(1).max(200),
   tagId: z.string().uuid(),
 });
 const UndoSchema = z.union([CompleteUndoSchema, DeleteUndoSchema, TagUndoSchema]);
