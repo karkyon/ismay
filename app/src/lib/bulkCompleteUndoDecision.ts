@@ -181,6 +181,49 @@ export function dedupeSnapshotById<T extends { id: string }>(snapshot: readonly 
  */
 export class InvalidUndoSnapshotError extends Error {}
 
+/**
+ * [2026-08-26新設・実行時に発見した順序バグの是正]
+ * 単一アイテム用の検証。呼び出し元(executeCompleteUndo)は、これを
+ * decideCompleteUndoActionがAPPLY(=既存Lifecycle Eventが無い、真に新規の
+ * 取消要求)と判定した場合にのみ呼ぶこと。
+ *
+ * [経緯] 当初はこの検証をバッチ全体の事前検証として、トランザクション開始前・
+ * 冪等判定(decideCompleteUndoAction)より前に一括で行っていた
+ * (validateSnapshotStatuses参照)。これはisCompleteEventStaleで既に発見・是正した
+ * ものと全く同じ順序バグだった: 「同一payload再送」「混在バッチでの
+ * REJECT_REUSED検出」のテストが、本来到達すべき冪等判定より前にこの検証で
+ * VALIDATION_FAILEDとして拒否されてしまっていた(omega-dev2での実行で実際に
+ * 再現・特定した)。REJECT_REUSED判定に使う「異なるpayload」は、意図的に
+ * (このAPIとしては最終的に不正となる)completedAt等の値を含めて構築されるため、
+ * 冪等判定より前にstatus/completedAtの妥当性を検証してはいけない。
+ */
+export function validateCompleteUndoTarget(params: {
+  id: string;
+  type: string;
+  status: string;
+  completedAt: string | null;
+}): void {
+  const validFromStatuses = completeFromStatusesForType(params.type);
+  if (!validFromStatuses.includes(params.status)) {
+    throw new InvalidUndoSnapshotError(
+      `id=${params.id}: status "${params.status}" は種別 "${params.type}" の完了操作の遷移元として不正です` +
+        `(許可値: ${validFromStatuses.join(", ") || "(定義なし)"})`,
+    );
+  }
+  if (params.completedAt !== null) {
+    throw new InvalidUndoSnapshotError(
+      `id=${params.id}: 完了前の状態(status="${params.status}")へ復元するのにcompletedAtがnullではありません`,
+    );
+  }
+}
+
+/**
+ * [2026-08-25新設・外部監査P1-5是正、2026-08-26拡張・外部監査Gate阻害2是正]
+ * validateCompleteUndoTargetをsnapshot全件へ適用するラッパー。
+ * テストやツールからバッチ単位で検証したい場合に使う(bulkOperations.tsの
+ * 本番実行経路では、この一括版ではなく単一アイテム版をAPPLY分岐でのみ呼ぶ。
+ * 理由はvalidateCompleteUndoTargetのコメントを参照)。
+ */
 export function validateSnapshotStatuses(
   snapshot: readonly { id: string; status: string; completedAt: string | null }[],
   typeById: ReadonlyMap<string, string>,
@@ -188,17 +231,6 @@ export function validateSnapshotStatuses(
   for (const s of snapshot) {
     const type = typeById.get(s.id);
     if (!type) continue; // 対象がこのWorkspaceに存在しない場合は後段の処理で無視される
-    const validFromStatuses = completeFromStatusesForType(type);
-    if (!validFromStatuses.includes(s.status)) {
-      throw new InvalidUndoSnapshotError(
-        `id=${s.id}: status "${s.status}" は種別 "${type}" の完了操作の遷移元として不正です` +
-          `(許可値: ${validFromStatuses.join(", ") || "(定義なし)"})`,
-      );
-    }
-    if (s.completedAt !== null) {
-      throw new InvalidUndoSnapshotError(
-        `id=${s.id}: 完了前の状態(status="${s.status}")へ復元するのにcompletedAtがnullではありません`,
-      );
-    }
+    validateCompleteUndoTarget({ id: s.id, type, status: s.status, completedAt: s.completedAt });
   }
 }

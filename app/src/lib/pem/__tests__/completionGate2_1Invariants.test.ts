@@ -35,6 +35,7 @@ import {
   decideCompleteUndoNextStatus,
   dedupeSnapshotById,
   isCompleteEventStale,
+  validateCompleteUndoTarget,
   validateSnapshotStatuses,
   IdempotencyKeyReusedError,
   InvalidUndoSnapshotError,
@@ -329,6 +330,54 @@ check(
       isCompleteEventStale({ responsibilityVersionAfter: 3, currentVersion: 4 }),
       true,
       "不一致ならtrue(このEventは既に古い状態を指しているため拒否すべき)",
+    );
+  },
+);
+
+check(
+  "validateCompleteUndoTarget【実行時に発見した順序バグの回帰防止】: 単一アイテム版が" +
+    "validateSnapshotStatusesと同じ判定基準で動作する(このスクリプトのバッチ版" +
+    "wrapper自体が正しく単一アイテム版へ委譲していることの確認)",
+  () => {
+    assert.doesNotThrow(() =>
+      validateCompleteUndoTarget({ id: "resp-1", type: "COMMITMENT", status: "ACTIVE", completedAt: null }),
+    );
+    assert.throws(
+      () => validateCompleteUndoTarget({ id: "resp-1", type: "COMMITMENT", status: "BROKEN", completedAt: null }),
+      InvalidUndoSnapshotError,
+    );
+    assert.throws(
+      () =>
+        validateCompleteUndoTarget({
+          id: "resp-1",
+          type: "COMMITMENT",
+          status: "ACTIVE",
+          completedAt: "2026-08-01T00:00:00.000Z",
+        }),
+      InvalidUndoSnapshotError,
+    );
+  },
+);
+
+check(
+  "【重要・実行時に発見した順序バグの回帰防止(2件目)】bulkOperations.tsの" +
+    "executeCompleteUndoは、status/completedAtの妥当性検証(validateCompleteUndoTarget)を" +
+    "isCompleteEventStaleと同様、decideCompleteUndoActionがAPPLYと判定した場合にのみ" +
+    "呼ぶ設計になっていること。この設計原則自体はコード上のコメントでのみ保証されて" +
+    "おり、ここでは「validateSnapshotStatuses(バッチ全体の事前検証用wrapper)を" +
+    "bulkOperations.tsの本番実行経路(トランザクション開始前)から呼んではならない」" +
+    "という設計判断を記録として残す(経緯: 当初はここでバッチ全体を事前検証しており、" +
+    "『同一payload再送』『混在バッチでのREJECT_REUSED検出』が本来到達すべき" +
+    "decideCompleteUndoActionより前にVALIDATION_FAILEDで拒否されてしまっていた。" +
+    "isCompleteEventStaleで一度学んだのと全く同じ順序の教訓を、別の検証(status" +
+    "妥当性)でも繰り返してしまっていた。omega-dev2での実行で実際に再現・特定した)",
+  () => {
+    // このテスト自体はドキュメントとしての意味が主だが、validateSnapshotStatusesが
+    // 依然としてvalidateCompleteUndoTargetの薄いラッパーとして機能することだけは
+    // 機械的に確認しておく。
+    const typeById = new Map([["resp-1", "TASK"]]);
+    assert.doesNotThrow(() =>
+      validateSnapshotStatuses([{ id: "resp-1", status: "IN_PROGRESS", completedAt: null }], typeById),
     );
   },
 );

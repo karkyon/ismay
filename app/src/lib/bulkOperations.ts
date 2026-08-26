@@ -14,7 +14,7 @@ import {
   decideCompleteUndoNextStatus,
   dedupeSnapshotById,
   isCompleteEventStale,
-  validateSnapshotStatuses,
+  validateCompleteUndoTarget,
   IdempotencyKeyReusedError,
   InvalidUndoSnapshotError,
 } from "@/lib/bulkCompleteUndoDecision";
@@ -406,9 +406,10 @@ async function executeCompleteUndo(
   const targets = await fetchTargets(ids, workspaceId);
   const targetById = new Map(targets.map((t) => [t.id, t]));
 
-  // [P1-5是正] 書き込みを一切行う前に、全件のstatusを検証する(事前検証)。
-  const typeById = new Map(targets.map((t) => [t.id, t.type]));
-  validateSnapshotStatuses(snapshot, typeById);
+  // [2026-08-26是正・実行時に発見した順序バグ] statusの妥当性検証(旧:ここで
+  // バッチ全体を事前検証していた)は、APPLY分岐(真に新規の取消要求)でのみ行う
+  // よう移動した(isCompleteEventStaleと同じ理由。詳細はvalidateCompleteUndoTarget
+  // のコメントを参照)。ループ内でt.typeを直接使うため、ここでの事前算出は不要。
 
   const pemCtx = await buildPemAuthorizationContext(userId, userId);
 
@@ -582,6 +583,12 @@ async function executeCompleteUndo(
             `(このCOMPLETE Eventは既に古い状態を指しています)`,
         );
       }
+
+      // [2026-08-26新設・外部監査Gate阻害2是正、実行時に発見した順序バグの是正]
+      // status/completedAtの妥当性検証も、isCompleteEventStaleと同じ理由で
+      // APPLY分岐でのみ行う(冪等判定より前に行うと、REJECT_REUSED判定に使う
+      // 「異なるpayload」がVALIDATION_FAILEDに化けてしまう)。
+      validateCompleteUndoTarget({ id: t.id, type: t.type, status: s.status, completedAt: s.completedAt });
 
       const updateResult = await tx.responsibility.updateMany({
         where: { id: t.id, version: t.version },
