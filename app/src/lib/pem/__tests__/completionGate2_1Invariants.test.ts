@@ -7,21 +7,20 @@
  * contract)・8.1節(Correction)、ISMAY_PEM_v3_3_1整合性修正_用語コード定義書_v1_0 8章。
  *
  * completionGate1Invariants.test.tsと同じ方針で、db依存の関数
- * (executeUndo/resetForNextCycle本体等)は実DB統合検証(omega-dev2の実Postgres、
- * 別途実施)に委ね、ここではdb非依存の語彙・型・純粋関数のみ検証する。
- * ただし[外部監査対応・2026-08-25]、Undoの冪等判定分岐(decideCompleteUndoAction)は
- * DBアクセスから完全に分離した純粋関数として実装したため、ここで分岐網羅を検証できる
- * (「同一冪等キーの再送で重複Eventが生成されない」「異なるpayloadで同一キーを
- * 再利用するとIDEMPOTENCY_KEY_REUSED」の"判断ロジック"はここで検証済み。
- * 実際にDB上でEventが重複作成されないこと自体は、実PostgreSQLに対する実API
- * 呼び出しでの確認が別途必要)。
+ * (executeUndo/bulkComplete本体等)は実DB統合検証(omega-dev2の実Postgres、
+ * scripts/verify_gate_2_1_live.ts)に委ね、ここではdb非依存の純粋関数のみ検証する。
  *
- * [2026-08-25是正] 純粋関数はbulkOperations.ts経由ではなく、db.tsに依存しない
- * bulkCompleteUndoDecision.tsから直接importする。bulkOperations.tsはdb.tsを
- * importしており、db.tsはモジュール読込時にDATABASE_URLが無いとthrowするため、
- * bulkOperations.ts経由でimportするとこのテストがdb非依存でなくなってしまう
- * (executionLedgerMapping.tsと同じ設計原則。実際にこの分離をしていなかった版で
- * DATABASE_URL未設定環境でのテストクラッシュを引き起こした)。
+ * [2026-08-26全面改訂・外部監査で指摘された根本問題の是正に伴う書き換え]
+ * これまでのCompletion Gate 2.1実装は、クライアントが保持するsnapshot
+ * (status/completedAt/completeEventId)をUndoの信頼元にしていた。これは
+ * 繰り返しの外部監査で「改ざんによる誤復元」「Ledger記録有無への冪等性の
+ * 依存」という2つの根本的な問題を指摘され、Undo Receipt方式
+ * (Bulk Complete実行時にサーバー側insert-onlyで保存するBulkCompleteReceiptを
+ * 復元先の唯一の正本とし、クライアントはreceiptIdだけを持ち回る)へ全面移行した。
+ * これに伴い、旧設計のstatus/completedAt検証関数(validateCompleteUndoTarget等)・
+ * type別のnextStatus決定関数(decideCompleteUndoNextStatus)・version鮮度チェック
+ * (isCompleteEventStale)は全て不要になり削除した(該当ロジックはbulkOperations.ts
+ * 側でreceipt.fromStatus/receipt.toStatusを直接使う形に置き換わったため)。
  */
 import assert from "node:assert/strict";
 import { apiError } from "@/lib/auth/response";
@@ -32,11 +31,7 @@ import {
   buildCompleteUndoIdempotencyKey,
   buildCompleteUndoRequestPayloadHash,
   decideCompleteUndoAction,
-  decideCompleteUndoNextStatus,
   dedupeSnapshotById,
-  isCompleteEventStale,
-  validateCompleteUndoTarget,
-  validateSnapshotStatuses,
   IdempotencyKeyReusedError,
   InvalidUndoSnapshotError,
 } from "@/lib/bulkCompleteUndoDecision";
@@ -66,70 +61,41 @@ check("LIFECYCLE_EVENT_KINDSはCORRECTION/RECURRENCE_RESETの2値ちょうどで
   assert.deepEqual([...LIFECYCLE_EVENT_KINDS].sort(), ["CORRECTION", "RECURRENCE_RESET"].sort());
 });
 
-check("buildCompleteUndoIdempotencyKeyは責任IDと取消対象EventIDから決定論的なキーを生成する", () => {
-  const key1 = buildCompleteUndoIdempotencyKey("resp-1", "event-1");
-  const key2 = buildCompleteUndoIdempotencyKey("resp-1", "event-1");
-  const key3 = buildCompleteUndoIdempotencyKey("resp-1", "event-2");
-  assert.equal(key1, key2, "同一入力からは同一キーが決定論的に生成される(冪等性の基盤)");
-  assert.notEqual(key1, key3, "取消対象Eventが異なれば別キーになる");
-  assert.equal(key1, "resp-1:UNDO_COMPLETE:event-1");
-});
-
 check(
-  "buildCompleteUndoRequestPayloadHashはcompletedAtの差分も検出する" +
-    "(外部監査P0-2是正: 当初snapshotStatusのみをhash対象としており、" +
-    "completedAtだけが異なる別内容のUndo要求を同一payloadと誤判定していた)",
+  "buildCompleteUndoIdempotencyKey【2026-08-26改訂】は責任IDとreceiptIdから" +
+    "決定論的なキーを生成する(旧設計ではcompleteEventIdを使っていたが、新設計では" +
+    "receiptId自体が取消対象を一意に表すためこちらを使う)",
   () => {
-    const hashA = buildCompleteUndoRequestPayloadHash({
-      responsibilityId: "resp-1",
-      snapshotStatus: "IN_PROGRESS",
-      snapshotCompletedAt: "2026-08-01T00:00:00.000Z",
-      snapshotCompleteEventId: "event-1",
-    });
-    const hashB = buildCompleteUndoRequestPayloadHash({
-      responsibilityId: "resp-1",
-      snapshotStatus: "IN_PROGRESS",
-      snapshotCompletedAt: "2026-08-02T00:00:00.000Z",
-      snapshotCompleteEventId: "event-1",
-    });
-    const hashA2 = buildCompleteUndoRequestPayloadHash({
-      responsibilityId: "resp-1",
-      snapshotStatus: "IN_PROGRESS",
-      snapshotCompletedAt: "2026-08-01T00:00:00.000Z",
-      snapshotCompleteEventId: "event-1",
-    });
-    assert.notEqual(hashA, hashB, "completedAtが異なれば別hashになる");
-    assert.equal(hashA, hashA2, "同一入力からは同一hashが決定論的に生成される");
+    const key1 = buildCompleteUndoIdempotencyKey("resp-1", "receipt-1");
+    const key2 = buildCompleteUndoIdempotencyKey("resp-1", "receipt-1");
+    const key3 = buildCompleteUndoIdempotencyKey("resp-1", "receipt-2");
+    assert.equal(key1, key2, "同一入力からは同一キーが決定論的に生成される(冪等性の基盤)");
+    assert.notEqual(key1, key3, "取消対象レシートが異なれば別キーになる");
+    assert.equal(key1, "resp-1:UNDO_COMPLETE:receipt-1");
   },
 );
 
 check(
-  "buildCompleteUndoRequestPayloadHash【外部監査再評価対応】: completeEventIdの差分も" +
-    "検出する(status/completedAtが同じでも取消対象Eventが異なれば別hashになる必要がある)",
+  "buildCompleteUndoRequestPayloadHash【2026-08-26全面改訂】はreceiptIdのみを" +
+    "入力とする(旧設計ではstatus/completedAt/completeEventIdの組み合わせを" +
+    "hashしていたが、新設計ではクライアントが送るのはreceiptIdのみになったため" +
+    "単純化された)",
   () => {
-    const hashA = buildCompleteUndoRequestPayloadHash({
-      responsibilityId: "resp-1",
-      snapshotStatus: "COMPLETED",
-      snapshotCompletedAt: null,
-      snapshotCompleteEventId: "event-1",
-    });
-    const hashB = buildCompleteUndoRequestPayloadHash({
-      responsibilityId: "resp-1",
-      snapshotStatus: "COMPLETED",
-      snapshotCompletedAt: null,
-      snapshotCompleteEventId: "event-2",
-    });
-    assert.notEqual(hashA, hashB, "completeEventIdが異なれば別hashになる");
+    const hashA = buildCompleteUndoRequestPayloadHash({ receiptId: "receipt-1" });
+    const hashA2 = buildCompleteUndoRequestPayloadHash({ receiptId: "receipt-1" });
+    const hashB = buildCompleteUndoRequestPayloadHash({ receiptId: "receipt-2" });
+    assert.equal(hashA, hashA2, "同一receiptIdからは同一hashが決定論的に生成される");
+    assert.notEqual(hashA, hashB, "receiptIdが異なれば別hashになる");
   },
 );
 
 check(
-  "decideCompleteUndoAction: 既存Lifecycle Eventが無く、現在statusがCOMPLETEDならAPPLY" +
-    "(初回Undo要求)",
+  "decideCompleteUndoAction: 既存の冪等記録(consumption)が無く、" +
+    "currentlyCompleted=trueならAPPLY(初回Undo要求)",
   () => {
     const decision = decideCompleteUndoAction({
       currentlyCompleted: true,
-      existingLifecycleEvent: null,
+      existingConsumption: null,
       requestPayloadHash: "hash-a",
     });
     assert.deepEqual(decision, { kind: "APPLY" });
@@ -137,12 +103,13 @@ check(
 );
 
 check(
-  "decideCompleteUndoAction: 既存Lifecycle Eventが無く、現在statusがCOMPLETED以外なら" +
-    "SKIP_NOT_COMPLETED",
+  "decideCompleteUndoAction: 既存の冪等記録が無く、currentlyCompleted=falseなら" +
+    "SKIP_NOT_COMPLETED(レシートのtoStatusと現在statusが不一致 = 他の操作で" +
+    "既に状態が変わっている)",
   () => {
     const decision = decideCompleteUndoAction({
       currentlyCompleted: false,
-      existingLifecycleEvent: null,
+      existingConsumption: null,
       requestPayloadHash: "hash-a",
     });
     assert.deepEqual(decision, { kind: "SKIP_NOT_COMPLETED" });
@@ -150,15 +117,15 @@ check(
 );
 
 check(
-  "decideCompleteUndoAction【外部監査P0-1是正の核心】: 既存Lifecycle Eventがあり" +
-    "同一payloadなら、現在statusが(初回Undoで既に変わっている)COMPLETED以外でも" +
-    "REPLAY_SUCCESSを返す(status判定より前にLifecycle Event確認を行うことで、" +
-    "『同一key・同一payloadの再送は元の成功応答を返す』というv4.0 5.5節の要件を満たす。" +
-    "是正前はここでSKIP_NOT_COMPLETED相当となりrestored:0を返す不具合があった)",
+  "decideCompleteUndoAction【外部監査P0-1是正の核心・新設計でも維持】: " +
+    "既存の冪等記録があり同一payloadなら、currentlyCompletedが(初回Undoで" +
+    "既に変わっている)falseでもREPLAY_SUCCESSを返す(冪等記録の確認をstatus判定" +
+    "より前に行うことで、『同一key・同一payloadの再送は元の成功応答を返す』という" +
+    "v4.0 5.5節の要件を満たす)",
   () => {
     const decision = decideCompleteUndoAction({
-      currentlyCompleted: false, // 初回UndoでCOMPLETED→PLANNEDへ既に変わった後
-      existingLifecycleEvent: { requestPayloadHash: "hash-a" },
+      currentlyCompleted: false, // 初回UndoでtoStatusから離れた後
+      existingConsumption: { requestPayloadHash: "hash-a" },
       requestPayloadHash: "hash-a",
     });
     assert.deepEqual(decision, { kind: "REPLAY_SUCCESS" });
@@ -166,12 +133,14 @@ check(
 );
 
 check(
-  "decideCompleteUndoAction: 既存Lifecycle Eventがあり異なるpayloadならREJECT_REUSED" +
-    "(currentStatusに関わらず拒否する)",
+  "decideCompleteUndoAction: 既存の冪等記録があり異なるpayloadならREJECT_REUSED" +
+    "(currentlyCompletedに関わらず拒否する。新設計ではpayloadにreceiptId以外の" +
+    "可変フィールドが無いため実質到達しない防御的分岐だが、関数自体の正しさは" +
+    "変わらず検証する)",
   () => {
     const decision = decideCompleteUndoAction({
       currentlyCompleted: false,
-      existingLifecycleEvent: { requestPayloadHash: "hash-a" },
+      existingConsumption: { requestPayloadHash: "hash-a" },
       requestPayloadHash: "hash-b",
     });
     assert.deepEqual(decision, { kind: "REJECT_REUSED" });
@@ -185,13 +154,35 @@ check("IdempotencyKeyReusedErrorはErrorのサブクラスであり、message経
   assert.equal(res.status, 409);
 });
 
+check("InvalidUndoSnapshotErrorはErrorのサブクラスであり、message経由でapiErrorへVALIDATION_FAILEDとして変換できる", () => {
+  const err = new InvalidUndoSnapshotError("receiptIdに一致するUndo Receiptが見つかりません");
+  assert.ok(err instanceof Error);
+  const res = apiError("VALIDATION_FAILED", err.message);
+  assert.equal(res.status, 400);
+});
+
+check(
+  "dedupeSnapshotById【外部監査P1-3是正・新設計でも維持】: id重複を先勝ちで除去し、" +
+    "restored件数の水増しを防ぐ",
+  () => {
+    const input: { id: string; receiptId: string }[] = [
+      { id: "a", receiptId: "r1" },
+      { id: "b", receiptId: "r2" },
+      { id: "a", receiptId: "r3" }, // 重複(2件目)
+    ];
+    const result = dedupeSnapshotById(input);
+    assert.equal(result.length, 2);
+    assert.deepEqual(result.map((r) => r.id).sort(), ["a", "b"]);
+    assert.equal(result.find((r) => r.id === "a")?.receiptId, "r1", "先勝ち(最初の値)を採用する");
+  },
+);
+
 check(
   "executeUndo(COMPLETE)がExecution Ledger(REOPEN語彙)へ接続できるのは共通状態型のみ" +
     "(COMMITMENT/WAITING/RISK等の種別固有型はExecution Ledger対象外のため、" +
-    "スナップショットstatusへの直接復元のみが行われ、Lifecycle Eventも記録されない。" +
-    "外部監査P1: 「いずれの場合も必ず記録する」という当初のコメントは誤りであり、" +
-    "訂正対象の元Eventを特定できた場合のみ記録される、とbulkOperations.tsのコメントを" +
-    "訂正した)",
+    "レシートのfromStatusへの直接復元のみが行われる。新設計ではこの判定自体は" +
+    "変わらないが、復元先の値(fromStatus)は常にサーバー保存の真の値であり、" +
+    "クライアントが改ざんする余地は無くなった)",
   () => {
     assert.equal(isExecutionLedgerApplicableType("TASK"), true);
     assert.equal(isExecutionLedgerApplicableType("EVENT"), true);
@@ -206,223 +197,17 @@ check(
 );
 
 check(
-  "dedupeSnapshotById【外部監査P1-3是正】: id重複を先勝ちで除去し、restored件数の" +
-    "水増しを防ぐ",
-  () => {
-    const input: { id: string; v: number }[] = [
-      { id: "a", v: 1 },
-      { id: "b", v: 2 },
-      { id: "a", v: 3 }, // 重複(2件目)
-    ];
-    const result = dedupeSnapshotById(input);
-    assert.equal(result.length, 2);
-    assert.deepEqual(result.map((r) => r.id).sort(), ["a", "b"]);
-    assert.equal(result.find((r) => r.id === "a")?.v, 1, "先勝ち(最初の値)を採用する");
-  },
-);
-
-check(
-  "validateSnapshotStatuses【外部監査P1-5是正、Gate阻害2是正で強化】: " +
-    "完了操作の遷移元として許可されているstatusのみ通過させる。単純なenum検査では" +
-    "なく、completeFromStatusesForTypeで検証する",
-  () => {
-    const typeById = new Map([["resp-1", "COMMITMENT"]]);
-    // ACTIVE/AT_RISKはCOMMITMENT/FULFILLの遷移元として正しい。
-    assert.doesNotThrow(() =>
-      validateSnapshotStatuses([{ id: "resp-1", status: "ACTIVE", completedAt: null }], typeById),
-    );
-    assert.doesNotThrow(() =>
-      validateSnapshotStatuses([{ id: "resp-1", status: "AT_RISK", completedAt: null }], typeById),
-    );
-    // IN_PROGRESSはCOMMITMENTに存在しない値そのものなので不正。
-    assert.throws(
-      () => validateSnapshotStatuses([{ id: "resp-1", status: "IN_PROGRESS", completedAt: null }], typeById),
-      InvalidUndoSnapshotError,
-    );
-  },
-);
-
-check(
-  "validateSnapshotStatuses【外部監査再評価Gate阻害2是正の核心】: BROKENはCOMMITMENTの" +
-    "有効な状態値だが、FULFILL(完了操作)の遷移元としては不正なため拒否される" +
-    "(単純なenum検査(isValidStatusForType)だけでは通過してしまっていた不具合の是正。" +
-    "外部監査で指摘: 「FULFILLED→BROKENのような不正な復元が可能」)",
-  () => {
-    const typeById = new Map([["resp-1", "COMMITMENT"]]);
-    assert.equal(isValidStatusForType("COMMITMENT", "BROKEN"), true, "BROKEN自体はCOMMITMENTの有効な値");
-    assert.equal(
-      completeFromStatusesForType("COMMITMENT").includes("BROKEN"),
-      false,
-      "しかしFULFILLの遷移元としては定義されていない",
-    );
-    assert.throws(
-      () => validateSnapshotStatuses([{ id: "resp-1", status: "BROKEN", completedAt: null }], typeById),
-      InvalidUndoSnapshotError,
-    );
-  },
-);
-
-check(
-  "validateSnapshotStatuses: completedAtがnullでない場合はInvalidUndoSnapshotErrorで拒否する" +
-    "(完了操作の遷移元=未完了状態へ復元するのに完了日時が設定されているのは矛盾するため)",
-  () => {
-    const typeById = new Map([["resp-1", "COMMITMENT"]]);
-    assert.throws(
-      () =>
-        validateSnapshotStatuses(
-          [{ id: "resp-1", status: "ACTIVE", completedAt: "2026-08-01T00:00:00.000Z" }],
-          typeById,
-        ),
-      InvalidUndoSnapshotError,
-    );
-  },
-);
-
-check(
-  "decideCompleteUndoNextStatus【外部監査再評価・Gate阻害是正の回帰防止、" +
-    "2026-08-26再々評価でさらに拡張】: Execution Ledger対象型では常にPLANNED、" +
-    "対象外型ではinitialStatusFor(type)に固定される。どちらもクライアント供給の" +
-    "statusは一切参照しない(以前は対象外型のみクライアント供給値をそのまま" +
-    "使っており、AT_RISK等『完了操作の遷移元として有効な別のstatus』への" +
-    "改ざんで誤った状態へ復元できてしまっていた。外部監査で指摘、Gate阻害と" +
-    "再判定)",
-  () => {
-    assert.equal(
-      decideCompleteUndoNextStatus({ ledgerApplicable: true, type: "TASK" }),
-      "PLANNED",
-      "Execution Ledger対象型は常にPLANNED",
-    );
-    assert.equal(
-      decideCompleteUndoNextStatus({ ledgerApplicable: false, type: "COMMITMENT" }),
-      "ACTIVE",
-      "COMMITMENTはinitialStatusForに従いACTIVEへ固定される(AT_RISKへの改ざんは無効)",
-    );
-    assert.equal(
-      decideCompleteUndoNextStatus({ ledgerApplicable: false, type: "WAITING" }),
-      "WAITING",
-      "WAITINGはinitialStatusForに従いWAITINGへ固定される(FOLLOW_UP_DUEへの改ざんは無効)",
-    );
-    assert.equal(
-      decideCompleteUndoNextStatus({ ledgerApplicable: false, type: "RISK" }),
-      "OPEN",
-      "RISKはinitialStatusForに従いOPENへ固定される(MONITORING等への改ざんは無効)",
-    );
-  },
-);
-
-
-check("isValidStatusForType【外部監査P1-5是正】: 共通状態型と種別固有型それぞれで" +
-    "定義済みの値のみ有効と判定する(用語・状態・コード定義書v1.1 3章)",
-  () => {
-    assert.equal(isValidStatusForType("TASK", "IN_PROGRESS"), true);
-    assert.equal(isValidStatusForType("TASK", "ACTIVE"), false, "ACTIVEはCOMMITMENT用でTASKには無い");
-    assert.equal(isValidStatusForType("COMMITMENT", "ACTIVE"), true);
-    assert.equal(isValidStatusForType("COMMITMENT", "IN_PROGRESS"), false, "IN_PROGRESSは共通状態型用でCOMMITMENTには無い");
-    assert.equal(isValidStatusForType("COMMITMENT", "not_a_real_status"), false);
-  },
-);
-
-check(
-  "isCompleteEventStale【実行時に発見した不具合の回帰防止】: 一致すればfalse、" +
-    "不一致ならtrueを返す(この判定はdecideCompleteUndoActionがAPPLYと判定した" +
-    "場合にのみ使うこと。冪等再送(REPLAY_SUCCESS/REJECT_REUSED)の判定より前に" +
-    "version不一致で弾くと、正しく機能していた冪等判定に到達できず、同一payload" +
-    "再送や混在バッチでのREJECT_REUSED検出が壊れることを実際にomega-dev2での" +
-    "実行で確認した)",
-  () => {
-    assert.equal(
-      isCompleteEventStale({ responsibilityVersionAfter: 3, currentVersion: 3 }),
-      false,
-      "一致すればfalse(新規適用してよい)",
-    );
-    assert.equal(
-      isCompleteEventStale({ responsibilityVersionAfter: 3, currentVersion: 4 }),
-      true,
-      "不一致ならtrue(このEventは既に古い状態を指しているため拒否すべき)",
-    );
-  },
-);
-
-check(
-  "validateCompleteUndoTarget【実行時に発見した順序バグの回帰防止】: 単一アイテム版が" +
-    "validateSnapshotStatusesと同じ判定基準で動作する(このスクリプトのバッチ版" +
-    "wrapper自体が正しく単一アイテム版へ委譲していることの確認)",
-  () => {
-    assert.doesNotThrow(() =>
-      validateCompleteUndoTarget({ id: "resp-1", type: "COMMITMENT", status: "ACTIVE", completedAt: null }),
-    );
-    assert.throws(
-      () => validateCompleteUndoTarget({ id: "resp-1", type: "COMMITMENT", status: "BROKEN", completedAt: null }),
-      InvalidUndoSnapshotError,
-    );
-    assert.throws(
-      () =>
-        validateCompleteUndoTarget({
-          id: "resp-1",
-          type: "COMMITMENT",
-          status: "ACTIVE",
-          completedAt: "2026-08-01T00:00:00.000Z",
-        }),
-      InvalidUndoSnapshotError,
-    );
-  },
-);
-
-check(
-  "【重要・実行時に発見した順序バグの回帰防止(2件目)】bulkOperations.tsの" +
-    "executeCompleteUndoは、status/completedAtの妥当性検証(validateCompleteUndoTarget)を" +
-    "isCompleteEventStaleと同様、decideCompleteUndoActionがAPPLYと判定した場合にのみ" +
-    "呼ぶ設計になっていること。この設計原則自体はコード上のコメントでのみ保証されて" +
-    "おり、ここでは「validateSnapshotStatuses(バッチ全体の事前検証用wrapper)を" +
-    "bulkOperations.tsの本番実行経路(トランザクション開始前)から呼んではならない」" +
-    "という設計判断を記録として残す(経緯: 当初はここでバッチ全体を事前検証しており、" +
-    "『同一payload再送』『混在バッチでのREJECT_REUSED検出』が本来到達すべき" +
-    "decideCompleteUndoActionより前にVALIDATION_FAILEDで拒否されてしまっていた。" +
-    "isCompleteEventStaleで一度学んだのと全く同じ順序の教訓を、別の検証(status" +
-    "妥当性)でも繰り返してしまっていた。omega-dev2での実行で実際に再現・特定した)",
-  () => {
-    // このテスト自体はドキュメントとしての意味が主だが、validateSnapshotStatusesが
-    // 依然としてvalidateCompleteUndoTargetの薄いラッパーとして機能することだけは
-    // 機械的に確認しておく。
-    const typeById = new Map([["resp-1", "TASK"]]);
-    assert.doesNotThrow(() =>
-      validateSnapshotStatuses([{ id: "resp-1", status: "IN_PROGRESS", completedAt: null }], typeById),
-    );
-  },
-);
-
-check(
-  "completeToStatusForType【外部監査再々評価で発見した重大バグの回帰防止】: " +
-    "共通状態型は\"COMPLETED\"だが、COMMITMENT/WAITING/RISKはそれぞれ" +
-    "\"FULFILLED\"/\"RESOLVED\"/\"CLOSED\"であり\"COMPLETED\"ではない" +
-    "(この値の食い違いにより、以前はCOMMITMENT等のUndoが一度も適用されず" +
-    "常にrestored:0になっていた。TASKしか実DB試験していなかったため見逃していた)",
+  "completeToStatusForType/completeFromStatusesForType/isValidStatusForTypeは" +
+    "bulkComplete本体の遷移ルール確定(どのtoStatusへ進むか、どのfromStatusを" +
+    "許可するか)に引き続き使われる(Undo自体の検証には使わなくなったが、" +
+    "bulkComplete側の責務としては変わらず必要)",
   () => {
     assert.equal(completeToStatusForType("TASK"), "COMPLETED");
-    assert.equal(completeToStatusForType("EVENT"), "COMPLETED");
     assert.equal(completeToStatusForType("COMMITMENT"), "FULFILLED");
     assert.equal(completeToStatusForType("WAITING"), "RESOLVED");
     assert.equal(completeToStatusForType("RISK"), "CLOSED");
-  },
-);
-
-check(
-  "decideCompleteUndoAction【外部監査再々評価で発見した重大バグの回帰防止・核心】: " +
-    "COMMITMENTがFULFILLED状態(completeToStatusForTypeと一致)のとき、" +
-    "currentlyCompleted=trueとして正しくAPPLYと判定される" +
-    "(是正前は呼び出し元がcurrentStatus:\"FULFILLED\"をハードコードされた" +
-    "\"COMPLETED\"と比較しており、常にSKIP_NOT_COMPLETEDになっていた)",
-  () => {
-    const type = "COMMITMENT";
-    const currentStatus = "FULFILLED"; // COMMITMENTの実際の完了到達status
-    const currentlyCompleted = currentStatus === completeToStatusForType(type);
-    assert.equal(currentlyCompleted, true, "呼び出し元での型別判定が正しく機能する");
-    const decision = decideCompleteUndoAction({
-      currentlyCompleted,
-      existingLifecycleEvent: null,
-      requestPayloadHash: "hash-a",
-    });
-    assert.deepEqual(decision, { kind: "APPLY" });
+    assert.deepEqual([...completeFromStatusesForType("COMMITMENT")].sort(), ["ACTIVE", "AT_RISK"].sort());
+    assert.equal(isValidStatusForType("COMMITMENT", "BROKEN"), true);
   },
 );
 

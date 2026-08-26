@@ -8,95 +8,86 @@
  * この判定ロジックを検証できるようにする
  * (executionLedgerMapping.ts・Phase 0S consent.tsと同じ設計原則)。
  *
- * [2026-08-25是正・外部監査(内部レビュー)対応] 当初はbulkOperations.ts内に直接
- * 実装しており、completionGate2_1Invariants.test.tsがbulkOperations.tsを
- * importした結果、db.tsの`export const db = createClient()`(モジュール読込時に
- * DATABASE_URL未設定だと即throwする)を巻き込んでテストがクラッシュしていた
- * (他のGate系テストがdb非依存を保っているのと矛盾する状態だった)。
- * このファイルへ分離することで是正する。
+ * [2026-08-26全面改訂・外部監査で指摘された根本問題の是正]
+ * これまでの実装は、Bulk Complete APIが返すsnapshot(status/completedAt/
+ * completeEventId)をクライアントが保持し、Undo実行時にそのままサーバーへ
+ * 送り返す「ステートレスUndo」だった。この設計は繰り返し以下の問題を起こした:
+ *   - クライアントが「完了操作の遷移元として有効な別のstatus」へsnapshotを
+ *     改ざんすると、実際とは異なる誤った状態へ復元できてしまう
+ *   - PEM Execution Ledgerの記録有無(PEM同意任意)に冪等性が依存してしまい、
+ *     Ledger未記録の経路(種別固有型、PEM未同意時の完了)では
+ *     「同一要求の再送は同じ成功応答を返す」という契約が成立しない
+ *
+ * 是正: Bulk Complete実行時に、復元先の真の情報(fromStatus/toStatus/
+ * completeEventId)をサーバー側insert-onlyのBulkCompleteReceiptへ保存する。
+ * クライアントはreceiptIdだけを持ち回り、このファイルの純粋関数は
+ * 「receiptIdに対応する冪等記録(BulkCompleteUndoConsumption)が既にあるか」
+ * だけを見る。クライアント供給のstatus/completedAtという概念自体が
+ * payloadから無くなったため、それらの妥当性検証(旧バージョンの
+ * validateCompleteUndoTarget/completeFromStatusesForType呼び出し)は不要になった。
  */
 import { createHash } from "node:crypto";
-import { completeFromStatusesForType, initialStatusFor } from "@/lib/responsibility";
 
 /**
- * [Completion Gate 2.1] COMPLETE取消のidempotencyKey。
- * 「どのCOMPLETE Eventを取り消すか」で一意に決まる自然キーとする(呼び出し元が
- * 別途キーを発行・管理する必要が無い。同じEventへ複数回Undoを送っても同一キーになる)。
+ * [2026-08-26新設] Bulk Complete UndoのidempotencyKey。receiptId自体が既に
+ * 「どの完了を取り消すか」を一意に表すため、これをそのまま使う。
  */
-export function buildCompleteUndoIdempotencyKey(responsibilityId: string, correctionOfEventId: string): string {
-  return `${responsibilityId}:UNDO_COMPLETE:${correctionOfEventId}`;
+export function buildCompleteUndoIdempotencyKey(responsibilityId: string, receiptId: string): string {
+  return `${responsibilityId}:UNDO_COMPLETE:${receiptId}`;
 }
 
 /**
- * [Completion Gate 2.1・外部監査P0-2是正、再評価対応で拡張]
- * 冪等判定用のrequestPayloadHash。当初はsnapshotStatusのみをhash対象としており、
- * completedAtだけが異なる別内容のUndo要求を「同一payload」と誤判定していた。
- * さらに[外部監査再評価]、どのCOMPLETE Eventを取消対象にしているか
- * (completeEventId)もhash対象へ含める。これが無いと、同一のstatus/completedAtだが
- * 異なるcompleteEventIdを指す2つの要求が「同一payload」と誤判定されうる。
+ * [2026-08-26全面改訂]
+ * 冪等判定用のrequestPayloadHash。新設計ではクライアントが送るのはreceiptIdのみ
+ * (status/completedAt/completeEventIdはもうpayloadに存在しない。全てサーバー側の
+ * BulkCompleteReceiptから読む)。receiptId自体が一意な識別子であるため、
+ * このhashは実質的にreceiptIdの正規化表現に過ぎないが、将来payloadへ他の
+ * フィールドが追加された場合に備えてhash関数の形は維持する。
  */
-export function buildCompleteUndoRequestPayloadHash(params: {
-  responsibilityId: string;
-  snapshotStatus: string;
-  snapshotCompletedAt: string | null;
-  snapshotCompleteEventId: string | null;
-}): string {
+export function buildCompleteUndoRequestPayloadHash(params: { receiptId: string }): string {
   return createHash("sha256")
-    .update(
-      JSON.stringify({
-        action: "UNDO_COMPLETE",
-        id: params.responsibilityId,
-        snapshotStatus: params.snapshotStatus,
-        snapshotCompletedAt: params.snapshotCompletedAt,
-        snapshotCompleteEventId: params.snapshotCompleteEventId,
-      }),
-    )
+    .update(JSON.stringify({ action: "UNDO_COMPLETE", receiptId: params.receiptId }))
     .digest("hex");
 }
 
 export type CompleteUndoDecision =
   /** 初回要求: 実際にResponsibility本体とExecution Ledger/Lifecycle Eventを更新する。 */
   | { kind: "APPLY" }
-  /** 同一key・同一payloadの再送: 何もせず、初回と同じ「成功」として扱う(restoredへ加算する)。 */
+  /** 同一receiptIdの再送: 何もせず、初回と同じ「成功」として扱う(restoredへ加算する)。 */
   | { kind: "REPLAY_SUCCESS" }
-  /** 同一key・異なるpayloadの再利用: IDEMPOTENCY_KEY_REUSEDとして拒否する。 */
+  /** 同一receiptIdだが記録済みpayloadと不一致(通常は起こらないはずの防御的分岐):
+   * IDEMPOTENCY_KEY_REUSEDとして拒否する。 */
   | { kind: "REJECT_REUSED" }
-  /** 取消対象が既にCOMPLETED以外(他操作で状態が変わった等): 何もしない。 */
+  /** 取消対象が既に「レシートが表すtoStatus」ではない(他操作で状態が変わった等):
+   * 何もしない。 */
   | { kind: "SKIP_NOT_COMPLETED" };
 
 /**
- * [Completion Gate 2.1・外部監査P0-1是正]
+ * [Completion Gate 2.1・外部監査P0-1是正、2026-08-26全面改訂]
  * COMPLETE取消の分岐判断を、DBアクセスから切り離した純粋関数として独立させる。
  *
- * 是正の背景: 当初の実装は `if (t.status !== "COMPLETED") continue;` を
- * 既存Lifecycle Event(冪等キー)の確認より先に行っていたため、初回Undoで
- * status が COMPLETED→PLANNED へ変わった後の再送では、Lifecycle Eventの確認へ
+ * 是正の背景(P0-1): 当初の実装は現在statusの検査を、既存の冪等記録の確認より
+ * 先に行っていたため、初回Undoでstatusが変わった後の再送では、冪等記録の確認へ
  * 到達する前にスキップされ、`restored: 0` が返っていた(v4.0 5.5節が要求する
  * 「同一key・同一payloadなら元の成功応答を返す」を満たしていなかった)。
+ * 是正方針: 既存の冪等記録(existingConsumption)の有無を必ず先に確認する。
  *
- * 是正方針: 既存Lifecycle Eventの有無を必ず先に確認する。既存が見つかった場合は
- * (初回操作によって現在のstatusが既に変わっているため)現在のstatusを一切見ずに
- * REPLAY_SUCCESS/REJECT_REUSEDを返す。既存が無い場合にのみ、初回要求として
- * 現在のstatusを検査する。
- *
- * [2026-08-26是正・外部監査再々評価で発見した重大バグ]
- * 当初はcurrentStatus(string)を受け取り、"COMPLETED"と文字列比較していた。
- * しかしCOMMITMENT/WAITING/RISKの完了到達statusはそれぞれ"FULFILLED"/
- * "RESOLVED"/"CLOSED"であり"COMPLETED"ではないため、これらの型ではUndoが
- * 常にSKIP_NOT_COMPLETEDとなり、一度もAPPLYへ到達しない(=Undo自体が機能しない)
- * という重大な不具合になっていた(外部監査で指摘、TASKしか実DB試験していなかった
- * ため見逃していた)。
- * 是正: type依存の判断(どのstatusが「完了」に相当するか)を呼び出し元
- * (bulkOperations.ts、completeToStatusForTypeを使う)へ押し出し、この純粋関数
- * 自体はcurrentlyCompleted(boolean)のみを受け取るようシグネチャを変更した。
+ * [2026-08-26全面改訂・外部監査で指摘された根本問題の是正]
+ * 従来はcurrentStatus(string)や、それを型別に変換したcurrentlyCompleted(boolean)を
+ * 受け取っていたが、「何をもって完了状態とみなすか」の判定を型ごとに正しく
+ * 実装し続けるのは繰り返しバグの温床になった(COMMITMENT等がずっと動いていな
+ * かった重大バグ等)。新設計では、呼び出し元(bulkOperations.ts)が
+ * `t.status === receipt.toStatus`(このレシートが表す「完了直後の状態」と現在の
+ * statusが一致するか)を直接判定してcurrentlyCompletedとして渡す。これは
+ * レシート固有の判定であり、型ごとの完了到達statusを再定義する必要が無い。
  */
 export function decideCompleteUndoAction(params: {
   currentlyCompleted: boolean;
-  existingLifecycleEvent: { requestPayloadHash: string } | null;
+  existingConsumption: { requestPayloadHash: string } | null;
   requestPayloadHash: string;
 }): CompleteUndoDecision {
-  if (params.existingLifecycleEvent) {
-    return params.existingLifecycleEvent.requestPayloadHash === params.requestPayloadHash
+  if (params.existingConsumption) {
+    return params.existingConsumption.requestPayloadHash === params.requestPayloadHash
       ? { kind: "REPLAY_SUCCESS" }
       : { kind: "REJECT_REUSED" };
   }
@@ -110,67 +101,14 @@ export function decideCompleteUndoAction(params: {
  * [Completion Gate 2.1、v4.0 5.5節「idempotency response contract」をCOMPLETE取消
  * (Undo)へ適用したもの] transitions/route.tsのIDEMPOTENCY_KEY_REUSEDと同じ意味を、
  * bulkOperations層からroute層(apiError呼び出し)へ伝えるための専用エラー型。
- * executeUndo自体はNext.js Route Handlerに依存させたくないため、ここでは例外として
- * 投げるに留め、実際のHTTP 409応答への変換はbulk/undo/route.ts側で行う。
  */
 export class IdempotencyKeyReusedError extends Error {}
 
 /**
- * [外部監査再評価・Gate阻害是正の核心をテスト可能な形で分離、
- *  2026-08-26さらに拡張・外部監査再々評価Gate阻害1是正]
- * COMPLETE取消で書き戻すstatusの決定ロジック。
- *
- * [経緯1] 当初はこの決定を「Eventを特定できたか」に連動させており、
- * completeEventIdを省略/nullで送るだけで、Execution Ledger対象型であっても
- * 任意のstatusを直接書き込め、v4.0が要求する「COMPLETED→REOPEN→PLANNED」という
- * 許可遷移を迂回できてしまっていた(外部監査で指摘、Gate阻害と判定)。
- * 是正1: Execution Ledger対象型は、Eventを特定できたかに関わらず常にPLANNEDへ
- * 固定するようにした(単一アイテムのREOPENアクションと同じ意味論)。
- *
- * [経緯2] 上記の是正1は「対象外型(COMMITMENT等)はクライアントが返したstatusを
- * そのまま使う」という設計のままだった。これにより、クライアントが
- * 「完了操作の遷移元として有効な別のstatus」(例: COMMITMENTを実際にはACTIVEから
- * 完了したのに、AT_RISK(FULFILLの遷移元として同じく有効)へ改ざんしたsnapshotを
- * 送る)を指定すると、validateCompleteUndoTargetの検証(遷移元として有効かの
- * チェック)は通過してしまい、実際とは異なる誤った状態へ復元されてしまう
- * (外部監査で指摘、Gate阻害と再判定)。
- * 是正2: 対象外型についても、クライアント供給のstatusは一切使わず、
- * initialStatusFor(type)(その型の作成時初期状態。COMMITMENT→ACTIVE、
- * WAITING→WAITING、RISK→OPEN)へ常に固定する。これは単一アイテムの
- * REOPENアクションが常に固定の遷移先へ戻る(元の細かい状態は復元しない)のと
- * 同じ設計判断であり、対象型・対象外型を問わず「Undoの復元先はクライアントの
- * snapshotを信用せず、サーバー側が定義する固定の値のみを使う」という一貫した
- * 原則に統一した。
+ * [2026-08-26改訂] receiptIdが実在しない・このresponsibility/workspace/actorに
+ * 属さない場合に投げる。
  */
-export function decideCompleteUndoNextStatus(params: {
-  ledgerApplicable: boolean;
-  type: string;
-}): string {
-  return params.ledgerApplicable ? "PLANNED" : initialStatusFor(params.type);
-}
-
-/**
- * [2026-08-26新設・実行時に発見した不具合の是正]
- * 取消対象のCOMPLETE Eventが「まだ最新の状態を表しているか(その後に他の変更が
- * 加わっていないか)」の鮮度確認。decideCompleteUndoActionがAPPLY(真に新規の
- * 取消要求)と判定した場合にのみ呼ぶこと。
- *
- * [経緯] 当初はこのversion一致確認を、COMPLETE Eventを検索するクエリ自体の条件に
- * 含めていた(`responsibilityVersionAfter: t.version`)。これは「同一payload再送」
- * 「混在バッチでのIDEMPOTENCY_KEY_REUSED検出」を壊すバグだった。初回Undoが成功すると
- * responsibility.versionは加算されるため、2回目の呼び出しで再取得したt.versionは
- * 初回完了時点のresponsibilityVersionAfterと一致しなくなり、本来到達すべき
- * decideCompleteUndoActionの冪等判定(REPLAY_SUCCESS/REJECT_REUSED)より前に、
- * イベント自体が「見つからない」ものとして扱われエラーになっていた
- * (omega-dev2での実行で実際に再現・特定した)。
- * 是正: version一致確認は、イベントの実在確認から切り離し、APPLY分岐でのみ行う。
- */
-export function isCompleteEventStale(params: {
-  responsibilityVersionAfter: number;
-  currentVersion: number;
-}): boolean {
-  return params.responsibilityVersionAfter !== params.currentVersion;
-}
+export class InvalidUndoSnapshotError extends Error {}
 
 /**
  * [2026-08-25新設・外部監査P1-3是正] snapshot内のid重複を除去する(先勝ち)。
@@ -187,76 +125,4 @@ export function dedupeSnapshotById<T extends { id: string }>(snapshot: readonly 
     result.push(s);
   }
   return result;
-}
-
-/**
- * [2026-08-25新設・外部監査P1-5是正、2026-08-26拡張・外部監査Gate阻害2是正]
- * Undo要求に含まれるstatus/completedAtが妥当かを検証する。
- *
- * [経緯・Gate阻害2] 当初はisValidStatusForType(その型として存在する値かどうかの
- * 単純なenum検査)しか行っていなかった。これでは、例えばCOMMITMENTのUndoに
- * "status":"BROKEN"を指定すると、BROKEN自体はCOMMITMENTの有効な状態値であるため
- * 通過してしまい、FULFILL(完了操作)の遷移元として正しいACTIVE/AT_RISK以外の
- * 値でも復元できてしまっていた(外部監査で指摘、Gate阻害)。
- * 是正: completeFromStatusesForType(その型の完了操作の遷移元として定義済みの
- * 値集合。COMMON_TRANSITIONS等に既に定義されているfrom配列をそのまま使うだけで、
- * 想像で新しい値集合を作らない)で検証する。
- *
- * あわせて、完了操作の遷移元(=未完了の状態)へ復元するのにcompletedAtが
- * 設定されているのは矛盾するため、completedAtはnullであることも要求する。
- */
-export class InvalidUndoSnapshotError extends Error {}
-
-/**
- * [2026-08-26新設・実行時に発見した順序バグの是正]
- * 単一アイテム用の検証。呼び出し元(executeCompleteUndo)は、これを
- * decideCompleteUndoActionがAPPLY(=既存Lifecycle Eventが無い、真に新規の
- * 取消要求)と判定した場合にのみ呼ぶこと。
- *
- * [経緯] 当初はこの検証をバッチ全体の事前検証として、トランザクション開始前・
- * 冪等判定(decideCompleteUndoAction)より前に一括で行っていた
- * (validateSnapshotStatuses参照)。これはisCompleteEventStaleで既に発見・是正した
- * ものと全く同じ順序バグだった: 「同一payload再送」「混在バッチでの
- * REJECT_REUSED検出」のテストが、本来到達すべき冪等判定より前にこの検証で
- * VALIDATION_FAILEDとして拒否されてしまっていた(omega-dev2での実行で実際に
- * 再現・特定した)。REJECT_REUSED判定に使う「異なるpayload」は、意図的に
- * (このAPIとしては最終的に不正となる)completedAt等の値を含めて構築されるため、
- * 冪等判定より前にstatus/completedAtの妥当性を検証してはいけない。
- */
-export function validateCompleteUndoTarget(params: {
-  id: string;
-  type: string;
-  status: string;
-  completedAt: string | null;
-}): void {
-  const validFromStatuses = completeFromStatusesForType(params.type);
-  if (!validFromStatuses.includes(params.status)) {
-    throw new InvalidUndoSnapshotError(
-      `id=${params.id}: status "${params.status}" は種別 "${params.type}" の完了操作の遷移元として不正です` +
-        `(許可値: ${validFromStatuses.join(", ") || "(定義なし)"})`,
-    );
-  }
-  if (params.completedAt !== null) {
-    throw new InvalidUndoSnapshotError(
-      `id=${params.id}: 完了前の状態(status="${params.status}")へ復元するのにcompletedAtがnullではありません`,
-    );
-  }
-}
-
-/**
- * [2026-08-25新設・外部監査P1-5是正、2026-08-26拡張・外部監査Gate阻害2是正]
- * validateCompleteUndoTargetをsnapshot全件へ適用するラッパー。
- * テストやツールからバッチ単位で検証したい場合に使う(bulkOperations.tsの
- * 本番実行経路では、この一括版ではなく単一アイテム版をAPPLY分岐でのみ呼ぶ。
- * 理由はvalidateCompleteUndoTargetのコメントを参照)。
- */
-export function validateSnapshotStatuses(
-  snapshot: readonly { id: string; status: string; completedAt: string | null }[],
-  typeById: ReadonlyMap<string, string>,
-): void {
-  for (const s of snapshot) {
-    const type = typeById.get(s.id);
-    if (!type) continue; // 対象がこのWorkspaceに存在しない場合は後段の処理で無視される
-    validateCompleteUndoTarget({ id: s.id, type, status: s.status, completedAt: s.completedAt });
-  }
 }

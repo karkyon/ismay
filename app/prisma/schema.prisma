@@ -290,6 +290,8 @@ model Responsibility {
   executionSessionIdentities ExecutionSessionIdentity[]
   /// [2026-08-25新設・Completion Gate 2.1、v4.0 8.1節] Correction/lifecycle記録。
   lifecycleEvents  ResponsibilityLifecycleEvent[]
+  /// [2026-08-26新設・Undo Receipt] Bulk Complete Undoの正本レシート。
+  bulkCompleteReceipts BulkCompleteReceipt[]
   createdById      String    @map("created_by")
   createdBy        User      @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])
   updatedById      String    @map("updated_by")
@@ -832,6 +834,8 @@ model ResponsibilityExecutionEvent {
   /// [2026-08-25新設・Completion Gate 2.1] このEvent自身が、あるCorrectionの結果として
   /// 生成された場合の逆参照(例: COMPLETE取消により生成されたREOPEN Event)。
   resultingFromLifecycleEvents  ResponsibilityLifecycleEvent[] @relation("LifecycleResultingEvent")
+  /// [2026-08-26新設・Undo Receipt] このEventを参照するBulkCompleteReceipt。
+  bulkCompleteReceipts           BulkCompleteReceipt[]
 
   /// [改訂] tenantId(workspaceId)を含む複合uniqueへ変更(v4.0 5.3節、批評4.5対応)。
   /// [2026-08-24再修正] 3つの@@unique全てに明示的なmap名を付与した。理由:
@@ -912,6 +916,61 @@ model ResponsibilityLifecycleEvent {
   @@index([responsibilityId])
   @@index([correctionOfEventId, workspaceId])
   @@map("responsibility_lifecycle_events")
+}
+
+/// [2026-08-26新設・外部監査で指摘された根本問題の是正]
+/// これまでのCompletion Gate 2.1実装は、Bulk Complete APIが返す
+/// snapshot(status/completedAt/completeEventId)をクライアントが保持し、
+/// Undo実行時にそのままサーバーへ送り返す「ステートレスUndo」だった。
+/// クライアントは(悪意の有無に関わらず)snapshotを自由に書き換えられるため、
+/// 「完了操作の遷移元として有効な別のstatus」への改ざんによる誤復元や、
+/// PEM Execution Ledger(同意任意で記録されないことがある)の有無に冪等性が
+/// 依存してしまう問題が繰り返し発生した(外部監査で指摘)。
+///
+/// 是正: Bulk Complete実行時に、復元先の真の情報をサーバー側insert-onlyで
+/// 保存する「Undo Receipt」を導入する。クライアントはreceiptIdだけを持ち回り、
+/// 実際のfromStatus/toStatus/completeEventIdは常にこのテーブルから読む
+/// (クライアントが送ってくる値を一切信用しない)。
+model BulkCompleteReceipt {
+  id                String    @id @default(uuid())
+  workspaceId       String    @map("workspace_id")
+  subjectUserId     String    @map("subject_user_id")
+  responsibilityId  String    @map("responsibility_id")
+  /// [tenant境界の二重防御] 既存パターンと同じ複合FK参照方式。
+  responsibility    Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  /// バッチ全体で共有するid(bulkComplete呼び出し単位)。監査・調査用。
+  operationId       String    @map("operation_id")
+  /// 完了前の真の状態(サーバーがBulk Complete実行時に記録。クライアントからは
+  /// 一切受け取らない)。
+  fromStatus        String    @map("from_status")
+  /// 完了操作が実際に到達したstatus。
+  toStatus          String    @map("to_status")
+  /// このBulk Complete操作でExecution Ledgerへ実際に記録されたCOMPLETE Eventのid
+  /// (Execution Ledger対象外型、またはPEM同意未取得等で記録できなかった場合はnull)。
+  completeEventId   String?   @map("complete_event_id")
+  completeEvent     ResponsibilityExecutionEvent? @relation(fields: [completeEventId, workspaceId], references: [id, workspaceId])
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  consumption BulkCompleteUndoConsumption?
+
+  @@index([responsibilityId])
+  @@index([workspaceId, subjectUserId])
+  @@map("bulk_complete_receipts")
+}
+
+/// [2026-08-26新設] Undo実行の冪等記録。receiptId単位で1回だけ許可する
+/// (insert-only、receiptIdへunique制約)。PEM Execution Ledgerの有無に関わらず
+/// 全ての型・全ての同意状態で一様に機能する冪等性の正本。
+model BulkCompleteUndoConsumption {
+  id                  String   @id @default(uuid())
+  receiptId           String   @unique @map("receipt_id")
+  receipt             BulkCompleteReceipt @relation(fields: [receiptId], references: [id])
+  workspaceId         String   @map("workspace_id")
+  subjectUserId       String   @map("subject_user_id")
+  requestPayloadHash  String   @map("request_payload_hash")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  @@map("bulk_complete_undo_consumptions")
 }
 
 model PemHypothesis {

@@ -18,18 +18,17 @@ import { executeUndo, IdempotencyKeyReusedError, InvalidUndoSnapshotError, type 
  */
 const CompleteUndoSchema = z.object({
   action: z.literal("COMPLETE"),
+  // [2026-08-26全面改訂・外部監査で指摘された根本問題の是正]
+  // 従来はstatus/completedAt/completeEventIdをクライアントが保持・送信していたが、
+  // これはクライアントによるsnapshot改ざんで誤った状態へ復元できてしまう
+  // 脆弱性の温床だった(繰り返しの外部監査で指摘)。新設計ではreceiptId
+  // (Bulk Complete実行時にサーバー側insert-onlyで発行したBulkCompleteReceipt.id)
+  // だけを受け取り、実際の復元先はサーバー側で必ずDBから読む。
   snapshot: z
     .array(
       z.object({
         id: z.string().uuid(),
-        status: z.string(),
-        // [2026-08-25改訂・外部監査P1-5是正] ISO日時形式を要求する
-        // (他エンドポイントのhardDeadlineAt等と同じ検証方針)。
-        completedAt: z.string().datetime().nullable(),
-        // [2026-08-25新設・外部監査P1-1是正] bulkComplete側で固定されたCOMPLETE
-        // Eventのid。旧形式のクライアントとの互換のためoptionalとし、未指定は
-        // nullとして扱う(その場合Undoは対象イベント無しとして安全側に倒す)。
-        completeEventId: z.string().uuid().nullable().optional(),
+        receiptId: z.string().uuid(),
       }),
     )
     // [2026-08-26追加・外部監査「Undo APIのsnapshotに.max(200)が無い」是正]

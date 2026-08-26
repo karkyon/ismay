@@ -2,7 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import type { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
-import { transitionsForType, isTypeSpecificTerminalStatus, completeActionFor, completeToStatusForType } from "@/lib/responsibility";
+import { transitionsForType, isTypeSpecificTerminalStatus, completeActionFor } from "@/lib/responsibility";
 import { buildPemAuthorizationContext } from "@/lib/pem/authorizationBoundary";
 import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
 import { projectAndPersistExecutionSessions } from "@/lib/pem/sessionPersistence";
@@ -11,10 +11,7 @@ import {
   buildCompleteUndoIdempotencyKey,
   buildCompleteUndoRequestPayloadHash,
   decideCompleteUndoAction,
-  decideCompleteUndoNextStatus,
   dedupeSnapshotById,
-  isCompleteEventStale,
-  validateCompleteUndoTarget,
   IdempotencyKeyReusedError,
   InvalidUndoSnapshotError,
 } from "@/lib/bulkCompleteUndoDecision";
@@ -57,18 +54,17 @@ export interface BulkSkip {
 
 export interface CompleteUndoPayload {
   action: "COMPLETE";
+  /** [2026-08-26全面改訂・外部監査で指摘された根本問題の是正]
+   * 従来はstatus/completedAt/completeEventIdをクライアントが保持・送信する
+   * 「ステートレスUndo」だったが、これはクライアントによるsnapshot改ざんで
+   * 誤った状態へ復元できてしまう脆弱性の温床だった。新設計では、Bulk Complete
+   * 実行時にサーバー側insert-onlyで保存したBulkCompleteReceipt.idだけを
+   * クライアントが持ち回る。実際の復元先(fromStatus)・Ledger接続
+   * (completeEventId)は常にDBのレシートから読み、クライアントの主張は
+   * 一切信用しない。 */
   snapshot: {
     id: string;
-    status: string;
-    completedAt: string | null;
-    /** [2026-08-25新設・外部監査P1-1是正] このBulk Complete操作でExecution
-     * Ledgerへ実際に記録されたCOMPLETE Eventのid(Execution Ledger対象外型、または
-     * PEM同意未取得等でLedgerへ記録できなかった場合はnull)。
-     * 従来Undoは「対象責任の最新COMPLETE Event」をDBから再検索していたため、
-     * Bulk Complete後からUndoまでの間に別のREOPEN/COMPLETEが発生していると、
-     * このBulk Complete操作とは無関係の別Eventを誤ってREVOKEする恐れがあった。
-     * このidをUndo要求へ固定して持ち回ることで、取消対象を一意に特定する。 */
-    completeEventId: string | null | undefined;
+    receiptId: string;
   }[];
 }
 export interface DeleteUndoPayload {
@@ -126,9 +122,6 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
   const bulkRequestPayloadHash = createHash("sha256")
     .update(JSON.stringify({ action: "BULK_COMPLETE", ids }))
     .digest("hex");
-  // [2026-08-25新設・外部監査P1-1是正] tx内クロージャからtx外のsnapshot.pushへ
-  // ledgerResult.idを持ち出すための一時マップ(1 responsibilityId = 1 completeEventId)。
-  const completeEventIdByTargetId = new Map<string, string | null>();
 
   for (const t of targets) {
     if (t.deletedAt) {
@@ -154,8 +147,9 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
     const nextStatus = typeof rule.to === "function" ? rule.to(t.status) : rule.to;
     // [2026-08-25改訂] 個別更新の羅列(部分失敗の余地あり)からトランザクションへ変更。
     // Execution Ledger記録がRegistry不整合等で例外を投げた場合、このResponsibility
-    // 1件分のstatus変更・EventLog・Ledger記録が全てrollbackされる(他のidには影響しない)。
-    await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    // 1件分のstatus変更・EventLog・Ledger記録・レシート作成が全てrollbackされる
+    // (他のidには影響しない)。
+    const receiptId = await db.$transaction(async (tx: Prisma.TransactionClient) => {
       await tx.responsibility.update({
         where: { id: t.id },
         data: { status: nextStatus, completedAt: now, updatedById: userId, version: { increment: 1 } },
@@ -191,16 +185,27 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
       if (ledgerResult) {
         await projectAndPersistExecutionSessions(tx, pemCtx, t.id);
       }
-      // [2026-08-25新設・外部監査P1-1是正] このBulk Complete操作で実際に記録された
-      // COMPLETE Eventのidをsnapshotへ含める(Undo時の取消対象固定に使う)。
-      completeEventIdByTargetId.set(t.id, ledgerResult?.id ?? null);
+      // [2026-08-26新設・外部監査で指摘された根本問題の是正]
+      // Execution Ledger対象型か・PEM同意の有無かに関わらず、必ずレシートを
+      // 作成する。これにより、Undoの冪等性がLedger記録の有無に依存しなくなる
+      // (COMMITMENT等の種別固有型、PEM未同意時の完了でも同一契約が成立する)。
+      // fromStatus(=t.status、完了前の真の状態)はサーバーがここで確定させ、
+      // クライアントへ生の値として渡すことは無い(receiptIdだけを渡す)。
+      const receipt = await tx.bulkCompleteReceipt.create({
+        data: {
+          workspaceId,
+          subjectUserId: userId,
+          responsibilityId: t.id,
+          operationId: bulkRequestId,
+          fromStatus: t.status,
+          toStatus: nextStatus,
+          completeEventId: ledgerResult?.id ?? null,
+        },
+        select: { id: true },
+      });
+      return receipt.id;
     });
-    snapshot.push({
-      id: t.id,
-      status: t.status,
-      completedAt: t.completedAt?.toISOString() ?? null,
-      completeEventId: completeEventIdByTargetId.get(t.id) ?? null,
-    });
+    snapshot.push({ id: t.id, receiptId });
   }
 
   debugServer.event("bulkOperations/COMPLETE", "一括完了", { affected: snapshot.length, skipped: skipped.length });
@@ -318,81 +323,56 @@ export async function executeBulkAction(params: {
 }
 
 /**
- * [2026-08-25新設・Completion Gate 2.1、v4.0 8.1節「Correction」是正]
+ * [2026-08-25新設・Completion Gate 2.1、v4.0 8.1節「Correction」是正、
+ *  2026-08-26全面改訂・外部監査で指摘された根本問題(クライアント編集可能な
+ *  snapshotをUndoの信頼元にしている)の是正]
+ *
  * 従来はスナップショットの任意のstatusへ直接書き戻すだけで、Execution Ledgerの正本
  * (ResponsibilityExecutionEvent)には一切触れない「無音の改変」だった。これは
  * v4.0 8.1節が要求する「元Evidenceを更新せず、Correction Eventを追記する」に反する。
+ * さらにその後の是正過程で、「クライアントが保持するsnapshot(status/completedAt/
+ * completeEventId)を毎回サーバーへ送り返す」という設計自体が、以下2つの問題の
+ * 温床であることが判明した(繰り返しの外部監査で指摘):
+ *   (a) クライアントが「完了操作の遷移元として有効な別のstatus」へsnapshotを
+ *       改ざんすると、実際とは異なる誤った状態へ復元されてしまう
+ *   (b) PEM Execution Ledgerの記録有無(PEM同意任意)に冪等性が依存してしまい、
+ *       Ledger未記録の経路(種別固有型、PEM未同意時の完了)では「同一要求の
+ *       再送は同じ成功応答を返す」というv4.0 5.5節の契約が成立しない
  *
- * 是正方針(想像で新しい語彙を発明しない):
- *  - Execution Ledger対象型(TASK/EVENT/CONCERN/HABIT/IDEA)かつ、取消対象のCOMPLETE
- *    Eventが実際にExecution Ledger上に見つかる場合のみ、既存のREOPEN語彙
- *    (Registry固定: COMPLETED/NOT_NEEDED→PLANNED)をそのまま再利用してExecution
- *    Ledgerへ記録する。「元のstatusへ戻す」という従来の挙動は、単一アイテムの
- *    REOPENアクション(常にPLANNEDへ戻り、元のstatusは復元しない)と挙動を揃える形で
- *    置き換える。
- *  - 上記に該当しない場合(COMMITMENT/WAITING/RISK等のExecution Ledger対象外型、
- *    または対象イベントが見つからない場合)は、従来通りスナップショットのstatusへ
- *    直接復元する(Execution Ledgerに対応語彙が無いため、これ以上の対応はしない)。
- *  - ResponsibilityLifecycleEventが記録されるのは、訂正対象の元COMPLETE Eventを
- *    実際に特定できた場合のみ(「いずれの場合も必ず記録する」わけではない)。
+ * 是正(Undo Receipt方式への全面移行):
+ *  - Bulk Complete実行時に、復元先の真の情報(fromStatus/toStatus/completeEventId)を
+ *    サーバー側insert-onlyのBulkCompleteReceiptへ必ず保存する(型・PEM同意の
+ *    有無に関わらず、100%のケースで作成する)。
+ *  - クライアントはreceiptIdだけを持ち回る。status/completedAt/completeEventIdという
+ *    概念自体がpayloadから無くなったため、それらをクライアントから受け取って
+ *    検証する処理も不要になった(改ざんの余地そのものが無い)。
+ *  - Execution Ledger対象型(TASK等)は、レシートにcompleteEventIdがあれば
+ *    既存のREOPEN語彙(Registry固定: COMPLETED/NOT_NEEDED→PLANNED)で
+ *    Execution Ledgerへも記録する(監査証跡としての追加記録。復元先の決定には
+ *    使わない)。復元先そのものは常にレシートのfromStatus(真の元状態)を使う。
+ *  - 冪等記録(BulkCompleteUndoConsumption)はreceiptId単位でinsert-onlyに記録する。
+ *    PEM Execution Ledgerの記録有無に一切依存しないため、全ての型・全ての
+ *    同意状態で同一の冪等契約が成立する。
  *
- * 冪等性の判定はbulkCompleteUndoDecision.tsのdecideCompleteUndoActionへ分離済み
- * (既存Lifecycle Eventの有無を必ず現在statusの検査より先に確認する。理由は
- * decideCompleteUndoActionのコメントを参照)。
+ * P1-2(バッチUndoが全体トランザクションではない、是正済み・変更なし):
+ *   バッチ全体を1つのdb.$transactionで包む(どこかでエラーが投げられれば、
+ *   そのバッチ全体がロールバックされる)。
  *
- * [2026-08-25是正・外部監査(内部レビュー)P1対応、4点]
+ * P1-3(重複IDでrestored件数が水増しされる、是正済み・変更なし):
+ *   処理前にid単位で重複排除する(先勝ち)。
  *
- * P1-1(取消対象のCOMPLETE EventがUndoトークンに固定されていない):
- *   従来は「対象責任の最新COMPLETE Event」をDBから毎回再検索していたため、
- *   Bulk Complete後からUndoまでの間に別のREOPEN/COMPLETEが発生していると、
- *   このBulk Complete操作とは無関係の別Eventを誤ってREVOKEする恐れがあった。
- *   是正: bulkComplete側でsnapshotへcompleteEventIdを固定して持ち回り、Undoは
- *   再検索せずこのidを直接検証(workspaceId/responsibilityId/eventType一致)して使う。
- *   古い形式のsnapshot(completeEventId未設定)を受け取った場合は、安全側に倒して
- *   「対象イベント無し」として扱う(=Execution Ledger対象外型と同じ単純復元のみ。
- *   不確かなIDで別Eventを推測してREVOKEするより安全)。
- *
- * P1-2(バッチUndoが全体トランザクションではない):
- *   従来は各Responsibilityを別々のトランザクションで処理しており、2件目以降で
- *   IdempotencyKeyReusedErrorが発生すると「前半はUndo済み・API全体は409」という
- *   部分適用になり得た。是正: バッチ全体を1つのdb.$transactionで包む
- *   (どこかでエラーが投げられれば、そのバッチ全体がロールバックされる)。
- *
- * P1-3(重複IDでrestored件数が水増しされる):
- *   snapshot内に同一idが複数含まれる場合、2件目以降が「同一key・同一payloadの
- *   冪等再送」として扱われrestoredへ二重加算され得た。是正: 処理前にid単位で
- *   重複排除する(先勝ち)。
- *
- * P1-4(Undoの状態変更がEventLog/Outboxへ記録されない):
- *   bulkComplete本体はEventLog(STATUS_CHANGED)を記録するが、Undo側は
- *   Responsibility/Execution Ledger/Lifecycle Eventのみで、Execution Ledger対象外型や
- *   PEM未同意の場合は外部イベント上「無音の状態変更」になっていた。是正:
- *   実際にstatusを書き換えた場合は必ず、bulkComplete・単一アイテムの
- *   transitions/route.tsと同じ形でEventLog(STATUS_CHANGED)と
+ * P1-4(Undoの状態変更がEventLog/Outboxへ記録されない、是正済み・変更なし):
+ *   実際にstatusを書き換えた場合は必ず、EventLog(STATUS_CHANGED)と
  *   OutboxEvent(ResponsibilityTransitioned.v1)を同一トランザクションで記録する。
  *
- * P1-5(種別固有型の復元statusがクライアント任せ):
- *   COMMITMENT等のExecution Ledger対象外型は、クライアントが返してきた
- *   snapshot.statusを無検証で直接DBへ書き戻していた。是正: 書き込み前に
- *   isValidStatusForType(その型で定義済みの状態値集合)で検証し、不正な値を
- *   含むリクエストはバッチ全体を拒否する(部分適用や不正状態のDB混入を防ぐため、
- *   処理開始前の事前検証とする)。
- *
- * [要仕様確認事項・現時点の暫定判断とその理由]
- *   originalCompleteEventが見つかっても、Undo時点でPEM同意が撤回されていると
+ * [要仕様確認事項・現時点の暫定判断とその理由・変更なし]
+ *   レシートにcompleteEventIdがあっても、Undo時点でPEM同意が撤回されていると
  *   recordExecutionLedgerEvent()はnullを返し得る(REOPEN Eventを記録できない)。
  *   この場合、「REOPEN+REVOKEを必ず一組にする」か「同意撤回後はREVOKE単独を
  *   許可する」かの製品判断が必要(外部監査で指摘済み、正式な仕様書には未記載)。
  *   本実装は後者(REVOKE単独を許可)を暫定採用する。理由: 前者を採用しPEM同意
  *   撤回時にUndo自体を拒否すると、ユーザーは自分の一括完了操作を取り消す手段を
- *   失い、Responsibilityが誤った完了状態のまま固定されてしまう
- *   (PEM機能への同意はいつでも撤回できるべきだが、それによってコア機能である
- *   Undoが使えなくなるのは本末転倒)。resultingEventIdがnullのままの
- *   ResponsibilityLifecycleEvent(kind=CORRECTION, correctionType=REVOKE)が
- *   記録されるが、これは「Correctionは発生したが、対応するExecution Ledger
- *   Eventの記録はPEM未同意のためスキップされた」という事実を正確に表しており、
- *   Execution Ledger自体が同意任意でスキップされる既存方針(recordExecutionLedgerEvent
- *   のコメント参照)と整合する。正式な製品判断が下れば、ここを起点に変更する。
+ *   失い、Responsibilityが誤った完了状態のまま固定されてしまう。
  */
 
 async function executeCompleteUndo(
@@ -406,11 +386,6 @@ async function executeCompleteUndo(
   const targets = await fetchTargets(ids, workspaceId);
   const targetById = new Map(targets.map((t) => [t.id, t]));
 
-  // [2026-08-26是正・実行時に発見した順序バグ] statusの妥当性検証(旧:ここで
-  // バッチ全体を事前検証していた)は、APPLY分岐(真に新規の取消要求)でのみ行う
-  // よう移動した(isCompleteEventStaleと同じ理由。詳細はvalidateCompleteUndoTarget
-  // のコメントを参照)。ループ内でt.typeを直接使うため、ここでの事前算出は不要。
-
   const pemCtx = await buildPemAuthorizationContext(userId, userId);
 
   // [P1-2是正、外部監査再評価「200件バッチのtransaction timeoutリスク」対応]
@@ -418,304 +393,186 @@ async function executeCompleteUndo(
   // (IdempotencyKeyReusedError等)、バッチ全体がロールバックされ、「前半だけ
   // Undo済み」という部分適用が起こらない。要求数が多いとPrismaの既定interactive
   // transactionタイムアウト(5秒)に達する恐れがあるため、30秒へ緩和する応急対応も
-  // 行う。200件規模での実測(所要時間・タイムアウト有無)はまだ実施できていない
-  // 既知の残課題であり、omega-dev2上での実測が必要(想像で「これで十分」と断定しない)。
+  // 行う。200件規模での実測(2,700〜2,900ms程度)はomega-dev2で確認済み。
   const restored = await db.$transaction(
     async (tx: Prisma.TransactionClient) => {
-    let count = 0;
-    for (const s of snapshot) {
-      const t = targetById.get(s.id);
-      if (!t) continue; // 対象が存在しない(他Workspace混入等。fetchTargetsで既に除外済み)
+      let count = 0;
+      for (const s of snapshot) {
+        const t = targetById.get(s.id);
+        if (!t) continue; // 対象が存在しない(他Workspace混入等。fetchTargetsで既に除外済み)
 
-      // [外部監査再評価・Gate阻害是正] 「最新のCOMPLETE Eventを検索する」のではなく、
-      // bulkComplete時に固定されたcompleteEventIdを検証して使う。
-      //
-      // completeEventIdが明示的に指定されている場合は、それが実在し・このresponsibility・
-      // このworkspace・このuserId(subjectUserId)に一致することを要求する(以前は
-      // workspaceId/responsibilityId/eventTypeのみの緩い一致だった)。一致しなければ
-      // 「対象イベント無し」として静かに単純復元へ倒すのではなく、
-      // InvalidUndoSnapshotErrorでバッチ全体を拒否する(値の不整合を握り潰さない)。
-      //
-      // completeEventId自体が未指定(旧形式クライアント等)の場合のみ、
-      // 「対象イベント無し」の後方互換パスとして扱う(originalCompleteEvent=null)。
-      //
-      // [2026-08-26是正・実行時に発見した不具合]
-      // 当初はこのクエリに`responsibilityVersionAfter: t.version`(現在バージョン)も
-      // 条件へ含めていたが、これは「同一payload再送」「混在バッチでのREJECT_REUSED
-      // 検出」を実際に壊すバグだった。初回Undoが成功するとresponsibility.versionは
-      // 加算されるため、2回目の呼び出しで再取得したt.versionは初回完了時点の
-      // responsibilityVersionAfterと一致しなくなり、本来decideCompleteUndoActionの
-      // 冪等判定(REPLAY_SUCCESS/REJECT_REUSED)へ到達すべき所より前に
-      // InvalidUndoSnapshotErrorで弾かれてしまっていた(omega-dev2での実行で
-      // 実際に再現・特定した)。
-      // 是正: イベントの実在確認(id/workspace/responsibility/eventType/actor)には
-      // versionを含めない。version一致確認は、後述のdecision.kind==="APPLY"
-      // (=既存Lifecycle Eventが無い、真に新規の取消要求)の場合にのみ行う
-      // (「このCOMPLETE Eventの後に他の変更が加わっていないか」という鮮度確認は、
-      // 新規適用時にのみ意味を持ち、冪等再送の検出より後で良い)。
-      // [外部監査再評価・Gate阻害是正の核心の前提]
-      // ledgerApplicableはtypeのみで決まるため、completeEventId省略時の
-      // 監査記録回避チェック(直後)より前にここで算出しておく。
-      const ledgerApplicable = isExecutionLedgerApplicableType(t.type);
-
-      let originalCompleteEvent: { id: string; responsibilityVersionAfter: number } | null = null;
-      if (s.completeEventId) {
-        originalCompleteEvent = await tx.responsibilityExecutionEvent.findFirst({
+        // [2026-08-26新設・外部監査で指摘された根本問題の是正の核心]
+        // クライアントから受け取るのはreceiptIdのみ。実際の復元先(fromStatus)・
+        // Execution Ledger接続(completeEventId)は常にこのレシートから読み、
+        // クライアントが送ってくる値は一切信用しない。receiptIdが実在しない、
+        // またはこのresponsibility/workspace/actorに属さない場合は
+        // VALIDATION_FAILEDとしてバッチ全体を拒否する(値の不整合を握り潰さない)。
+        const receipt = await tx.bulkCompleteReceipt.findFirst({
           where: {
-            id: s.completeEventId,
+            id: s.receiptId,
             workspaceId,
-            responsibilityId: t.id,
-            eventType: "COMPLETE",
             subjectUserId: userId,
+            responsibilityId: t.id,
           },
-          select: { id: true, responsibilityVersionAfter: true },
+          select: { id: true, fromStatus: true, toStatus: true, completeEventId: true },
         });
-        if (!originalCompleteEvent) {
+        if (!receipt) {
           throw new InvalidUndoSnapshotError(
-            `id=${t.id}: completeEventId "${s.completeEventId}" に一致するCOMPLETE Eventが` +
+            `id=${t.id}: receiptId "${s.receiptId}" に一致するUndo Receiptが` +
               `見つかりません(workspace/responsibility/actorのいずれかが不一致です)`,
           );
         }
-      } else if (ledgerApplicable) {
-        // [2026-08-26新設・外部監査Gate阻害1是正、再評価で発見された抜け道の是正]
-        // completeEventIdが省略されている場合、従来はそのまま「対象イベント無し」の
-        // 後方互換パスとして扱っていた。しかしこれは、悪意あるまたは壊れたクライアントが
-        // completeEventIdを単に省略するだけでCorrection追跡(REOPEN Execution Event・
-        // REVOKE Lifecycle Event)を回避できてしまう抜け道だった(外部監査で指摘、
-        // Gate阻害)。
-        // 是正: completeEventIdが無くても、このresponsibilityに対するCOMPLETE Eventが
-        // 実際にDB上に存在するかを必ずサーバー側で確認する。存在するのに
-        // completeEventIdが省略されている場合は、正規の後方互換ケース(旧形式
-        // クライアント)ではなく評価回避の疑いがあるため拒否する。
-        // 「本当に存在しない」場合(PEM同意未取得で記録自体がスキップされていた場合)
-        // のみ、後方互換の単純復元パスを許可する。
-        //
-        // [2026-08-26是正・外部監査再評価で発見] 当初はこの存在確認にも
-        // `responsibilityVersionAfter: t.version`(現在versionとの完全一致)を
-        // 条件へ含めていた。これにより、Bulk Complete後にタイトル編集等の
-        // 無関係な操作でversionだけが進んだ場合、実際にはCOMPLETE Eventが
-        // 存在するにもかかわらず「対象イベント無し」と誤判定され、
-        // completeEventIdを省略するだけでCorrection追跡を回避できる抜け道が
-        // 残っていた(正しいcompleteEventIdを送るとstaleとして拒否されるのに、
-        // 省略すると素通りできるという非対称性があった)。
-        // 是正: この存在確認からもversion条件を外す(workspace/responsibility/
-        // eventType/actorの一致のみで判定する。completeEventIdが指定されている
-        // 場合の実在確認クエリと同じ条件へ揃えた)。
-        //
-        // [2026-08-26さらに是正・外部監査再々評価で発見した別の不具合]
-        // 上記の是正で「version一致を見ない」ようにした結果、今度は
-        // 「このresponsibilityに過去一度でもCOMPLETE Eventが記録されていれば
-        // 常に拒否する」という広すぎる判定になっていた。これにより、
-        // 「PEM同意ありで完了→REOPEN→PEM同意を撤回→再度Bulk Complete
-        // (今回はEvent未記録)→Undo」という正当な操作で、無関係な過去のEvent
-        // (前回の完了サイクルのもの)が見つかってしまい、今回の完了には
-        // 対応するEventが存在しないにもかかわらず拒否されてしまっていた
-        // (「PEM同意が無くてもコア機能は止めない」という既存方針との衝突、
-        // 外部監査で指摘)。
-        // 是正: 「今回の完了に対応するEventかどうか」を正確に判定する。
-        // bulkComplete/単一アイテムのtransitions/route.tsは、Responsibility.
-        // completedAtとResponsibilityExecutionEvent.clientOccurredAtへ
-        // 同一のDateインスタンス(`now`)を設定しているため、この2つが厳密一致
-        // するEventだけが「今回の完了」に対応するEventだと判定できる
-        // (version(タイトル編集等の無関係な操作でも進む)より正確な照合軸)。
-        const existingCompleteEvent = t.completedAt
-          ? await tx.responsibilityExecutionEvent.findFirst({
-              where: {
-                workspaceId,
-                responsibilityId: t.id,
-                eventType: "COMPLETE",
-                subjectUserId: userId,
-                clientOccurredAt: t.completedAt,
-              },
-              select: { id: true },
-            })
-          : null;
-        if (existingCompleteEvent) {
-          throw new InvalidUndoSnapshotError(
-            `id=${t.id}: 今回の完了に対応するCOMPLETE Event` +
-              `(id=${existingCompleteEvent.id})がDB上に存在するにもかかわらず、` +
-              `completeEventIdが指定されていません。取消対象のcompleteEventIdを` +
-              `明示的に指定してください`,
+
+        const requestPayloadHash = buildCompleteUndoRequestPayloadHash({ receiptId: receipt.id });
+
+        // [2026-08-26新設] 冪等記録はreceiptId単位(BulkCompleteUndoConsumption)。
+        // PEM Execution Ledgerの記録有無に一切依存しないため、種別固有型や
+        // PEM未同意時の完了でも「同一要求の再送は同じ成功応答を返す」という
+        // v4.0 5.5節の契約が一様に成立する(外部監査で指摘されていた問題の是正)。
+        const existingConsumption = await tx.bulkCompleteUndoConsumption.findUnique({
+          where: { receiptId: receipt.id },
+          select: { requestPayloadHash: true },
+        });
+
+        // [2026-08-26新設] 「現在完了状態か」は、型ごとの完了到達statusを
+        // 再定義するのではなく、このレシート自体が表すtoStatusと現在のstatusが
+        // 一致するかで判定する。これにより型ごとの判定ロジックを重複して
+        // 実装・保守する必要が無くなり、レシートが古くなっていれば(他の操作で
+        // 状態が変わっていれば)自然にSKIP_NOT_COMPLETEDとなる。
+        const currentlyCompleted = t.status === receipt.toStatus;
+        const decision = decideCompleteUndoAction({
+          currentlyCompleted,
+          existingConsumption,
+          requestPayloadHash,
+        });
+
+        if (decision.kind === "REPLAY_SUCCESS") {
+          count++;
+          continue;
+        }
+        if (decision.kind === "REJECT_REUSED") {
+          // [P1-2] ここで投げることでバッチ全体がロールバックされる。
+          // (新設計ではpayloadにreceiptId以外の可変フィールドが無いため、
+          // このAPIを正規のクライアントから呼ぶ限りこの分岐は実質到達しない。
+          // 将来payloadが拡張された場合の防御的分岐として保持する。)
+          throw new IdempotencyKeyReusedError(
+            "同一の取消対象に対して内容の異なる取消要求が送信されました",
           );
         }
-      }
-
-      // [外部監査再評価・Gate阻害是正の核心]
-      // 従来は`useReopenVocabulary = Boolean(originalCompleteEvent)`とし、これが
-      // そのままnextStatusの決定(PLANNEDへ固定するか、クライアント供給のs.statusを
-      // そのまま書き込むか)にも使われていた。このため、completeEventIdを省略/nullで
-      // 送るだけで、Execution Ledger対象型(TASK等)であっても「クライアントが指定した
-      // 任意のstatus」を直接書き込めてしまい、v4.0が要求する
-      // 「COMPLETED→REOPEN→PLANNED」という許可遷移を迂回できた(重大な指摘)。
-      //
-      // 是正: nextStatusの決定を「Execution Ledgerへ記録できるか」から完全に分離する。
-      // Execution Ledger対象型(ledgerApplicable)であれば、Eventを特定できるか否かに
-      // 関わらず、常にPLANNEDへ固定する(単一アイテムのREOPENアクションと同じ意味論)。
-      // Eventを特定できた場合のみ、追加でExecution Ledger/Lifecycle Eventへ記録する。
-      const canRecordReopen = ledgerApplicable && Boolean(originalCompleteEvent);
-      const nextStatus = decideCompleteUndoNextStatus({
-        ledgerApplicable,
-        type: t.type,
-      });
-      // [2026-08-26是正] nextStatusは常に「未完了の固定状態」(PLANNEDまたは
-      // initialStatusFor(type))になるため、completedAtは常にnullになる。
-      // s.completedAt(クライアント供給値)はもはや使わない(Gate阻害1是正で
-      // s.statusを信用しなくなったのと同じ理由。validateCompleteUndoTargetは
-      // 「クライアントの主張が尤もらしいか」の事前チェックとしては引き続き有効)。
-      const nextCompletedAt = null;
-
-      const requestPayloadHash = buildCompleteUndoRequestPayloadHash({
-        responsibilityId: t.id,
-        snapshotStatus: s.status,
-        snapshotCompletedAt: s.completedAt,
-        // [外部監査再評価対応] 取消対象イベントをhash対象へ含める。
-        snapshotCompleteEventId: s.completeEventId ?? null,
-      });
-      const undoIdempotencyKey = originalCompleteEvent
-        ? buildCompleteUndoIdempotencyKey(t.id, originalCompleteEvent.id)
-        : null;
-
-      const existingLifecycleEvent = undoIdempotencyKey
-        ? await tx.responsibilityLifecycleEvent.findFirst({
-            where: { workspaceId, subjectUserId: userId, idempotencyKey: undoIdempotencyKey },
-            select: { requestPayloadHash: true },
-          })
-        : null;
-
-      // [2026-08-26是正・外部監査再々評価で発見した重大バグ]
-      // 従来はt.status(文字列)をそのままdecideCompleteUndoActionへ渡し、
-      // そちらで"COMPLETED"固定文字列と比較していた。COMMITMENT/WAITING/RISKの
-      // 完了到達statusは"COMPLETED"ではない(completeToStatusForType参照)ため、
-      // これらの型ではUndoが常にSKIP_NOT_COMPLETEDとなり一度も適用されない
-      // 重大な不具合になっていた。型別の完了到達statusと一致するかどうかを
-      // ここで判定し、真偽値として渡す。
-      const currentlyCompleted = t.status === completeToStatusForType(t.type);
-      const decision = decideCompleteUndoAction({
-        currentlyCompleted,
-        existingLifecycleEvent,
-        requestPayloadHash,
-      });
-
-      if (decision.kind === "REPLAY_SUCCESS") {
-        count++;
-        continue;
-      }
-      if (decision.kind === "REJECT_REUSED") {
-        // [P1-2] ここで投げることでバッチ全体がロールバックされる。
-        throw new IdempotencyKeyReusedError(
-          "同一の取消対象に対して内容の異なる取消要求が送信されました",
-        );
-      }
-      if (decision.kind === "SKIP_NOT_COMPLETED") {
-        continue;
-      }
-
-      // decision.kind === "APPLY"
-      // (nextStatus/nextCompletedAt/canRecordReopenは上で既に算出済み)
-      //
-      // [2026-08-26新設] 真に新規の取消要求の場合のみ、参照したCOMPLETE Eventが
-      // 「まだ最新の状態を表しているか(その後に他の変更が加わっていないか)」を
-      // 確認する。REPLAY_SUCCESS/REJECT_REUSEDの場合はこのチェックを行わない
-      // (versionは初回適用で既に進んでいるのが正常なため)。
-      if (originalCompleteEvent && isCompleteEventStale({
-        responsibilityVersionAfter: originalCompleteEvent.responsibilityVersionAfter,
-        currentVersion: t.version,
-      })) {
-        throw new InvalidUndoSnapshotError(
-          `id=${t.id}: completeEventId "${s.completeEventId}" は実在しますが、` +
-            `その後に他の変更が加わっており現在のversion(${t.version})と一致しません` +
-            `(このCOMPLETE Eventは既に古い状態を指しています)`,
-        );
-      }
-
-      // [2026-08-26新設・外部監査Gate阻害2是正、実行時に発見した順序バグの是正]
-      // status/completedAtの妥当性検証も、isCompleteEventStaleと同じ理由で
-      // APPLY分岐でのみ行う(冪等判定より前に行うと、REJECT_REUSED判定に使う
-      // 「異なるpayload」がVALIDATION_FAILEDに化けてしまう)。
-      validateCompleteUndoTarget({ id: t.id, type: t.type, status: s.status, completedAt: s.completedAt });
-
-      const updateResult = await tx.responsibility.updateMany({
-        where: { id: t.id, version: t.version },
-        data: { status: nextStatus, completedAt: nextCompletedAt, updatedById: userId, version: { increment: 1 } },
-      });
-      // 楽観ロック競合(取消の直前に他操作でversionが進んでいた): このidはスキップする。
-      if (updateResult.count === 0) continue;
-
-      // [P1-4是正] 実際にstatusを書き換えたので、bulkComplete・単一アイテムの
-      // transitions/route.tsと同じ形でEventLog/OutboxEventを必ず記録する
-      // (Execution Ledger対象外型やPEM未同意でも「無音の状態変更」にしない)。
-      await tx.eventLog.create({
-        data: {
-          aggregateType: "Responsibility",
-          aggregateId: t.id,
-          eventType: "STATUS_CHANGED",
-          beforeJson: { status: t.status },
-          afterJson: { status: nextStatus, bulkUndo: true },
-          actorType: "USER",
-          actorId: userId,
-          reason: "一括完了の取消(Undo)",
-        },
-      });
-      await tx.outboxEvent.create({
-        data: {
-          eventName: "ResponsibilityTransitioned.v1",
-          eventVersion: "1",
-          aggregateId: t.id,
-          aggregateVersion: t.version + 1,
-          payload: { responsibilityId: t.id, action: "UNDO_COMPLETE", fromStatus: t.status, toStatus: nextStatus },
-        },
-      });
-
-      let resultingEventId: string | null = null;
-      if (canRecordReopen) {
-        const reopenEvent = await recordExecutionLedgerEvent({
-          tx,
-          ctx: pemCtx,
-          responsibilityId: t.id,
-          responsibilityType: t.type,
-          action: "REOPEN",
-          fromState: "COMPLETED",
-          toState: "PLANNED",
-          versionBefore: t.version,
-          versionAfter: t.version + 1,
-          clientOccurredAt: new Date(),
-          actorType: "USER",
-          source: "WEB",
-          requestId: randomUUID(),
-          requestPayloadHash,
-          reason: "一括完了の取消(Undo)",
-        });
-        resultingEventId = reopenEvent?.id ?? null;
-        if (reopenEvent) {
-          await projectAndPersistExecutionSessions(tx, pemCtx, t.id);
+        if (decision.kind === "SKIP_NOT_COMPLETED") {
+          continue;
         }
-        // resultingEventId===nullの場合(PEM同意撤回等)の扱いはファイル冒頭コメントの
-        // 「要仕様確認事項」を参照。本実装はREVOKE単独記録を許容する(暫定判断)。
-      }
 
-      if (undoIdempotencyKey && originalCompleteEvent) {
-        await tx.responsibilityLifecycleEvent.create({
+        // decision.kind === "APPLY"
+        // [2026-08-26新設・外部監査で指摘された根本問題の是正の核心]
+        // Execution Ledger対象型はREOPEN語彙に合わせ常にPLANNEDへ(v4.0が
+        // 定める許可遷移COMPLETED→REOPEN→PLANNEDそのもの)。対象外型は
+        // receipt.fromStatus(サーバーが完了実行時に記録した真の元状態。
+        // クライアントからは一切受け取っていない)を使う。これにより、
+        // AT_RISKから完了したものはAT_RISKへ、ACTIVEから完了したものはACTIVEへ、
+        // それぞれ正確に復元される(改ざんの余地が無い)。
+        const ledgerApplicable = isExecutionLedgerApplicableType(t.type);
+        const canRecordReopen = ledgerApplicable && Boolean(receipt.completeEventId);
+        const nextStatus = ledgerApplicable ? "PLANNED" : receipt.fromStatus;
+        const nextCompletedAt = null;
+
+        const updateResult = await tx.responsibility.updateMany({
+          where: { id: t.id, version: t.version },
+          data: { status: nextStatus, completedAt: nextCompletedAt, updatedById: userId, version: { increment: 1 } },
+        });
+        // 楽観ロック競合(取消の直前に他操作でversionが進んでいた): このidはスキップする。
+        if (updateResult.count === 0) continue;
+
+        // [P1-4是正] 実際にstatusを書き換えたので、bulkComplete・単一アイテムの
+        // transitions/route.tsと同じ形でEventLog/OutboxEventを必ず記録する
+        // (Execution Ledger対象外型やPEM未同意でも「無音の状態変更」にしない)。
+        await tx.eventLog.create({
           data: {
+            aggregateType: "Responsibility",
+            aggregateId: t.id,
+            eventType: "STATUS_CHANGED",
+            beforeJson: { status: t.status },
+            afterJson: { status: nextStatus, bulkUndo: true },
+            actorType: "USER",
+            actorId: userId,
+            reason: "一括完了の取消(Undo)",
+          },
+        });
+        await tx.outboxEvent.create({
+          data: {
+            eventName: "ResponsibilityTransitioned.v1",
+            eventVersion: "1",
+            aggregateId: t.id,
+            aggregateVersion: t.version + 1,
+            payload: { responsibilityId: t.id, action: "UNDO_COMPLETE", fromStatus: t.status, toStatus: nextStatus },
+          },
+        });
+
+        let resultingEventId: string | null = null;
+        if (canRecordReopen && receipt.completeEventId) {
+          const reopenEvent = await recordExecutionLedgerEvent({
+            tx,
+            ctx: pemCtx,
+            responsibilityId: t.id,
+            responsibilityType: t.type,
+            action: "REOPEN",
+            fromState: "COMPLETED",
+            toState: "PLANNED",
+            versionBefore: t.version,
+            versionAfter: t.version + 1,
+            clientOccurredAt: new Date(),
+            actorType: "USER",
+            source: "WEB",
+            requestId: randomUUID(),
+            requestPayloadHash,
+            reason: "一括完了の取消(Undo)",
+          });
+          resultingEventId = reopenEvent?.id ?? null;
+          if (reopenEvent) {
+            await projectAndPersistExecutionSessions(tx, pemCtx, t.id);
+          }
+          // resultingEventId===nullの場合(PEM同意撤回等)の扱いはファイル冒頭コメントの
+          // 「要仕様確認事項」を参照。本実装はREVOKE単独記録を許容する(暫定判断)。
+        }
+
+        // [2026-08-26新設] 冪等記録はreceiptId単位で必ず作成する(型・Ledger記録の
+        // 有無に関わらず)。これがUndoの冪等性の唯一の正本になる。
+        await tx.bulkCompleteUndoConsumption.create({
+          data: {
+            receiptId: receipt.id,
             workspaceId,
             subjectUserId: userId,
-            responsibilityId: t.id,
-            kind: "CORRECTION",
-            correctionType: "REVOKE",
-            correctionOfEventId: originalCompleteEvent.id,
-            resultingEventId,
-            fromState: "COMPLETED",
-            toState: nextStatus,
-            reason: "一括完了の取消(Undo)",
-            actorType: "USER",
-            actorUserId: userId,
-            idempotencyKey: undoIdempotencyKey,
             requestPayloadHash,
           },
         });
+
+        // Lifecycle Event(v4.0 8.1節のCorrection監査証跡)は、Execution Ledgerへの
+        // 接続が実際にできた場合(completeEventIdがある)のみ記録する
+        // (「いずれの場合も必ず記録する」わけではない。訂正対象が存在しない
+        // Correctionは作れないため)。
+        if (receipt.completeEventId) {
+          await tx.responsibilityLifecycleEvent.create({
+            data: {
+              workspaceId,
+              subjectUserId: userId,
+              responsibilityId: t.id,
+              kind: "CORRECTION",
+              correctionType: "REVOKE",
+              correctionOfEventId: receipt.completeEventId,
+              resultingEventId,
+              fromState: "COMPLETED",
+              toState: nextStatus,
+              reason: "一括完了の取消(Undo)",
+              actorType: "USER",
+              actorUserId: userId,
+              idempotencyKey: buildCompleteUndoIdempotencyKey(t.id, receipt.id),
+              requestPayloadHash,
+            },
+          });
+        }
+        count++;
       }
-      count++;
-    }
-    return count;
+      return count;
     },
     { timeout: 30000 },
   );

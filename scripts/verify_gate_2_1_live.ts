@@ -12,19 +12,28 @@
  * 自動実行し、pass/failを報告する。今後もCompletion Gate 2.1(bulk complete/undo)
  * まわりを変更した際は、このスクリプトを再実行して回帰が無いことを確認すること。
  *
- * 検証する項目(すべて過去の監査コメントで名指しされたもの):
- *   1. 初回Undo: restored:1
- *   2. 同一payload再送: restored:1、Lifecycle Event件数が増えない
- *   3. 異なるpayload・同一completeEventId: 409 IDEMPOTENCY_KEY_REUSED
- *   4. COMPLETE→REVOKE→REOPENのFK接続(correctionOfEventId/resultingEventId)確認
- *   5. Undo後のEventLog(STATUS_CHANGED)/OutboxEvent(ResponsibilityTransitioned.v1)確認
- *   6. Gate阻害是正の確認: completeEventIdを省略した不正リクエストでも
- *      status がPLANNEDに固定され、任意stateへの直接書き込みができないこと
- *   7. 誤ったcompleteEventId(実在しないUUID)を送るとVALIDATION_FAILED(400)になること
+ * [2026-08-26全面改訂・外部監査で指摘された根本問題(クライアント編集可能な
+ * snapshotをUndoの信頼元にしている)の是正に伴い、Undo Receipt方式へ移行した。
+ * 検証項目も刷新している。]
+ *
+ * 検証する項目:
+ *   1. 通常経路: 初回Undo(restored:1)・同一receiptId再送(冪等、restored:1)・
+ *      FK接続(correctionOfEventId/resultingEventId)・EventLog/Outbox記録確認
+ *   3. 実在しないreceiptIdはVALIDATION_FAILED(400)
+ *   7. 他Responsibilityのreceiptを流用しようとするとVALIDATION_FAILED(400)
+ *      (receiptIdはUUIDだが、responsibilityId一致も要求されるため拒否される)
  *   8. 200件規模バッチのUndoが単一トランザクションのタイムアウトに達さず完走すること
  *      (実測時間も出力する)
- *   9. (参考)2件バッチの一方が IDEMPOTENCY_KEY_REUSED になる場合、他方も
- *      ロールバックされ部分適用にならないこと
+ *   9. バッチ内の1件が不正receiptIdのとき、他方も含めてバッチ全体がロールバック
+ *      され部分適用にならないこと
+ *   10. 種別固有型(COMMITMENT/WAITING/RISK)のUndoが実際に機能すること
+ *   13. Undo Receipt方式の核心確認1: AT_RISKから完了したCOMMITMENTは、
+ *       (initialStatusForのACTIVEではなく)正確にAT_RISKへ復元されること
+ *       (旧設計の仕様回帰の是正確認)
+ *   14. Undo Receipt方式の核心確認2: 種別固有型(Execution Ledger未記録)でも
+ *       同一receiptId再送でrestored:1を返すこと(冪等性未達の是正確認)
+ *   15. Undo Receipt方式の核心確認3: PEM未同意時に完了したTASKでも
+ *       同一receiptId再送でrestored:1を返すこと
  *
  * 前提: このスクリプトはapp/ディレクトリの.env(DATABASE_URL)とlib/dbを
  * そのまま使うため、`~/projects/ismay/app`直下から実行すること。
@@ -292,6 +301,19 @@ async function cleanupTestUser(params: {
     }
     await db.eventLog.deleteMany({ where: { aggregateId: { in: allResponsibilityIds } } }).catch(() => null);
     await db.outboxEvent.deleteMany({ where: { aggregateId: { in: allResponsibilityIds } } }).catch(() => null);
+    // [2026-08-26追加・Undo Receipt方式への移行に伴う追加]
+    // BulkCompleteReceipt.completeEventIdはResponsibilityExecutionEventへのFK、
+    // BulkCompleteUndoConsumption.receiptIdはBulkCompleteReceiptへのFKなので、
+    // ResponsibilityExecutionEventを削除するより前に、consumption→receiptの順で
+    // 削除する。
+    const receipts = await db.bulkCompleteReceipt
+      .findMany({ where: { responsibilityId: { in: allResponsibilityIds } }, select: { id: true } })
+      .catch(() => [] as { id: string }[]);
+    const receiptIds = receipts.map((r: { id: string }) => r.id);
+    if (receiptIds.length > 0) {
+      await db.bulkCompleteUndoConsumption.deleteMany({ where: { receiptId: { in: receiptIds } } }).catch(() => null);
+      await db.bulkCompleteReceipt.deleteMany({ where: { id: { in: receiptIds } } }).catch(() => null);
+    }
     await db.responsibilityExecutionEvent
       .deleteMany({ where: { responsibilityId: { in: allResponsibilityIds } } })
       .catch(() => null);
@@ -387,37 +409,45 @@ async function main(): Promise<void> {
     if (!dbUser || !createdWorkspaceId) {
       throw new Error("セットアップ後にUser/Workspaceを特定できませんでした");
     }
-
     // =====================================================================
-    // 1〜5. 初回Undo・同一payload再送・異なるpayload・FK接続・EventLog/Outbox
+    // 1. 通常経路: 初回Undo・同一receiptId再送(冪等)・FK接続・EventLog/Outbox
     // =====================================================================
+    // [2026-08-26全面改訂・外部監査で指摘された根本問題の是正に伴う書き換え]
+    // 従来はクライアントが保持するsnapshot(status/completedAt/completeEventId)を
+    // そのまま送り返す設計だったため、「異なるpayload」を意図的に構築して
+    // REJECT_REUSEDを検証するテストが存在した。新設計ではクライアントが送るのは
+    // receiptIdのみであり、改ざん可能な他のフィールドが存在しないため、この種の
+    // テストは意味を失った(それ自体が設計の安全性向上を意味する)。代わりに、
+    // 「同一receiptIdの再送は同じ成功応答を返す」という冪等契約を、Execution
+    // Ledgerが記録されない経路(種別固有型・PEM未同意)でも成立することを重点的に
+    // 検証する(外部監査で「Ledgerなし経路の冪等性が未成立」と指摘された点)。
     {
-      const { responsibilityId, undo } = await createTaskAndComplete(jar, "Gate2.1検証(1-5): 通常経路");
-      createdResponsibilityIds.push(responsibilityId);
-      const snap = undo.snapshot[0];
-      ok("1. bulk complete: undo.snapshotにcompleteEventIdが含まれる", typeof snap.completeEventId === "string");
+      const task = await createTaskAndComplete(jar, "Gate2.1検証(1): 通常経路");
+      createdResponsibilityIds.push(task.responsibilityId);
+      const snap = task.undo.snapshot[0];
+      ok("1. bulk complete: undo.snapshotにreceiptIdが含まれる", typeof snap.receiptId === "string");
 
-      // --- 1. 初回Undo ---
-      const undo1 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", undo);
+      const undo1 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", task.undo);
       ok("1. 初回Undo: HTTP 200", undo1.status === 200, JSON.stringify(undo1.json));
       ok("1. 初回Undo: restored===1", undo1.json?.data?.restored === 1, JSON.stringify(undo1.json));
 
-      const afterUndo1 = await db.responsibility.findUnique({ where: { id: responsibilityId } });
+      const afterUndo1 = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
       ok("1. 初回Undo後: statusがPLANNED", afterUndo1?.status === "PLANNED", `actual=${afterUndo1?.status}`);
 
+      const receipt = await db.bulkCompleteReceipt.findUnique({ where: { id: snap.receiptId } });
+      ok("1. レシートのfromStatusがIN_PROGRESS(完了前の真の状態)", receipt?.fromStatus === "IN_PROGRESS");
+      ok("1. レシートのtoStatusがCOMPLETED", receipt?.toStatus === "COMPLETED");
+      ok("1. レシートにcompleteEventIdが記録されている(PEM同意ありのため)", typeof receipt?.completeEventId === "string");
+
       const lifecycleEvents1 = await db.responsibilityLifecycleEvent.findMany({
-        where: { responsibilityId },
+        where: { responsibilityId: task.responsibilityId },
       });
       ok("4. Lifecycle Eventが1件作成されている(kind=CORRECTION)", lifecycleEvents1.length === 1);
       const lc = lifecycleEvents1[0];
+      ok("4. correctionType=REVOKE", lc?.correctionType === "REVOKE", `actual=${lc?.correctionType}`);
       ok(
-        "4. correctionType=REVOKE",
-        lc?.correctionType === "REVOKE",
-        `actual=${lc?.correctionType}`,
-      );
-      ok(
-        "4. correctionOfEventId(=元COMPLETE Event)が設定されている",
-        typeof lc?.correctionOfEventId === "string" && lc.correctionOfEventId === snap.completeEventId,
+        "4. correctionOfEventId(=元COMPLETE Event)がレシートのcompleteEventIdと一致",
+        lc?.correctionOfEventId === receipt?.completeEventId,
       );
       ok("4. resultingEventId(=新規REOPEN Event)が設定されている", typeof lc?.resultingEventId === "string");
 
@@ -431,99 +461,75 @@ async function main(): Promise<void> {
       );
 
       const eventLogs1 = await db.eventLog.findMany({
-        where: { aggregateId: responsibilityId, eventType: "STATUS_CHANGED" },
+        where: { aggregateId: task.responsibilityId, eventType: "STATUS_CHANGED" },
         orderBy: { occurredAt: "desc" },
       });
       ok("5. Undo後にEventLog(STATUS_CHANGED)が記録されている", eventLogs1.length >= 1);
 
       const outboxEvents1 = await db.outboxEvent.findMany({
-        where: { aggregateId: responsibilityId, eventName: "ResponsibilityTransitioned.v1" },
+        where: { aggregateId: task.responsibilityId, eventName: "ResponsibilityTransitioned.v1" },
       });
       ok("5. Undo後にOutboxEvent(ResponsibilityTransitioned.v1)が記録されている", outboxEvents1.length >= 1);
 
-      // --- 2. 同一payloadでの再送(冪等) ---
-      const undo2 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", undo);
-      ok("2. 同一payload再送: HTTP 200", undo2.status === 200, JSON.stringify(undo2.json));
-      ok("2. 同一payload再送: restored===1(元の成功と同じ結果)", undo2.json?.data?.restored === 1, JSON.stringify(undo2.json));
+      // --- 同一receiptIdでの再送(冪等) ---
+      const undo2 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", task.undo);
+      ok("2. 同一receiptId再送: HTTP 200", undo2.status === 200, JSON.stringify(undo2.json));
+      ok(
+        "2. 同一receiptId再送: restored===1(元の成功と同じ結果)",
+        undo2.json?.data?.restored === 1,
+        JSON.stringify(undo2.json),
+      );
+      const consumptions1 = await db.bulkCompleteUndoConsumption.findMany({ where: { receiptId: snap.receiptId } });
+      ok("2. 同一receiptId再送: 冪等記録が重複作成されない", consumptions1.length === 1);
       const lifecycleEvents2 = await db.responsibilityLifecycleEvent.findMany({
-        where: { responsibilityId },
+        where: { responsibilityId: task.responsibilityId },
       });
-      ok("2. 同一payload再送: Lifecycle Event件数が増えない(重複記録なし)", lifecycleEvents2.length === 1);
-
-      // --- 3. 異なるpayload・同一completeEventId ---
-      const differentPayloadUndo = {
-        action: "COMPLETE",
-        snapshot: [{ ...snap, completedAt: new Date().toISOString() }],
-      };
-      const undo3 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", differentPayloadUndo);
-      ok(
-        "3. 異なるpayload・同一completeEventId: HTTP 409 IDEMPOTENCY_KEY_REUSED",
-        undo3.status === 409 && undo3.json?.error?.code === "IDEMPOTENCY_KEY_REUSED",
-        `status=${undo3.status} body=${JSON.stringify(undo3.json)}`,
-      );
+      ok("2. 同一receiptId再送: Lifecycle Event件数が増えない(重複記録なし)", lifecycleEvents2.length === 1);
     }
 
     // =====================================================================
-    // 6. Gate阻害1是正の確認: completeEventId省略で監査記録(Correction)を
-    //    回避できないこと
+    // 3. 実在しないreceiptId・他責任のreceiptIdはVALIDATION_FAILED
     // =====================================================================
-    // [2026-08-26改訂] 当初はcompleteEventId省略時にstatus=PLANNEDへ固定される
-    // ことだけを確認していたが、それだけでは「Correction追跡(REOPEN Execution
-    // Event・REVOKE Lifecycle Event)自体を回避できる」という別のGate阻害
-    // (外部監査で指摘)を見逃していた。是正後は、現在versionに対応するCOMPLETE
-    // Eventが実在するにもかかわらずcompleteEventIdを省略した場合、そもそも
-    // 400 VALIDATION_FAILEDで拒否されるべきである(実行自体を許可しない)。
     {
-      const { responsibilityId, undo } = await createTaskAndComplete(jar, "Gate2.1検証(6): Gate阻害1是正");
-      createdResponsibilityIds.push(responsibilityId);
-      const maliciousUndo = {
+      const task = await createTaskAndComplete(jar, "Gate2.1検証(3): 不正なreceiptId");
+      createdResponsibilityIds.push(task.responsibilityId);
+      const fakeUndo = {
         action: "COMPLETE",
-        snapshot: [
-          {
-            id: responsibilityId,
-            status: "IN_PROGRESS", // 任意のstatusへ直接書き込もうとする不正リクエスト
-            completedAt: null,
-            completeEventId: null, // 迂回の鍵: 監査記録を回避しようとcompleteEventIdを省略する
-          },
-        ],
+        snapshot: [{ id: task.responsibilityId, receiptId: "00000000-0000-4000-8000-000000000000" }],
       };
-      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", maliciousUndo);
+      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", fakeUndo);
       ok(
-        "6. Gate阻害1是正【最重要】: 実在するCOMPLETE EventがあるのにcompleteEventIdを" +
-          "省略すると400 VALIDATION_FAILEDで拒否される(監査記録回避を許さない)",
+        "3. 実在しないreceiptId: HTTP 400 VALIDATION_FAILED",
         res.status === 400 && res.json?.error?.code === "VALIDATION_FAILED",
         `status=${res.status} body=${JSON.stringify(res.json)}`,
       );
-      const after = await db.responsibility.findUnique({ where: { id: responsibilityId } });
-      ok(
-        "6. Gate阻害1是正: 拒否された結果、statusはCOMPLETEDのまま変化していない" +
-          "(部分適用・迂回のどちらも起きていない)",
-        after?.status === "COMPLETED",
-        `actual=${after?.status}`,
-      );
-      // 後始末: 正しいundo(completeEventId込み)で戻しておく。
-      await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", undo);
+      // 後始末: 正しいundoで戻す。
+      await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", task.undo);
     }
 
     // =====================================================================
-    // 7. 誤ったcompleteEventIdはVALIDATION_FAILED
+    // 7. 他Responsibilityのreceiptを流用しようとするとVALIDATION_FAILED
     // =====================================================================
+    // [2026-08-26追加・改ざん耐性の確認] receiptIdはUUIDだが、他の
+    // Responsibilityのreceipt.idを流用しても、bulkOperations.tsの検索条件が
+    // responsibilityId一致も要求するため拒否されるべきである。
     {
-      const { responsibilityId, undo } = await createTaskAndComplete(jar, "Gate2.1検証(7): 誤ったcompleteEventId");
-      createdResponsibilityIds.push(responsibilityId);
-      const snap = undo.snapshot[0];
-      const wrongUndo = {
+      const taskA = await createTaskAndComplete(jar, "Gate2.1検証(7): レシート流用防止A");
+      const taskB = await createTaskAndComplete(jar, "Gate2.1検証(7): レシート流用防止B");
+      createdResponsibilityIds.push(taskA.responsibilityId, taskB.responsibilityId);
+      const crossUndo = {
         action: "COMPLETE",
-        snapshot: [{ ...snap, completeEventId: "00000000-0000-4000-8000-000000000000" }],
+        snapshot: [{ id: taskA.responsibilityId, receiptId: taskB.undo.snapshot[0].receiptId }],
       };
-      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", wrongUndo);
+      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", crossUndo);
       ok(
-        "7. 実在しないcompleteEventId: HTTP 400 VALIDATION_FAILED",
+        "7. 他Responsibilityのreceiptを流用: HTTP 400 VALIDATION_FAILED",
         res.status === 400 && res.json?.error?.code === "VALIDATION_FAILED",
         `status=${res.status} body=${JSON.stringify(res.json)}`,
       );
-      // このケースは拒否されているはずなので、後始末のため正しいundoで戻しておく。
-      await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", undo);
+      // 後始末。
+      await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", taskA.undo);
+      await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", taskB.undo);
     }
 
     // =====================================================================
@@ -532,6 +538,7 @@ async function main(): Promise<void> {
     {
       const BATCH_SIZE = 200;
       const ids: string[] = [];
+      const undoSnapshot: { id: string; receiptId: string }[] = [];
       for (let i = 0; i < BATCH_SIZE; i++) {
         const createRes = await api(jar, "POST", "/api/v1/responsibilities", {
           type: "TASK",
@@ -572,31 +579,24 @@ async function main(): Promise<void> {
     }
 
     // =====================================================================
-    // 9. バッチ内の1件がIDEMPOTENCY_KEY_REUSEDのとき、他方もロールバックされる
+    // 9. バッチ内の1件が不正receiptIdのとき、他方もロールバックされる(原子性)
     // =====================================================================
     {
       const a = await createTaskAndComplete(jar, "Gate2.1検証(9): バッチ原子性 A");
       const b = await createTaskAndComplete(jar, "Gate2.1検証(9): バッチ原子性 B");
       createdResponsibilityIds.push(a.responsibilityId, b.responsibilityId);
 
-      // Aだけ先にUndoしておく(このLifecycle Eventが後段でREJECT_REUSEDの種になる)。
-      const preUndoA = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", a.undo);
-      ok("9. 事前準備: Aの単独Undoが成功", preUndoA.status === 200 && preUndoA.json?.data?.restored === 1);
-
-      // Aは既にUndo済みの状態で、Aの元payloadとは異なる内容(completedAtを変える)+Bの
-      // 正常なUndoを同一バッチで送る。Aの分がREJECT_REUSEDとなり、バッチ全体が
-      // ロールバックされるべき(=Bも巻き込まれてリジェクトされ、Bの状態は変化しない)。
       const mixedUndo = {
         action: "COMPLETE",
         snapshot: [
-          { ...a.undo.snapshot[0], completedAt: new Date().toISOString() },
-          b.undo.snapshot[0],
+          { id: a.responsibilityId, receiptId: "00000000-0000-4000-8000-000000000001" }, // 不正
+          b.undo.snapshot[0], // 正当
         ],
       };
       const mixedRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", mixedUndo);
       ok(
-        "9. 混在バッチ: HTTP 409 IDEMPOTENCY_KEY_REUSED(バッチ全体が拒否される)",
-        mixedRes.status === 409,
+        "9. 混在バッチ: HTTP 400 VALIDATION_FAILED(バッチ全体が拒否される)",
+        mixedRes.status === 400,
         `status=${mixedRes.status} body=${JSON.stringify(mixedRes.json)}`,
       );
       const bAfter = await db.responsibility.findUnique({ where: { id: b.responsibilityId } });
@@ -613,218 +613,154 @@ async function main(): Promise<void> {
     // =====================================================================
     // 10. 種別固有型(COMMITMENT/WAITING/RISK)のUndo
     // =====================================================================
-    // [2026-08-26追加・外部監査再々評価で発見した重大バグの確認]
-    // decideCompleteUndoActionが型に関わらずcurrentStatus==="COMPLETED"を
-    // 要求していたため、COMMITMENT/WAITING/RISKの完了到達status
-    // (FULFILLED/RESOLVED/CLOSED)ではUndoが常にSKIP_NOT_COMPLETEDとなり、
-    // restored:0のまま何も起きない不具合があった。TASKしか実DB試験していなかった
-    // ため見逃していた。是正後、この3型それぞれで実際にUndoが機能することを
-    // 実DBで確認する。
     {
       const commitment = await createAndComplete(jar, "COMMITMENT", "Gate2.1検証(10): COMMITMENT Undo");
       createdResponsibilityIds.push(commitment.responsibilityId);
       const undoRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", commitment.undo);
       ok(
-        "10. COMMITMENT Undo: restored===1(以前は常に0だった重大バグの回帰防止)",
+        "10. COMMITMENT Undo: restored===1",
         undoRes.status === 200 && undoRes.json?.data?.restored === 1,
         `status=${undoRes.status} body=${JSON.stringify(undoRes.json)}`,
       );
       const after = await db.responsibility.findUnique({ where: { id: commitment.responsibilityId } });
-      ok(
-        "10. COMMITMENT Undo: statusがACTIVE(元の状態)へ復元されている",
-        after?.status === "ACTIVE",
-        `actual=${after?.status}`,
-      );
+      ok("10. COMMITMENT Undo: statusがACTIVE(元の状態)へ復元されている", after?.status === "ACTIVE", `actual=${after?.status}`);
     }
     {
       const waiting = await createAndComplete(jar, "WAITING", "Gate2.1検証(10): WAITING Undo");
       createdResponsibilityIds.push(waiting.responsibilityId);
       const undoRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", waiting.undo);
       ok(
-        "10. WAITING Undo: restored===1(以前は常に0だった重大バグの回帰防止)",
+        "10. WAITING Undo: restored===1",
         undoRes.status === 200 && undoRes.json?.data?.restored === 1,
         `status=${undoRes.status} body=${JSON.stringify(undoRes.json)}`,
       );
       const after = await db.responsibility.findUnique({ where: { id: waiting.responsibilityId } });
-      ok(
-        "10. WAITING Undo: statusがWAITING(元の状態)へ復元されている",
-        after?.status === "WAITING",
-        `actual=${after?.status}`,
-      );
+      ok("10. WAITING Undo: statusがWAITING(元の状態)へ復元されている", after?.status === "WAITING", `actual=${after?.status}`);
     }
     {
       const risk = await createAndComplete(jar, "RISK", "Gate2.1検証(10): RISK Undo");
       createdResponsibilityIds.push(risk.responsibilityId);
       const undoRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", risk.undo);
       ok(
-        "10. RISK Undo: restored===1(以前は常に0だった重大バグの回帰防止)",
+        "10. RISK Undo: restored===1",
         undoRes.status === 200 && undoRes.json?.data?.restored === 1,
         `status=${undoRes.status} body=${JSON.stringify(undoRes.json)}`,
       );
       const after = await db.responsibility.findUnique({ where: { id: risk.responsibilityId } });
-      ok(
-        "10. RISK Undo: statusがOPEN(元の状態)へ復元されている",
-        after?.status === "OPEN",
-        `actual=${after?.status}`,
-      );
+      ok("10. RISK Undo: statusがOPEN(元の状態)へ復元されている", after?.status === "OPEN", `actual=${after?.status}`);
     }
 
     // =====================================================================
-    // 11. 不正なBROKEN復元(遷移元として不正)は400で拒否される
+    // 13. Undo Receipt方式の核心確認1: AT_RISKから完了した場合、正確にAT_RISKへ
+    //     復元される(旧設計の"initialStatusForへ固定"回帰の是正確認)
     // =====================================================================
+    // [2026-08-26追加・外部監査で指摘された仕様回帰の確認]
+    // 旧設計(v11)は種別固有型の復元先を無条件でinitialStatusFor(type)へ固定して
+    // いたため、AT_RISKから完了したCOMMITMENTをUndoすると誤ってACTIVEへ復元
+    // されてしまっていた(改ざん耐性のためにAT_RISKという正当な元状態の情報自体を
+    // 失っていた)。新設計(Undo Receipt)では、サーバーが完了実行時の真のfromStatus
+    // (AT_RISK)をレシートへ保存しているため、AT_RISKへ正確に復元されるべきである。
     {
-      const commitment = await createAndComplete(jar, "COMMITMENT", "Gate2.1検証(11): 不正なBROKEN復元");
-      createdResponsibilityIds.push(commitment.responsibilityId);
-      const snap = commitment.undo.snapshot[0];
-      const maliciousUndo = {
-        action: "COMPLETE",
-        snapshot: [{ ...snap, status: "BROKEN" }], // BROKENは有効値だがFULFILLの遷移元としては不正
-      };
-      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", maliciousUndo);
-      ok(
-        "11. 不正なBROKEN復元: HTTP 400 VALIDATION_FAILEDで拒否される",
-        res.status === 400 && res.json?.error?.code === "VALIDATION_FAILED",
-        `status=${res.status} body=${JSON.stringify(res.json)}`,
-      );
-      // 後始末: 正しいundoで戻しておく。
-      await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", commitment.undo);
-    }
-
-    // =====================================================================
-    // 12. version進行後のcompleteEventId省略は監査回避を許さない
-    // =====================================================================
-    // [2026-08-26追加・外部監査再々評価で発見した抜け道の確認]
-    // Bulk Complete後にタイトル編集等でversionだけが進んだ場合でも、
-    // completeEventId省略によるCorrection追跡回避が許可されないことを確認する。
-    {
-      const task = await createTaskAndComplete(jar, "Gate2.1検証(12): version進行後の省略");
-      createdResponsibilityIds.push(task.responsibilityId);
-      const snap = task.undo.snapshot[0];
-
-      // タイトル編集でversionだけを進める(completedAt/statusはCOMPLETEDのまま)。
-      const currentRow = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
-      const editRes = await api(jar, "PATCH", `/api/v1/responsibilities/${task.responsibilityId}`, {
-        title: "Gate2.1検証(12): タイトル編集済み",
-        version: currentRow?.version,
+      const createRes = await api(jar, "POST", "/api/v1/responsibilities", {
+        type: "COMMITMENT",
+        title: "Gate2.1検証(13): AT_RISKからの復元",
       });
-      ok("12. 事前準備: タイトル編集でversionを進めることに成功", editRes.status === 200, `status=${editRes.status}`);
+      if (createRes.status !== 200 && createRes.status !== 201) {
+        throw new Error(`責任作成に失敗: status=${createRes.status}`);
+      }
+      const responsibilityId: string = createRes.json.data.id;
+      createdResponsibilityIds.push(responsibilityId);
+      // ACTIVE→AT_RISKへ遷移させてから完了する。
+      const markAtRiskRes = await api(jar, "POST", `/api/v1/responsibilities/${responsibilityId}/transitions`, {
+        action: "MARK_AT_RISK",
+        occurredAt: new Date().toISOString(),
+        version: createRes.json.data.version,
+      });
+      ok("13. 事前準備: ACTIVE→AT_RISK遷移に成功", markAtRiskRes.status === 200, `status=${markAtRiskRes.status}`);
 
-      const maliciousUndo = {
+      const bulkRes = await api(jar, "POST", "/api/v1/responsibilities/bulk", {
+        ids: [responsibilityId],
         action: "COMPLETE",
-        snapshot: [{ id: snap.id, status: "IN_PROGRESS", completedAt: null, completeEventId: null }],
-      };
-      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", maliciousUndo);
+      });
+      ok("13. 事前準備: AT_RISKからのbulk completeに成功", bulkRes.status === 200 && bulkRes.json?.data?.affected === 1);
+
+      const undoRes = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", bulkRes.json.data.undo);
+      ok("13. AT_RISKからのUndo: restored===1", undoRes.status === 200 && undoRes.json?.data?.restored === 1);
+      const after = await db.responsibility.findUnique({ where: { id: responsibilityId } });
       ok(
-        "12. version進行後のcompleteEventId省略【最重要】: 400 VALIDATION_FAILEDで拒否される" +
-          "(COMPLETE Eventがversion不一致でも実在する限りCorrection追跡回避を許さない)",
-        res.status === 400 && res.json?.error?.code === "VALIDATION_FAILED",
-        `status=${res.status} body=${JSON.stringify(res.json)}`,
+        "13. Undo Receipt方式の核心【最重要】: ACTIVEではなく正確にAT_RISKへ復元される" +
+          "(サーバー保存の真の元状態を使うため、旧設計の仕様回帰が解消されている)",
+        after?.status === "AT_RISK",
+        `actual=${after?.status}(ACTIVEなら仕様回帰が再発している)`,
       );
-      const after = await db.responsibility.findUnique({ where: { id: task.responsibilityId } });
-      ok(
-        "12. version進行後のcompleteEventId省略: 拒否された結果statusはCOMPLETEDのまま",
-        after?.status === "COMPLETED",
-        `actual=${after?.status}`,
-      );
-      // 後始末: 正しいundoで戻す(versionが進んでいるためstaleとして拒否される可能性が
-      // あるが、これはこのAPIの既知の仕様(古いcompleteEventIdはstale)であり、
-      // このresponsibilityは削除でクリーンアップされるため後始末不要。
     }
 
     // =====================================================================
-    // 13. Gate阻害1是正の確認: 有効な遷移元status同士でのsnapshot改ざんが
-    //     無効化されること
+    // 14. Undo Receipt方式の核心確認2: Ledgerなし経路(種別固有型・PEM未同意)でも
+    //     冪等再送がrestored:1を返す
     // =====================================================================
-    // [2026-08-26追加・外部監査再々評価で発見した不具合の確認]
-    // COMMITMENTをACTIVEから完了した場合、クライアントがsnapshot.statusを
-    // "AT_RISK"(FULFILLの遷移元として同じく有効)へ改ざんしても、実際の復元先は
-    // 常にinitialStatusFor("COMMITMENT")="ACTIVE"に固定され、改ざんは無効化
-    // されるべきである。
+    // [2026-08-26追加・外部監査で指摘された冪等性未達の確認]
+    // 旧設計は冪等キーがExecution Ledgerの記録(completeEventId)有無に依存して
+    // おり、COMMITMENT等の種別固有型やPEM未同意時の完了では、初回restored:1・
+    // 再送restored:0となり「同一要求の再送は同じ成功応答」というv4.0 5.5節の
+    // 契約が成立しなかった。新設計ではreceiptId単位の冪等記録
+    // (BulkCompleteUndoConsumption)がLedgerの有無に関わらず一様に機能するため、
+    // 種別固有型でも再送がrestored:1を返すべきである。
     {
-      const commitment = await createAndComplete(jar, "COMMITMENT", "Gate2.1検証(13): snapshot改ざん耐性");
+      const commitment = await createAndComplete(jar, "COMMITMENT", "Gate2.1検証(14): 種別固有型の冪等再送");
       createdResponsibilityIds.push(commitment.responsibilityId);
-      const snap = commitment.undo.snapshot[0];
-      ok("13. 事前確認: 元のsnapshot.statusはACTIVE", snap.status === "ACTIVE", `actual=${snap.status}`);
-
-      const tamperedUndo = {
-        action: "COMPLETE",
-        snapshot: [{ ...snap, status: "AT_RISK" }], // AT_RISKへ改ざん(FULFILLの遷移元として有効な別値)
-      };
-      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", tamperedUndo);
+      const undo1 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", commitment.undo);
+      ok("14. COMMITMENT 初回Undo: restored===1", undo1.status === 200 && undo1.json?.data?.restored === 1);
+      const undo2 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", commitment.undo);
       ok(
-        "13. 改ざんされたsnapshotでもHTTP 200(実行自体は許可される、statusの妥当性検証は通過するため)",
-        res.status === 200,
-        `status=${res.status} body=${JSON.stringify(res.json)}`,
-      );
-      const after = await db.responsibility.findUnique({ where: { id: commitment.responsibilityId } });
-      ok(
-        "13. Gate阻害1是正【最重要】: 改ざんされたAT_RISKではなく、常にACTIVEへ復元される" +
-          "(クライアント供給statusを一切信用しない固定復元先の確認)",
-        after?.status === "ACTIVE",
-        `actual=${after?.status}(AT_RISKなら改ざんが成功してしまっている)`,
+        "14. Undo Receipt方式の核心【最重要】: COMMITMENTの同一receiptId再送でも" +
+          "restored===1(Ledger記録が無い経路でも冪等契約が成立する。" +
+          "外部監査で指摘された「Ledgerなし経路の冪等性が未成立」の是正確認)",
+        undo2.status === 200 && undo2.json?.data?.restored === 1,
+        `status=${undo2.status} body=${JSON.stringify(undo2.json)}`,
       );
     }
 
     // =====================================================================
-    // 14. Gate阻害2是正の確認: PEM同意履歴とのタイミング不整合で
-    //     正当なUndoが誤って拒否されないこと
+    // 15. Undo Receipt方式の核心確認3: PEM未同意時に完了したTASKでも
+    //     冪等再送がrestored:1を返す
     // =====================================================================
-    // [2026-08-26追加・外部監査再々評価で発見した不具合の確認]
-    // シナリオ: 1)PEM同意ありで完了→2)Undo→3)PEM同意を撤回→
-    // 4)再度Bulk Complete(今回はLedger未記録)→5)Undo(completeEventId省略)。
-    // 5番目のUndoは、過去(1番目)のCOMPLETE Eventが残っていても、それは
-    // 「今回の完了」とは無関係なので拒否されてはならない。
     {
-      const task = await createTaskAndComplete(jar, "Gate2.1検証(14): PEM同意履歴整合性");
+      const task = await createTaskAndComplete(jar, "Gate2.1検証(15): PEM未同意時の冪等再送-準備");
       createdResponsibilityIds.push(task.responsibilityId);
+      const undoPrep = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", task.undo);
+      ok("15. 事前準備: 1回目のUndoが成功", undoPrep.status === 200 && undoPrep.json?.data?.restored === 1);
 
-      // 1回目のUndo(過去のCOMPLETE Eventを1件作る)。
-      const undo1 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", task.undo);
-      ok("14. 事前準備: 1回目のUndoが成功", undo1.status === 200 && undo1.json?.data?.restored === 1);
-
-      // PEM同意を撤回する。
       const withdrawRes = await api(jar, "POST", "/api/v1/pem/consent", {
         consentType: "PEM_DATA_COLLECTION",
         action: "WITHDRAWN",
         source: "SETTINGS",
       });
-      ok("14. 事前準備: PEM同意の撤回に成功", withdrawRes.status === 201, `status=${withdrawRes.status}`);
+      ok("15. 事前準備: PEM同意の撤回に成功", withdrawRes.status === 201, `status=${withdrawRes.status}`);
 
-      // 再度Bulk Complete(START→COMPLETE)。同意が無いためExecution Ledgerには
-      // 記録されない(completeEventId=nullになるはず)。
       const startRes = await api(jar, "POST", `/api/v1/responsibilities/${task.responsibilityId}/transitions`, {
         action: "START",
         occurredAt: new Date().toISOString(),
         version: (await db.responsibility.findUnique({ where: { id: task.responsibilityId } }))?.version,
       });
-      ok("14. 事前準備: 再STARTに成功", startRes.status === 200, `status=${startRes.status}`);
+      ok("15. 事前準備: 再STARTに成功", startRes.status === 200, `status=${startRes.status}`);
       const bulk2 = await api(jar, "POST", "/api/v1/responsibilities/bulk", {
         ids: [task.responsibilityId],
         action: "COMPLETE",
       });
-      ok("14. 事前準備: 同意撤回後の再Bulk Completeに成功", bulk2.status === 200 && bulk2.json?.data?.affected === 1);
-      const snap2 = bulk2.json.data.undo.snapshot[0];
-      ok(
-        "14. 事前確認: 同意撤回中の完了はcompleteEventIdがnull(Ledger未記録)",
-        snap2.completeEventId === null || snap2.completeEventId === undefined,
-        `actual=${JSON.stringify(snap2.completeEventId)}`,
-      );
+      ok("15. 事前準備: 同意撤回後の再Bulk Completeに成功", bulk2.status === 200 && bulk2.json?.data?.affected === 1);
 
-      // completeEventId省略でUndoを送る。過去(1回目)のCOMPLETE Eventが
-      // 残っているが、それは今回の完了とは無関係(clientOccurredAtが異なる)なので
-      // 拒否されてはならない。
-      const undo2Payload = { action: "COMPLETE", snapshot: [{ ...snap2 }] };
-      const undo2 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", undo2Payload);
+      const undo1 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", bulk2.json.data.undo);
+      ok("15. PEM未同意時完了のUndo: restored===1", undo1.status === 200 && undo1.json?.data?.restored === 1);
+      const undo2 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", bulk2.json.data.undo);
       ok(
-        "14. Gate阻害2是正【最重要】: PEM同意撤回中に完了したものは、過去の無関係な" +
-          "COMPLETE Eventに巻き込まれず200で正しくUndoできる" +
-          "(「PEM同意が無くてもコア機能は止めない」という既存方針との整合)",
+        "15. Undo Receipt方式の核心【最重要】: PEM未同意時完了の同一receiptId再送でも" +
+          "restored===1(「PEM同意が無くてもコア機能は止めない」という既存方針と、" +
+          "冪等契約の両方が同時に成立する)",
         undo2.status === 200 && undo2.json?.data?.restored === 1,
         `status=${undo2.status} body=${JSON.stringify(undo2.json)}`,
       );
 
-      // 後始末: 同意を再度付与しておく(このユーザー自体は最後に削除されるが、
-      // 念のため状態を明示的に戻す)。
       await api(jar, "POST", "/api/v1/pem/consent", {
         consentType: "PEM_DATA_COLLECTION",
         action: "GRANTED",
