@@ -279,28 +279,37 @@ check(
 );
 
 check(
-  "decideCompleteUndoNextStatus【外部監査再評価・Gate阻害是正の回帰防止】: " +
-    "Execution Ledger対象型では、クライアントが何を送ってきても常にPLANNEDに" +
-    "固定される(completeEventId省略時に任意statusへ直接書き込めてしまい" +
-    "COMPLETED→REOPEN→PLANNEDの許可遷移を迂回できた問題の是正)",
+  "decideCompleteUndoNextStatus【外部監査再評価・Gate阻害是正の回帰防止、" +
+    "2026-08-26再々評価でさらに拡張】: Execution Ledger対象型では常にPLANNED、" +
+    "対象外型ではinitialStatusFor(type)に固定される。どちらもクライアント供給の" +
+    "statusは一切参照しない(以前は対象外型のみクライアント供給値をそのまま" +
+    "使っており、AT_RISK等『完了操作の遷移元として有効な別のstatus』への" +
+    "改ざんで誤った状態へ復元できてしまっていた。外部監査で指摘、Gate阻害と" +
+    "再判定)",
   () => {
     assert.equal(
-      decideCompleteUndoNextStatus({ ledgerApplicable: true, clientSnapshotStatus: "IN_PROGRESS" }),
+      decideCompleteUndoNextStatus({ ledgerApplicable: true, type: "TASK" }),
       "PLANNED",
-      "クライアントがIN_PROGRESSを送ってきてもPLANNEDに固定される",
+      "Execution Ledger対象型は常にPLANNED",
     );
     assert.equal(
-      decideCompleteUndoNextStatus({ ledgerApplicable: true, clientSnapshotStatus: "ANYTHING_MALICIOUS" }),
-      "PLANNED",
-      "不正な値を送ってきてもPLANNEDに固定される(ledgerApplicableな限りclientSnapshotStatusは無視される)",
-    );
-    assert.equal(
-      decideCompleteUndoNextStatus({ ledgerApplicable: false, clientSnapshotStatus: "ACTIVE" }),
+      decideCompleteUndoNextStatus({ ledgerApplicable: false, type: "COMMITMENT" }),
       "ACTIVE",
-      "Execution Ledger対象外型(COMMITMENT等)は従来通りクライアント供給値を使う",
+      "COMMITMENTはinitialStatusForに従いACTIVEへ固定される(AT_RISKへの改ざんは無効)",
+    );
+    assert.equal(
+      decideCompleteUndoNextStatus({ ledgerApplicable: false, type: "WAITING" }),
+      "WAITING",
+      "WAITINGはinitialStatusForに従いWAITINGへ固定される(FOLLOW_UP_DUEへの改ざんは無効)",
+    );
+    assert.equal(
+      decideCompleteUndoNextStatus({ ledgerApplicable: false, type: "RISK" }),
+      "OPEN",
+      "RISKはinitialStatusForに従いOPENへ固定される(MONITORING等への改ざんは無効)",
     );
   },
 );
+
 
 check("isValidStatusForType【外部監査P1-5是正】: 共通状態型と種別固有型それぞれで" +
     "定義済みの値のみ有効と判定する(用語・状態・コード定義書v1.1 3章)",

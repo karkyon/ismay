@@ -730,6 +730,107 @@ async function main(): Promise<void> {
       // あるが、これはこのAPIの既知の仕様(古いcompleteEventIdはstale)であり、
       // このresponsibilityは削除でクリーンアップされるため後始末不要。
     }
+
+    // =====================================================================
+    // 13. Gate阻害1是正の確認: 有効な遷移元status同士でのsnapshot改ざんが
+    //     無効化されること
+    // =====================================================================
+    // [2026-08-26追加・外部監査再々評価で発見した不具合の確認]
+    // COMMITMENTをACTIVEから完了した場合、クライアントがsnapshot.statusを
+    // "AT_RISK"(FULFILLの遷移元として同じく有効)へ改ざんしても、実際の復元先は
+    // 常にinitialStatusFor("COMMITMENT")="ACTIVE"に固定され、改ざんは無効化
+    // されるべきである。
+    {
+      const commitment = await createAndComplete(jar, "COMMITMENT", "Gate2.1検証(13): snapshot改ざん耐性");
+      createdResponsibilityIds.push(commitment.responsibilityId);
+      const snap = commitment.undo.snapshot[0];
+      ok("13. 事前確認: 元のsnapshot.statusはACTIVE", snap.status === "ACTIVE", `actual=${snap.status}`);
+
+      const tamperedUndo = {
+        action: "COMPLETE",
+        snapshot: [{ ...snap, status: "AT_RISK" }], // AT_RISKへ改ざん(FULFILLの遷移元として有効な別値)
+      };
+      const res = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", tamperedUndo);
+      ok(
+        "13. 改ざんされたsnapshotでもHTTP 200(実行自体は許可される、statusの妥当性検証は通過するため)",
+        res.status === 200,
+        `status=${res.status} body=${JSON.stringify(res.json)}`,
+      );
+      const after = await db.responsibility.findUnique({ where: { id: commitment.responsibilityId } });
+      ok(
+        "13. Gate阻害1是正【最重要】: 改ざんされたAT_RISKではなく、常にACTIVEへ復元される" +
+          "(クライアント供給statusを一切信用しない固定復元先の確認)",
+        after?.status === "ACTIVE",
+        `actual=${after?.status}(AT_RISKなら改ざんが成功してしまっている)`,
+      );
+    }
+
+    // =====================================================================
+    // 14. Gate阻害2是正の確認: PEM同意履歴とのタイミング不整合で
+    //     正当なUndoが誤って拒否されないこと
+    // =====================================================================
+    // [2026-08-26追加・外部監査再々評価で発見した不具合の確認]
+    // シナリオ: 1)PEM同意ありで完了→2)Undo→3)PEM同意を撤回→
+    // 4)再度Bulk Complete(今回はLedger未記録)→5)Undo(completeEventId省略)。
+    // 5番目のUndoは、過去(1番目)のCOMPLETE Eventが残っていても、それは
+    // 「今回の完了」とは無関係なので拒否されてはならない。
+    {
+      const task = await createTaskAndComplete(jar, "Gate2.1検証(14): PEM同意履歴整合性");
+      createdResponsibilityIds.push(task.responsibilityId);
+
+      // 1回目のUndo(過去のCOMPLETE Eventを1件作る)。
+      const undo1 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", task.undo);
+      ok("14. 事前準備: 1回目のUndoが成功", undo1.status === 200 && undo1.json?.data?.restored === 1);
+
+      // PEM同意を撤回する。
+      const withdrawRes = await api(jar, "POST", "/api/v1/pem/consent", {
+        consentType: "PEM_DATA_COLLECTION",
+        action: "WITHDRAWN",
+        source: "SETTINGS",
+      });
+      ok("14. 事前準備: PEM同意の撤回に成功", withdrawRes.status === 201, `status=${withdrawRes.status}`);
+
+      // 再度Bulk Complete(START→COMPLETE)。同意が無いためExecution Ledgerには
+      // 記録されない(completeEventId=nullになるはず)。
+      const startRes = await api(jar, "POST", `/api/v1/responsibilities/${task.responsibilityId}/transitions`, {
+        action: "START",
+        occurredAt: new Date().toISOString(),
+        version: (await db.responsibility.findUnique({ where: { id: task.responsibilityId } }))?.version,
+      });
+      ok("14. 事前準備: 再STARTに成功", startRes.status === 200, `status=${startRes.status}`);
+      const bulk2 = await api(jar, "POST", "/api/v1/responsibilities/bulk", {
+        ids: [task.responsibilityId],
+        action: "COMPLETE",
+      });
+      ok("14. 事前準備: 同意撤回後の再Bulk Completeに成功", bulk2.status === 200 && bulk2.json?.data?.affected === 1);
+      const snap2 = bulk2.json.data.undo.snapshot[0];
+      ok(
+        "14. 事前確認: 同意撤回中の完了はcompleteEventIdがnull(Ledger未記録)",
+        snap2.completeEventId === null || snap2.completeEventId === undefined,
+        `actual=${JSON.stringify(snap2.completeEventId)}`,
+      );
+
+      // completeEventId省略でUndoを送る。過去(1回目)のCOMPLETE Eventが
+      // 残っているが、それは今回の完了とは無関係(clientOccurredAtが異なる)なので
+      // 拒否されてはならない。
+      const undo2Payload = { action: "COMPLETE", snapshot: [{ ...snap2 }] };
+      const undo2 = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", undo2Payload);
+      ok(
+        "14. Gate阻害2是正【最重要】: PEM同意撤回中に完了したものは、過去の無関係な" +
+          "COMPLETE Eventに巻き込まれず200で正しくUndoできる" +
+          "(「PEM同意が無くてもコア機能は止めない」という既存方針との整合)",
+        undo2.status === 200 && undo2.json?.data?.restored === 1,
+        `status=${undo2.status} body=${JSON.stringify(undo2.json)}`,
+      );
+
+      // 後始末: 同意を再度付与しておく(このユーザー自体は最後に削除されるが、
+      // 念のため状態を明示的に戻す)。
+      await api(jar, "POST", "/api/v1/pem/consent", {
+        consentType: "PEM_DATA_COLLECTION",
+        action: "GRANTED",
+        source: "SETTINGS",
+      });
+    }
   } catch (err) {
     failed++;
     failures.push(`予期しない例外: ${err instanceof Error ? err.message : String(err)}`);

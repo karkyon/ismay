@@ -16,7 +16,7 @@
  * このファイルへ分離することで是正する。
  */
 import { createHash } from "node:crypto";
-import { completeFromStatusesForType } from "@/lib/responsibility";
+import { completeFromStatusesForType, initialStatusFor } from "@/lib/responsibility";
 
 /**
  * [Completion Gate 2.1] COMPLETE取消のidempotencyKey。
@@ -116,22 +116,37 @@ export function decideCompleteUndoAction(params: {
 export class IdempotencyKeyReusedError extends Error {}
 
 /**
- * [外部監査再評価・Gate阻害是正の核心をテスト可能な形で分離]
- * COMPLETE取消で書き戻すstatusの決定ロジック。Execution Ledger対象型
- * (ledgerApplicable)であれば、取消対象のCOMPLETE Eventを実際に特定できたか
- * どうかに関わらず、常にPLANNEDへ固定する(単一アイテムのREOPENアクションと同じ
- * 意味論)。対象外型のみ、クライアントが返したstatusをそのまま使う。
+ * [外部監査再評価・Gate阻害是正の核心をテスト可能な形で分離、
+ *  2026-08-26さらに拡張・外部監査再々評価Gate阻害1是正]
+ * COMPLETE取消で書き戻すstatusの決定ロジック。
  *
- * [経緯] 当初はこの決定を「Eventを特定できたか」に連動させており、
+ * [経緯1] 当初はこの決定を「Eventを特定できたか」に連動させており、
  * completeEventIdを省略/nullで送るだけで、Execution Ledger対象型であっても
  * 任意のstatusを直接書き込め、v4.0が要求する「COMPLETED→REOPEN→PLANNED」という
  * 許可遷移を迂回できてしまっていた(外部監査で指摘、Gate阻害と判定)。
+ * 是正1: Execution Ledger対象型は、Eventを特定できたかに関わらず常にPLANNEDへ
+ * 固定するようにした(単一アイテムのREOPENアクションと同じ意味論)。
+ *
+ * [経緯2] 上記の是正1は「対象外型(COMMITMENT等)はクライアントが返したstatusを
+ * そのまま使う」という設計のままだった。これにより、クライアントが
+ * 「完了操作の遷移元として有効な別のstatus」(例: COMMITMENTを実際にはACTIVEから
+ * 完了したのに、AT_RISK(FULFILLの遷移元として同じく有効)へ改ざんしたsnapshotを
+ * 送る)を指定すると、validateCompleteUndoTargetの検証(遷移元として有効かの
+ * チェック)は通過してしまい、実際とは異なる誤った状態へ復元されてしまう
+ * (外部監査で指摘、Gate阻害と再判定)。
+ * 是正2: 対象外型についても、クライアント供給のstatusは一切使わず、
+ * initialStatusFor(type)(その型の作成時初期状態。COMMITMENT→ACTIVE、
+ * WAITING→WAITING、RISK→OPEN)へ常に固定する。これは単一アイテムの
+ * REOPENアクションが常に固定の遷移先へ戻る(元の細かい状態は復元しない)のと
+ * 同じ設計判断であり、対象型・対象外型を問わず「Undoの復元先はクライアントの
+ * snapshotを信用せず、サーバー側が定義する固定の値のみを使う」という一貫した
+ * 原則に統一した。
  */
 export function decideCompleteUndoNextStatus(params: {
   ledgerApplicable: boolean;
-  clientSnapshotStatus: string;
+  type: string;
 }): string {
-  return params.ledgerApplicable ? "PLANNED" : params.clientSnapshotStatus;
+  return params.ledgerApplicable ? "PLANNED" : initialStatusFor(params.type);
 }
 
 /**

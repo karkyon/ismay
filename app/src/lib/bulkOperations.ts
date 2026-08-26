@@ -501,19 +501,38 @@ async function executeCompleteUndo(
         // 是正: この存在確認からもversion条件を外す(workspace/responsibility/
         // eventType/actorの一致のみで判定する。completeEventIdが指定されている
         // 場合の実在確認クエリと同じ条件へ揃えた)。
-        const existingCompleteEvent = await tx.responsibilityExecutionEvent.findFirst({
-          where: {
-            workspaceId,
-            responsibilityId: t.id,
-            eventType: "COMPLETE",
-            subjectUserId: userId,
-          },
-          orderBy: { responsibilitySequence: "desc" },
-          select: { id: true },
-        });
+        //
+        // [2026-08-26さらに是正・外部監査再々評価で発見した別の不具合]
+        // 上記の是正で「version一致を見ない」ようにした結果、今度は
+        // 「このresponsibilityに過去一度でもCOMPLETE Eventが記録されていれば
+        // 常に拒否する」という広すぎる判定になっていた。これにより、
+        // 「PEM同意ありで完了→REOPEN→PEM同意を撤回→再度Bulk Complete
+        // (今回はEvent未記録)→Undo」という正当な操作で、無関係な過去のEvent
+        // (前回の完了サイクルのもの)が見つかってしまい、今回の完了には
+        // 対応するEventが存在しないにもかかわらず拒否されてしまっていた
+        // (「PEM同意が無くてもコア機能は止めない」という既存方針との衝突、
+        // 外部監査で指摘)。
+        // 是正: 「今回の完了に対応するEventかどうか」を正確に判定する。
+        // bulkComplete/単一アイテムのtransitions/route.tsは、Responsibility.
+        // completedAtとResponsibilityExecutionEvent.clientOccurredAtへ
+        // 同一のDateインスタンス(`now`)を設定しているため、この2つが厳密一致
+        // するEventだけが「今回の完了」に対応するEventだと判定できる
+        // (version(タイトル編集等の無関係な操作でも進む)より正確な照合軸)。
+        const existingCompleteEvent = t.completedAt
+          ? await tx.responsibilityExecutionEvent.findFirst({
+              where: {
+                workspaceId,
+                responsibilityId: t.id,
+                eventType: "COMPLETE",
+                subjectUserId: userId,
+                clientOccurredAt: t.completedAt,
+              },
+              select: { id: true },
+            })
+          : null;
         if (existingCompleteEvent) {
           throw new InvalidUndoSnapshotError(
-            `id=${t.id}: このresponsibilityに対するCOMPLETE Event` +
+            `id=${t.id}: 今回の完了に対応するCOMPLETE Event` +
               `(id=${existingCompleteEvent.id})がDB上に存在するにもかかわらず、` +
               `completeEventIdが指定されていません。取消対象のcompleteEventIdを` +
               `明示的に指定してください`,
@@ -536,9 +555,14 @@ async function executeCompleteUndo(
       const canRecordReopen = ledgerApplicable && Boolean(originalCompleteEvent);
       const nextStatus = decideCompleteUndoNextStatus({
         ledgerApplicable,
-        clientSnapshotStatus: s.status,
+        type: t.type,
       });
-      const nextCompletedAt = nextStatus === "PLANNED" ? null : s.completedAt ? new Date(s.completedAt) : null;
+      // [2026-08-26是正] nextStatusは常に「未完了の固定状態」(PLANNEDまたは
+      // initialStatusFor(type))になるため、completedAtは常にnullになる。
+      // s.completedAt(クライアント供給値)はもはや使わない(Gate阻害1是正で
+      // s.statusを信用しなくなったのと同じ理由。validateCompleteUndoTargetは
+      // 「クライアントの主張が尤もらしいか」の事前チェックとしては引き続き有効)。
+      const nextCompletedAt = null;
 
       const requestPayloadHash = buildCompleteUndoRequestPayloadHash({
         responsibilityId: t.id,
