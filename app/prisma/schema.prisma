@@ -67,6 +67,14 @@ model User {
   auditLogsAsActor           AuditLog[]                  @relation("AuditActorUser")
   /// [V5-M1-A1新設] Context本人(観測対象)としての逆relation。
   projectContextsOwned       ProjectContext[]            @relation("ProjectContextOwner")
+  /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
+  /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
+  /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
+  /// 同一model内に無いため)。
+  formationSessionsAsSubject         FormationSession[]
+  formationSessionEventsAsActor      FormationSessionEvent[]
+  formationAnswerEventsAsActor       FormationAnswerEvent[]
+  formationCandidateDecisionsAsActor FormationCandidateDecisionEvent[]
   /// [V5-M1-A1新設] Context作成者としての逆relation。
   projectContextsCreated     ProjectContext[]            @relation("ProjectContextCreatedBy")
 
@@ -131,6 +139,8 @@ model Workspace {
   cycles                Cycle[]
   /// [V5-M1-A1新設]
   projectContexts       ProjectContext[]
+  /// [V5-M1-B1新設]
+  formationSessions     FormationSession[]
 
   @@map("workspaces")
 }
@@ -170,6 +180,8 @@ model Domain {
   responsibilities Responsibility[]
   /// [V5-M1-A1新設] ProjectContextからの複合FK参照先として必要。
   projectContexts  ProjectContext[]
+  /// [V5-M1-B1新設] FormationSessionからの複合FK参照先として必要。
+  formationSessions FormationSession[]
 
   /// [V5-M1-A1新設・M1-A1指示書2.2節] ProjectContextからの複合FK
   /// (domainId, workspaceId)参照先として必要(既存は単一列PKのみだった)。
@@ -232,8 +244,15 @@ model Capture {
   /// 新設: 画像OCRの複数ページ結合用(2026-08-21追加)。1枚のみの場合も1件作成する
   /// (imageObjectKey単体列は旧データ互換のためのみ残す。新規アップロードは常にこちら経由)。
   images           CaptureImage[]
+  /// [V5-M1-B1新設] FormationSession/FormationSourceAnchorからの複合FK参照先として必要。
+  formationSessions      FormationSession[]
+  formationSourceAnchors FormationSourceAnchor[]
 
   @@unique([workspaceId, createdById, clientDraftId], name: "captures_idempotency_key")
+  /// [V5-M1-B1新設] FormationSession.captureId/FormationSourceAnchor.captureIdからの
+  /// 複合FK(captureId, workspaceId)参照先として必要(既存は単一列PKのみだった。
+  /// ProjectContext/Domain等と同じ理由・同じ命名規則)。
+  @@unique([id, workspaceId], map: "captures_id_workspace_uq")
   @@index([workspaceId, createdAt(sort: Desc)])
   @@index([processingStatus, updatedAt])
   @@map("captures")
@@ -326,6 +345,8 @@ model Responsibility {
   /// [V5-M1-A1新設]
   projectContextLinks      ProjectContextLink[]
   projectContextLinkEvents ProjectContextLinkEvent[]
+  /// [V5-M1-B1新設] MaterializationReceiptItemからの複合FK参照先として必要。
+  materializationReceiptItems MaterializationReceiptItem[]
 
   /// [2026-08-24追加・Phase 0A是正2] ResponsibilityExecutionEventからの複合FK
   /// (responsibilityId, workspaceId)の参照先として必要(v4.0 4.1節「tenantを跨ぐ
@@ -1579,4 +1600,272 @@ model ProjectContextEmbedding {
   /// 1 current/model(DOC-04 2章)。
   @@unique([workspaceId, contextId, model], map: "pce_context_model_uq")
   @@map("project_context_embeddings")
+}
+
+// =====================================================================
+// V5-M1-B1 Formation Session Domain基盤
+// 出典: ISMAY-V5-DOC-03(Formation Session仕様書) 3章・4章・5章、
+//       ISMAY-V5-DOC-02(用語・状態・EventCode定義書) 6章・7.3節、
+//       ISMAY-V5-DOC-10(DB物理設計書) 3.1節・5章・6章。
+//
+// このGate(M1-B1)はDOC-03 10章「M1-B1はshadow Session生成のみ」の
+// DB/domain基盤部分に対応する。API/UI/既存Capture・AI抽出フローへの実配線
+// (CHG-010〜012)は後続Gateで行い、本migrationはtable/制約の新設のみ行う
+// (expand-only、既存Capture/AiInferenceフローへの挙動変更は無い)。
+//
+// [DEC-008] DOC-03 4章はFormationLearningEventも論理Entityとして列挙するが、
+//   DOC-10 3.1節が明記する物理table一覧(10table)には含まれていない
+//   (「LearningはM1-Bでは専用tableを推奨」という留保付き記述のみ)。
+//   学習Event書込はCHG-015(Capture解析同意とFormation Learning同意の分離)に
+//   依存し、その同意モデルはこのGateでは未確定のため、FormationLearningEventの
+//   実装はこのGateでは行わない(想像で同意設計を先取りしない。DOC-13 7章の
+//   未確定事項運用方針に従う)。
+// =====================================================================
+
+/// V5-DOC-03 4章 TBL: formation_sessions
+model FormationSession {
+  id               String    @id @default(uuid())
+  workspaceId      String    @map("workspace_id")
+  workspace        Workspace @relation(fields: [workspaceId], references: [id])
+  domainId         String    @map("domain_id")
+  domain           Domain    @relation(fields: [domainId, workspaceId], references: [id, workspaceId])
+  subjectUserId    String    @map("subject_user_id")
+  subjectUser      User      @relation(fields: [subjectUserId], references: [id])
+  captureId        String    @map("capture_id")
+  capture          Capture   @relation(fields: [captureId, workspaceId], references: [id, workspaceId])
+  /// POST /formation-sessions のIdempotency-Keyヘッダ値(DOC-03 7章)。
+  /// 同一(workspace,capture,key)の再送は新規Session生成しない。
+  clientSessionKey String    @map("client_session_key")
+  /// DRAFT/ANALYZING/CLARIFYING/REVIEW_READY/PARTIALLY_CONFIRMED/CONFIRMED/
+  /// DISMISSED/DEFERRED/FAILED(DOC-02 6章、DOC-03 3章状態機械)。
+  state            String    @default("DRAFT")
+  version          Int       @default(0)
+  /// CLARIFYING中に作成済みのFormationQuestion数(上限3、DOC-03 3章Guard)。
+  questionCount    Int       @default(0) @map("question_count")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  events         FormationSessionEvent[]
+  candidates     FormationCandidateIdentity[]
+  questions      FormationQuestion[]
+  receipts       MaterializationReceipt[]
+
+  /// Idempotency-Key再送検出用(DOC-03 7章 POST /formation-sessions)。
+  @@unique([workspaceId, captureId, clientSessionKey], map: "formation_sessions_idempotency_uq")
+  /// 子テーブルからの複合FK(sessionId, workspaceId)参照先として必要
+  /// (既存Responsibility/ProjectContext等と同じtenant境界二重防御方式)。
+  @@unique([id, workspaceId], map: "formation_sessions_id_workspace_uq")
+  @@index([workspaceId, captureId])
+  @@index([workspaceId, state])
+  @@map("formation_sessions")
+}
+
+/// V5-DOC-03 4章 TBL: formation_session_events(append-only、Session全体timeline)
+model FormationSessionEvent {
+  id          String           @id @default(uuid())
+  workspaceId String           @map("workspace_id")
+  sessionId   String           @map("session_id")
+  session     FormationSession @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
+  /// (sessionId,sequence)でunique(DOC-10 5章「Formation timeline」)。
+  sequence    Int
+  /// DOC-02 7.3節Formation Event Catalog(16種)のいずれか。
+  eventType   String           @map("event_type")
+  /// actorType=USERの場合のみactorUserId必須(DOC-10 6章「actorTypeとactor IDの排他」、
+  /// ProjectContextLinkEventと同じ設計)。ANALYSIS_REQUESTED等はSYSTEM/AI起点もありうる。
+  actorType   String           @map("actor_type")
+  actorUserId String?          @map("actor_user_id")
+  actorUser   User?            @relation(fields: [actorUserId], references: [id])
+  payload     Json
+  occurredAt  DateTime         @default(now()) @map("occurred_at")
+
+  askedByQuestions FormationQuestion[]
+
+  @@unique([sessionId, sequence], map: "formation_session_events_session_sequence_uq")
+  @@index([workspaceId, sessionId])
+  @@map("formation_session_events")
+}
+
+/// V5-DOC-03 4章 TBL: formation_candidate_identities(Session内安定ID)
+model FormationCandidateIdentity {
+  id               String           @id @default(uuid())
+  workspaceId      String           @map("workspace_id")
+  sessionId        String           @map("session_id")
+  session          FormationSession @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
+  /// Session内で安定した識別子(例: "c1","c2"。UI・回答Eventが再解析後も同じ候補を指すため)。
+  candidateKey     String           @map("candidate_key")
+  /// 最新のCandidateRevision.revision値(Projectionの高速参照用。正本はrevision行そのもの)。
+  currentRevision  Int              @default(0) @map("current_revision")
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  revisions      FormationCandidateRevision[]
+  questions      FormationQuestion[]
+  receiptItems   MaterializationReceiptItem[]
+  decisionEvents FormationCandidateDecisionEvent[]
+
+  @@unique([sessionId, candidateKey], map: "formation_candidate_identities_session_key_uq")
+  @@unique([id, workspaceId], map: "formation_candidate_identities_id_workspace_uq")
+  @@map("formation_candidate_identities")
+}
+
+/// V5-DOC-03 4章 TBL: formation_candidate_revisions(immutable、revision単調増加)
+model FormationCandidateRevision {
+  id             String                     @id @default(uuid())
+  workspaceId    String                     @map("workspace_id")
+  candidateId    String                     @map("candidate_id")
+  candidate      FormationCandidateIdentity @relation(fields: [candidateId, workspaceId], references: [id, workspaceId])
+  revision       Int
+  /// 9種責任型のいずれか(TASK/COMMITMENT/DECISION/WAITING/EVENT/RISK/CONCERN/HABIT/IDEA)。
+  /// 既存Responsibility.typeと同じ「plain string、narrow unionにしない」方針を踏襲する。
+  type           String
+  title          String
+  description    String?
+  /// AI提案のResponsibility種別固有fields(TaskDetail/CommitmentDetail等相当)の下書き。
+  proposedFields Json                       @map("proposed_fields")
+  /// DOC-10 4章 v5列パターン「Confidence numeric(5,4), 0<=x<=1」。
+  confidence     Decimal                    @db.Decimal(5, 4)
+  schemaVersion  String                     @map("schema_version")
+  createdAt      DateTime                   @default(now()) @map("created_at")
+
+  sourceAnchors  FormationSourceAnchor[]
+  decisionEvents FormationCandidateDecisionEvent[]
+  receiptItems   MaterializationReceiptItem[]
+
+  @@unique([candidateId, revision], map: "formation_candidate_revisions_candidate_revision_uq")
+  @@unique([id, workspaceId], map: "formation_candidate_revisions_id_workspace_uq")
+  @@map("formation_candidate_revisions")
+}
+
+/// V5-DOC-03 4章 TBL: formation_source_anchors(原文位置根拠)
+model FormationSourceAnchor {
+  id                 String                     @id @default(uuid())
+  workspaceId        String                     @map("workspace_id")
+  revisionId         String                     @map("revision_id")
+  revision           FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  /// TEXT_OFFSET/AUDIO_TIMECODE/MEETING_SPEAKER/IMAGE_BBOX(M1-LOC機能、
+  /// HANDOFF v1 M1「Text offset、音声timecode、会議speaker、画像page/bbox Adapter」)。
+  sourceKind         String                     @map("source_kind")
+  captureId          String                     @map("capture_id")
+  capture            Capture                    @relation(fields: [captureId, workspaceId], references: [id, workspaceId])
+  /// TEXT_OFFSET用。DOC-10 6章「0<=start<end<=sourceLength」のうちDB CHECKで
+  /// 保証できるのはstart>=0・end>startまで(sourceLengthはCapture側の値のため
+  /// application層で追加検証する)。
+  startOffset        Int?                       @map("start_offset")
+  endOffset           Int?                      @map("end_offset")
+  /// IMAGE_BBOX用。DOC-10 6章「画像regionは0..1」の正規化座標をJSONで保持。
+  imageRegion         Json?                      @map("image_region")
+  excerptHash         String                     @map("excerpt_hash")
+  /// pem/coreTypes.tsのPiiClassification語彙を再利用する(新規語彙を発明しない)。
+  piiClassification   String                     @map("pii_classification")
+  createdAt           DateTime                   @default(now()) @map("created_at")
+
+  @@index([workspaceId, revisionId])
+  @@map("formation_source_anchors")
+}
+
+/// V5-DOC-03 4章 TBL: formation_questions(最大3件、ordinal 1..3)
+model FormationQuestion {
+  id            String                      @id @default(uuid())
+  workspaceId   String                      @map("workspace_id")
+  sessionId     String                      @map("session_id")
+  session       FormationSession            @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
+  candidateId   String?                     @map("candidate_id")
+  candidate     FormationCandidateIdentity? @relation(fields: [candidateId, workspaceId], references: [id, workspaceId])
+  /// 1..3(DOC-03 3章Guard「questionCount<=3」、EV-F-002「4問目拒否」)。
+  ordinal       Int
+  questionCode  String                      @map("question_code")
+  promptVersion String                      @map("prompt_version")
+  askedEventId  String?                     @map("asked_event_id")
+  askedEvent    FormationSessionEvent?      @relation(fields: [askedEventId], references: [id])
+  createdAt     DateTime                    @default(now()) @map("created_at")
+
+  answerEvents FormationAnswerEvent[]
+
+  @@unique([sessionId, ordinal], map: "formation_questions_session_ordinal_uq")
+  @@unique([id, workspaceId], map: "formation_questions_id_workspace_uq")
+  @@map("formation_questions")
+}
+
+/// V5-DOC-03 4章 TBL: formation_answer_events(append-only、訂正はrevisionOf)
+model FormationAnswerEvent {
+  id            String            @id @default(uuid())
+  workspaceId   String            @map("workspace_id")
+  questionId    String            @map("question_id")
+  question      FormationQuestion @relation(fields: [questionId, workspaceId], references: [id, workspaceId])
+  /// ANSWERED/UNKNOWN/DEFERRED/DO_NOT_MATERIALIZE(DOC-02 6章QuestionAnswer)。
+  answerKind    String            @map("answer_kind")
+  valueJson     Json?             @map("value_json")
+  /// DOC-03 4章では単一必須fieldとして定義(質問への回答は常に本人。
+  /// FormationSessionEventのような汎用actorType化はしない)。
+  actorUserId   String            @map("actor_user_id")
+  actorUser     User              @relation(fields: [actorUserId], references: [id])
+  occurredAt    DateTime          @default(now()) @map("occurred_at")
+  /// 訂正時は新規行を追加し、元の回答行を指す(UPDATE禁止、append-only)。
+  revisionOfId  String?           @map("revision_of_id")
+  revisionOf    FormationAnswerEvent?  @relation("FormationAnswerCorrection", fields: [revisionOfId], references: [id])
+  corrections   FormationAnswerEvent[] @relation("FormationAnswerCorrection")
+
+  @@index([workspaceId, questionId])
+  @@map("formation_answer_events")
+}
+
+/// V5-DOC-03 4章 TBL: formation_candidate_decision_events
+model FormationCandidateDecisionEvent {
+  id          String                     @id @default(uuid())
+  workspaceId String                     @map("workspace_id")
+  candidateId String                     @map("candidate_id")
+  candidate   FormationCandidateIdentity @relation(fields: [candidateId, workspaceId], references: [id, workspaceId])
+  /// 採否対象Revisionを固定する(DOC-03 4章「採否対象Revisionを固定」、
+  /// EV-F-003「承認Revisionが暗黙更新されない」)。
+  revisionId  String                     @map("revision_id")
+  revision    FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  /// ACCEPTED/REJECTED/DEFERRED/DO_NOT_MATERIALIZE(DOC-02 6章CandidateDecisionの
+  /// うちPENDINGを除く。PENDINGは「未決定」を表す既定状態でありEventとしては
+  /// 記録しない、という設計判断)。
+  decision    String
+  reasonCode  String?                    @map("reason_code")
+  /// DOC-03 4章では単一必須field(本人承認なしのResponsibility生成0件、という
+  /// 受入条件と対応するため、actorTypeによるSYSTEM/AI採否は許容しない)。
+  actorUserId String                     @map("actor_user_id")
+  actorUser   User                       @relation(fields: [actorUserId], references: [id])
+  occurredAt  DateTime                   @default(now()) @map("occurred_at")
+
+  @@index([workspaceId, candidateId])
+  @@map("formation_candidate_decision_events")
+}
+
+/// V5-DOC-03 4章 TBL: materialization_receipts
+model MaterializationReceipt {
+  id          String           @id @default(uuid())
+  workspaceId String           @map("workspace_id")
+  sessionId   String           @map("session_id")
+  session     FormationSession @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
+  /// クライアント指定の一括確定操作ID(DOC-03 6章2「operationIdとrequestHashの
+  /// 冪等性を検証。同一key異payloadは409」)。
+  operationId String           @map("operation_id")
+  requestHash String           @map("request_hash")
+  committedAt DateTime         @default(now()) @map("committed_at")
+
+  items MaterializationReceiptItem[]
+
+  @@unique([workspaceId, operationId], map: "materialization_receipts_operation_uq")
+  @@unique([id, workspaceId], map: "materialization_receipts_id_workspace_uq")
+  @@map("materialization_receipts")
+}
+
+/// V5-DOC-03 4章 TBL: materialization_receipt_items(1候補1生成)
+model MaterializationReceiptItem {
+  id                   String                     @id @default(uuid())
+  workspaceId          String                     @map("workspace_id")
+  receiptId            String                     @map("receipt_id")
+  receipt              MaterializationReceipt     @relation(fields: [receiptId, workspaceId], references: [id, workspaceId])
+  candidateId          String                     @map("candidate_id")
+  candidate            FormationCandidateIdentity @relation(fields: [candidateId, workspaceId], references: [id, workspaceId])
+  candidateRevisionId  String                     @map("candidate_revision_id")
+  candidateRevision    FormationCandidateRevision @relation(fields: [candidateRevisionId, workspaceId], references: [id, workspaceId])
+  responsibilityId     String                     @map("responsibility_id")
+  responsibility       Responsibility             @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+
+  /// 1候補1生成(DOC-03 4章「1候補1生成、tenant複合FK」)。
+  @@unique([receiptId, candidateId], map: "materialization_receipt_items_receipt_candidate_uq")
+  @@map("materialization_receipt_items")
 }
