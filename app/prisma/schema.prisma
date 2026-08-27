@@ -24,68 +24,72 @@ datasource db {
 
 /// TBL-001 users - 本人アカウント
 model User {
-  id              String    @id @default(uuid())
-  email           String    @unique
-  emailVerifiedAt DateTime? @map("email_verified_at")
-  passwordHash    String    @map("password_hash")
-  displayName     String?   @map("display_name")
-  locale          String    @default("ja-JP")
-  timeZone        String    @default("Asia/Tokyo") @map("time_zone")
+  id                        String    @id @default(uuid())
+  email                     String    @unique
+  emailVerifiedAt           DateTime? @map("email_verified_at")
+  passwordHash              String    @map("password_hash")
+  displayName               String?   @map("display_name")
+  locale                    String    @default("ja-JP")
+  timeZone                  String    @default("Asia/Tokyo") @map("time_zone")
   /// ACTIVE/SUSPENDED/DELETED [推論]
-  status          String    @default("ACTIVE")
+  status                    String    @default("ACTIVE")
   /// FN-NTF-01 通知設定: 静穏時間帯の開始("HH:MM"、timeZone基準)。null=静穏時間なし [新設・推論]
-  notifyQuietHoursStart      String? @map("notify_quiet_hours_start")
+  notifyQuietHoursStart     String?   @map("notify_quiet_hours_start")
   /// FN-NTF-01 通知設定: 静穏時間帯の終了("HH:MM"、timeZone基準)。開始>終了の場合は日をまたぐ扱い [新設・推論]
-  notifyQuietHoursEnd        String? @map("notify_quiet_hours_end")
+  notifyQuietHoursEnd       String?   @map("notify_quiet_hours_end")
   /// FN-NTF-01 通知設定: まとめ通知の時間窓(分)。この間隔単位でscheduledAtを丸め、近接通知を束ねる [新設・推論]
-  notifyBundleWindowMinutes  Int     @default(15) @map("notify_bundle_window_minutes")
+  notifyBundleWindowMinutes Int       @default(15) @map("notify_bundle_window_minutes")
   /// FN-NTF-01 通知設定(2026-08-22追加): 種別ごとの受信可否(GitHub「Watching/
   /// Participating/Custom」の粒度選択に相当)。既定は全種別ON。
-  notifyDeadlineEnabled      Boolean @default(true) @map("notify_deadline_enabled")
-  notifyFollowUpEnabled      Boolean @default(true) @map("notify_follow_up_enabled")
-  notifyRiskEnabled          Boolean @default(true) @map("notify_risk_enabled")
-  version         Int       @default(0)
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
-  deletedAt       DateTime? @map("deleted_at")
+  notifyDeadlineEnabled     Boolean   @default(true) @map("notify_deadline_enabled")
+  notifyFollowUpEnabled     Boolean   @default(true) @map("notify_follow_up_enabled")
+  notifyRiskEnabled         Boolean   @default(true) @map("notify_risk_enabled")
+  version                   Int       @default(0)
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  updatedAt                 DateTime  @updatedAt @map("updated_at")
+  deletedAt                 DateTime? @map("deleted_at")
 
-  workspaceMembers    WorkspaceMember[]
-  sessions            UserSession[]
-  totpSecret          UserTotpSecret?
-  capturesCreated     Capture[]              @relation("CaptureCreatedBy")
-  responsibilitiesCreated Responsibility[]   @relation("ResponsibilityCreatedBy")
-  responsibilitiesUpdated Responsibility[]   @relation("ResponsibilityUpdatedBy")
-  pemObservations     PemObservation[]
-  pemHypotheses       PemHypothesis[]
+  workspaceMembers           WorkspaceMember[]
+  sessions                   UserSession[]
+  totpSecret                 UserTotpSecret?
+  capturesCreated            Capture[]                   @relation("CaptureCreatedBy")
+  responsibilitiesCreated    Responsibility[]            @relation("ResponsibilityCreatedBy")
+  responsibilitiesUpdated    Responsibility[]            @relation("ResponsibilityUpdatedBy")
+  pemObservations            PemObservation[]
+  pemHypotheses              PemHypothesis[]
   pemOnboardingConversations PemOnboardingConversation[]
-  pemWeeklyReviews    PemWeeklyReview[]
-  pemConsentEvents    PemConsentEvent[]
-  pemMetricConsentEvents PemMetricConsentEvent[]
-  pemEvidenceDeletionEvents PemEvidenceDeletionEvent[]
-  bootstrapAssertions BootstrapAssertion[]
-  notifications       Notification[]
-  auditLogsAsActor    AuditLog[]             @relation("AuditActorUser")
+  pemWeeklyReviews           PemWeeklyReview[]
+  pemConsentEvents           PemConsentEvent[]
+  pemMetricConsentEvents     PemMetricConsentEvent[]
+  pemEvidenceDeletionEvents  PemEvidenceDeletionEvent[]
+  bootstrapAssertions        BootstrapAssertion[]
+  notifications              Notification[]
+  auditLogsAsActor           AuditLog[]                  @relation("AuditActorUser")
+  /// [V5-M1-A1新設] Context本人(観測対象)としての逆relation。
+  projectContextsOwned       ProjectContext[]            @relation("ProjectContextOwner")
+  /// [V5-M1-A1新設] Context作成者としての逆relation。
+  projectContextsCreated     ProjectContext[]            @relation("ProjectContextCreatedBy")
 
   @@map("users")
 }
 
 /// FR-AUTH-04対応: セッション・端末の確認/失効。OIDC Access/Refresh運用の実体。[新設・推論]
 model UserSession {
-  id                  String    @id @default(uuid())
-  userId              String    @map("user_id")
-  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  deviceLabel         String?   @map("device_label")
-  userAgent           String?   @map("user_agent")
-  ipAddress           String?   @map("ip_address")
+  id                 String    @id @default(uuid())
+  userId             String    @map("user_id")
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceLabel        String?   @map("device_label")
+  userAgent          String?   @map("user_agent")
+  ipAddress          String?   @map("ip_address")
   /// Refresh Tokenはハッシュのみ保存し、平文は保持しない
-  refreshTokenHash    String    @map("refresh_token_hash")
+  refreshTokenHash   String    @map("refresh_token_hash")
   /// ローテーション世代を束ねる系列ID。再利用検知（Token再送攻撃対策）に使用
-  refreshTokenFamily  String    @map("refresh_token_family")
-  issuedAt            DateTime  @default(now()) @map("issued_at")
-  lastUsedAt          DateTime  @default(now()) @map("last_used_at")
-  expiresAt           DateTime  @map("expires_at")
-  revokedAt           DateTime? @map("revoked_at")
-  revokedReason        String?   @map("revoked_reason")
+  refreshTokenFamily String    @map("refresh_token_family")
+  issuedAt           DateTime  @default(now()) @map("issued_at")
+  lastUsedAt         DateTime  @default(now()) @map("last_used_at")
+  expiresAt          DateTime  @map("expires_at")
+  revokedAt          DateTime? @map("revoked_at")
+  revokedReason      String?   @map("revoked_reason")
 
   @@index([userId, revokedAt])
   @@index([refreshTokenFamily])
@@ -116,15 +120,17 @@ model Workspace {
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  members       WorkspaceMember[]
-  domains       Domain[]
-  captures      Capture[]
-  responsibilities Responsibility[]
-  integrations  Integration[]
-  aiProviderConfigs AiProviderConfig[]
+  members               WorkspaceMember[]
+  domains               Domain[]
+  captures              Capture[]
+  responsibilities      Responsibility[]
+  integrations          Integration[]
+  aiProviderConfigs     AiProviderConfig[]
   aiProviderCredentials AiProviderCredential[]
-  tags Tag[]
-  cycles Cycle[]
+  tags                  Tag[]
+  cycles                Cycle[]
+  /// [V5-M1-A1新設]
+  projectContexts       ProjectContext[]
 
   @@map("workspaces")
 }
@@ -162,7 +168,12 @@ model Domain {
 
   captures         Capture[]
   responsibilities Responsibility[]
+  /// [V5-M1-A1新設] ProjectContextからの複合FK参照先として必要。
+  projectContexts  ProjectContext[]
 
+  /// [V5-M1-A1新設・M1-A1指示書2.2節] ProjectContextからの複合FK
+  /// (domainId, workspaceId)参照先として必要(既存は単一列PKのみだった)。
+  @@unique([id, workspaceId], map: "domains_id_workspace_uq")
   @@map("domains")
 }
 
@@ -222,23 +233,23 @@ model Capture {
   /// (imageObjectKey単体列は旧データ互換のためのみ残す。新規アップロードは常にこちら経由)。
   images           CaptureImage[]
 
+  @@unique([workspaceId, createdById, clientDraftId], name: "captures_idempotency_key")
   @@index([workspaceId, createdAt(sort: Desc)])
   @@index([processingStatus, updatedAt])
-  @@unique([workspaceId, createdById, clientDraftId], name: "captures_idempotency_key")
   @@map("captures")
 }
 
 /// 新設(2026-08-21): 画像OCRの複数ページ結合。TBL番号未採番。
 /// 会議メモ・ノートを複数枚撮影した場合に、1つのCaptureへまとめて紐づける。
 model CaptureImage {
-  id         String   @id @default(uuid())
-  captureId  String   @map("capture_id")
-  capture    Capture  @relation(fields: [captureId], references: [id])
-  objectKey  String   @map("object_key")
+  id        String   @id @default(uuid())
+  captureId String   @map("capture_id")
+  capture   Capture  @relation(fields: [captureId], references: [id])
+  objectKey String   @map("object_key")
   /// 0始まり。OCR時にこの順でAnthropic Vision APIへ渡し、ページ順を保った
   /// 一つの書き起こしにまとめる。
-  pageIndex  Int      @map("page_index")
-  createdAt  DateTime @default(now()) @map("created_at")
+  pageIndex Int      @map("page_index")
+  createdAt DateTime @default(now()) @map("created_at")
 
   @@index([captureId, pageIndex])
   @@map("capture_images")
@@ -250,75 +261,78 @@ model CaptureImage {
 
 /// TBL-006 responsibilities - 全責任の共通正本
 model Responsibility {
-  id               String    @id @default(uuid())
-  workspaceId      String    @map("workspace_id")
-  workspace        Workspace @relation(fields: [workspaceId], references: [id])
-  domainId         String    @map("domain_id")
-  domain           Domain    @relation(fields: [domainId], references: [id])
-  originCaptureId  String?   @map("origin_capture_id")
-  originCapture    Capture?  @relation(fields: [originCaptureId], references: [id])
+  id                         String                         @id @default(uuid())
+  workspaceId                String                         @map("workspace_id")
+  workspace                  Workspace                      @relation(fields: [workspaceId], references: [id])
+  domainId                   String                         @map("domain_id")
+  domain                     Domain                         @relation(fields: [domainId], references: [id])
+  originCaptureId            String?                        @map("origin_capture_id")
+  originCapture              Capture?                       @relation(fields: [originCaptureId], references: [id])
   /// 新設: AI採用によって生成された場合、元のAiInference.idを保持する。
   /// 同一Capture内の候補間依存関係(blockedByCandidateIds)をResponsibilityRelationへ
   /// 変換する際、「どの候補がどのResponsibilityになったか」を突き合わせるために使う。
-  originInferenceId String?   @map("origin_inference_id")
+  originInferenceId          String?                        @map("origin_inference_id")
   /// 新設(2026-08-21): PERT図でのノード位置(ドラッグして手動配置した場合に保存)。
   /// null時はフロント側の自動レイアウト(トポロジカル層)に従う。
-  graphX           Float?    @map("graph_x")
-  graphY           Float?    @map("graph_y")
+  graphX                     Float?                         @map("graph_x")
+  graphY                     Float?                         @map("graph_y")
   /// TASK/COMMITMENT/DECISION/WAITING/EVENT/RISK/CONCERN/HABIT/IDEA
   /// (v1.1注記: Constraintは含まない。Goalは本テーブルに現れない)
-  type             String
-  title            String
-  description      String?
-  status           String
-  importance       Int?
+  type                       String
+  title                      String
+  description                String?
+  status                     String
+  importance                 Int?
   /// 0〜1
-  confidence       Decimal?  @db.Decimal(4, 3)
+  confidence                 Decimal?                       @db.Decimal(4, 3)
   /// USER/AI/IMPORT/SYSTEM
-  sourceKind       String    @map("source_kind")
-  hardDeadlineAt   DateTime? @map("hard_deadline_at")
-  targetAt         DateTime? @map("target_at")
-  startAfterAt     DateTime? @map("start_after_at")
-  completedAt      DateTime? @map("completed_at")
+  sourceKind                 String                         @map("source_kind")
+  hardDeadlineAt             DateTime?                      @map("hard_deadline_at")
+  targetAt                   DateTime?                      @map("target_at")
+  startAfterAt               DateTime?                      @map("start_after_at")
+  completedAt                DateTime?                      @map("completed_at")
   /// FN-WK-03「今日の最低ライン」(2026-08-22新設)。最大3件まで固定できる
   /// (件数上限はAPI側で強制する)。Reality Mode変更時の差分表示は未実装(将来対応)。
-  pinned           Boolean   @default(false)
-  pinnedAt         DateTime? @map("pinned_at")
-  version          Int       @default(0)
-  eventSequenceCounter Int   @default(0) @map("event_sequence_counter")
-  executionEvents  ResponsibilityExecutionEvent[]
+  pinned                     Boolean                        @default(false)
+  pinnedAt                   DateTime?                      @map("pinned_at")
+  version                    Int                            @default(0)
+  eventSequenceCounter       Int                            @default(0) @map("event_sequence_counter")
+  executionEvents            ResponsibilityExecutionEvent[]
   executionSessionIdentities ExecutionSessionIdentity[]
   /// [2026-08-25新設・Completion Gate 2.1、v4.0 8.1節] Correction/lifecycle記録。
-  lifecycleEvents  ResponsibilityLifecycleEvent[]
+  lifecycleEvents            ResponsibilityLifecycleEvent[]
   /// [2026-08-26新設・Undo Receipt] Bulk Complete Undoの正本レシート。
-  bulkCompleteReceipts BulkCompleteReceipt[]
-  createdById      String    @map("created_by")
-  createdBy        User      @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])
-  updatedById      String    @map("updated_by")
-  updatedBy        User      @relation("ResponsibilityUpdatedBy", fields: [updatedById], references: [id])
-  createdAt        DateTime  @default(now()) @map("created_at")
-  updatedAt        DateTime  @updatedAt @map("updated_at")
-  deletedAt        DateTime? @map("deleted_at")
+  bulkCompleteReceipts       BulkCompleteReceipt[]
+  createdById                String                         @map("created_by")
+  createdBy                  User                           @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])
+  updatedById                String                         @map("updated_by")
+  updatedBy                  User                           @relation("ResponsibilityUpdatedBy", fields: [updatedById], references: [id])
+  createdAt                  DateTime                       @default(now()) @map("created_at")
+  updatedAt                  DateTime                       @updatedAt @map("updated_at")
+  deletedAt                  DateTime?                      @map("deleted_at")
 
-  taskDetail       TaskDetail?
-  commitmentDetail CommitmentDetail?
-  decisionDetail   DecisionDetail?
-  waitingDetail    WaitingDetail?
-  constraints      Constraint[]
-  recurrenceRule   RecurrenceRule?
-  relationsFrom    ResponsibilityRelation[] @relation("RelationFrom")
-  relationsTo      ResponsibilityRelation[] @relation("RelationTo")
-  evidences        Evidence[]
-  embedding        ResponsibilityEmbedding?
-  tags             ResponsibilityTag[]
-  cycleItems       CycleItem[]
+  taskDetail               TaskDetail?
+  commitmentDetail         CommitmentDetail?
+  decisionDetail           DecisionDetail?
+  waitingDetail            WaitingDetail?
+  constraints              Constraint[]
+  recurrenceRule           RecurrenceRule?
+  relationsFrom            ResponsibilityRelation[]  @relation("RelationFrom")
+  relationsTo              ResponsibilityRelation[]  @relation("RelationTo")
+  evidences                Evidence[]
+  embedding                ResponsibilityEmbedding?
+  tags                     ResponsibilityTag[]
+  cycleItems               CycleItem[]
+  /// [V5-M1-A1新設]
+  projectContextLinks      ProjectContextLink[]
+  projectContextLinkEvents ProjectContextLinkEvent[]
 
-  @@index([workspaceId, id])
   /// [2026-08-24追加・Phase 0A是正2] ResponsibilityExecutionEventからの複合FK
   /// (responsibilityId, workspaceId)の参照先として必要(v4.0 4.1節「tenantを跨ぐ
   /// FK参照を禁止する」の機械的保証。既存の単一列idはunique(=PK)のため、
   /// この複合uniqueを追加しても他の参照方法に影響しない)。
   @@unique([id, workspaceId])
+  @@index([workspaceId, id])
   @@map("responsibilities")
 }
 
@@ -353,12 +367,12 @@ model ResponsibilityTag {
 
 /// TBL-007 task_details - Task固有属性 [推論]
 model TaskDetail {
-  responsibilityId    String          @id @map("responsibility_id")
-  responsibility      Responsibility  @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
-  estimatedMinutesMin Int?            @map("estimated_minutes_min")
-  estimatedMinutesMax Int?            @map("estimated_minutes_max")
+  responsibilityId    String         @id @map("responsibility_id")
+  responsibility      Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
+  estimatedMinutesMin Int?           @map("estimated_minutes_min")
+  estimatedMinutesMax Int?           @map("estimated_minutes_max")
   location            String?
-  requiredTools       Json?           @map("required_tools")
+  requiredTools       Json?          @map("required_tools")
 
   @@map("task_details")
 }
@@ -388,12 +402,12 @@ model DecisionDetail {
 
 /// TBL-010 waiting_details - 待ち固有属性 [推論]
 model WaitingDetail {
-  responsibilityId  String         @id @map("responsibility_id")
-  responsibility    Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
-  waitingOn         String?        @map("waiting_on")
-  expectedReplyBy   DateTime?      @map("expected_reply_by")
-  followUpAt        DateTime?      @map("follow_up_at")
-  reminderSentAt    DateTime?      @map("reminder_sent_at")
+  responsibilityId String         @id @map("responsibility_id")
+  responsibility   Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
+  waitingOn        String?        @map("waiting_on")
+  expectedReplyBy  DateTime?      @map("expected_reply_by")
+  followUpAt       DateTime?      @map("follow_up_at")
+  reminderSentAt   DateTime?      @map("reminder_sent_at")
 
   @@map("waiting_details")
 }
@@ -414,41 +428,41 @@ model Constraint {
 
 /// TBL-012 responsibility_relations - 責任間の有向関係
 model ResponsibilityRelation {
-  id            String    @id @default(uuid())
-  fromId        String    @map("from_id")
+  id            String         @id @default(uuid())
+  fromId        String         @map("from_id")
   from          Responsibility @relation("RelationFrom", fields: [fromId], references: [id])
-  toId          String    @map("to_id")
+  toId          String         @map("to_id")
   to            Responsibility @relation("RelationTo", fields: [toId], references: [id])
   /// PRECEDES/BLOCKS/DEPENDS_ON等
-  relationType  String    @map("relation_type")
+  relationType  String         @map("relation_type")
   /// CANDIDATE/CONFIRMED/REJECTED
   status        String
-  confidence    Decimal?  @db.Decimal(4, 3)
-  sourceKind    String?   @map("source_kind")
-  sourceRef     String?   @map("source_ref")
-  confirmedById String?   @map("confirmed_by")
-  confirmedAt   DateTime? @map("confirmed_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  deletedAt     DateTime? @map("deleted_at")
+  confidence    Decimal?       @db.Decimal(4, 3)
+  sourceKind    String?        @map("source_kind")
+  sourceRef     String?        @map("source_ref")
+  confirmedById String?        @map("confirmed_by")
+  confirmedAt   DateTime?      @map("confirmed_at")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  deletedAt     DateTime?      @map("deleted_at")
 
   @@map("responsibility_relations")
 }
 
 /// TBL-020 recurrence_rules（FN-REC-01対応）
 model RecurrenceRule {
-  id                String         @id @default(uuid())
-  responsibilityId  String         @unique @map("responsibility_id")
-  responsibility    Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
+  id               String         @id @default(uuid())
+  responsibilityId String         @unique @map("responsibility_id")
+  responsibility   Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
   /// DAILY/WEEKLY/MONTHLY等
-  frequency         String
-  interval          Int
-  weekdays          Json?
-  exceptions        Json?
-  pausedUntil       DateTime?      @map("paused_until")
+  frequency        String
+  interval         Int
+  weekdays         Json?
+  exceptions       Json?
+  pausedUntil      DateTime?      @map("paused_until")
   /// CARRY/DROP/RENOTIFY
-  carryoverPolicy   String         @map("carryover_policy")
-  lastGeneratedAt   DateTime?      @map("last_generated_at")
-  version           Int            @default(0)
+  carryoverPolicy  String         @map("carryover_policy")
+  lastGeneratedAt  DateTime?      @map("last_generated_at")
+  version          Int            @default(0)
 
   @@map("recurrence_rules")
 }
@@ -479,13 +493,13 @@ model Cycle {
 /// carriedFromCycleIdは、直前のサイクルで未完了だったために自動持ち越しされた
 /// 場合の出典サイクルを指す(UIで「先週から持ち越し」バッジを出すために使う)。
 model CycleItem {
-  id                 String    @id @default(uuid())
-  cycleId            String    @map("cycle_id")
-  cycle              Cycle     @relation(fields: [cycleId], references: [id], onDelete: Cascade)
-  responsibilityId   String    @map("responsibility_id")
+  id                 String         @id @default(uuid())
+  cycleId            String         @map("cycle_id")
+  cycle              Cycle          @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  responsibilityId   String         @map("responsibility_id")
   responsibility     Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
-  carriedFromCycleId String?   @map("carried_from_cycle_id")
-  addedAt            DateTime  @default(now()) @map("added_at")
+  carriedFromCycleId String?        @map("carried_from_cycle_id")
+  addedAt            DateTime       @default(now()) @map("added_at")
 
   @@unique([cycleId, responsibilityId])
   @@map("cycle_items")
@@ -497,17 +511,17 @@ model CycleItem {
 
 /// TBL-013 event_logs（原則削除不可）
 model EventLog {
-  id              String   @id @default(uuid())
-  aggregateType   String   @map("aggregate_type")
-  aggregateId     String   @map("aggregate_id")
-  eventType       String   @map("event_type")
-  beforeJson      Json?    @map("before_json")
-  afterJson       Json?    @map("after_json")
-  actorType       String   @map("actor_type")
-  actorId         String?  @map("actor_id")
-  reason          String?
-  correlationId   String?  @map("correlation_id")
-  occurredAt      DateTime @default(now()) @map("occurred_at")
+  id            String   @id @default(uuid())
+  aggregateType String   @map("aggregate_type")
+  aggregateId   String   @map("aggregate_id")
+  eventType     String   @map("event_type")
+  beforeJson    Json?    @map("before_json")
+  afterJson     Json?    @map("after_json")
+  actorType     String   @map("actor_type")
+  actorId       String?  @map("actor_id")
+  reason        String?
+  correlationId String?  @map("correlation_id")
+  occurredAt    DateTime @default(now()) @map("occurred_at")
 
   @@index([aggregateType, aggregateId])
   @@map("event_logs")
@@ -534,19 +548,19 @@ model OutboxEvent {
 
 /// TBL-026 jobs - 非同期処理状態 [推論]
 model Job {
-  id             String    @id @default(uuid())
-  jobType        String    @map("job_type")
-  aggregateId    String    @map("aggregate_id")
-  sourceVersion  Int       @map("source_version")
+  id            String    @id @default(uuid())
+  jobType       String    @map("job_type")
+  aggregateId   String    @map("aggregate_id")
+  sourceVersion Int       @map("source_version")
   /// QUEUED/RUNNING/SUCCEEDED/FAILED/DEAD_LETTER [推論]
-  status         String    @default("QUEUED")
-  attempts       Int       @default(0)
-  maxAttempts    Int       @default(5) @map("max_attempts")
-  nextRunAt      DateTime? @map("next_run_at")
-  lastError      String?   @map("last_error")
-  payload        Json?
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  status        String    @default("QUEUED")
+  attempts      Int       @default(0)
+  maxAttempts   Int       @default(5) @map("max_attempts")
+  nextRunAt     DateTime? @map("next_run_at")
+  lastError     String?   @map("last_error")
+  payload       Json?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
 
   @@unique([jobType, aggregateId, sourceVersion])
   @@index([status, nextRunAt])
@@ -559,54 +573,54 @@ model Job {
 
 /// TBL-014 ai_inferences
 model AiInference {
-  id             String    @id @default(uuid())
-  captureId      String    @map("capture_id")
-  capture        Capture   @relation(fields: [captureId], references: [id])
-  aiRunId        String    @map("ai_run_id")
-  aiRun          AiRun     @relation(fields: [aiRunId], references: [id])
+  id            String    @id @default(uuid())
+  captureId     String    @map("capture_id")
+  capture       Capture   @relation(fields: [captureId], references: [id])
+  aiRunId       String    @map("ai_run_id")
+  aiRun         AiRun     @relation(fields: [aiRunId], references: [id])
   /// RESPONSIBILITY/RELATION/DEADLINE等
-  inferenceType  String    @map("inference_type")
-  payload        Json
-  evidenceSpans  Json      @map("evidence_spans")
-  confidence     Decimal   @db.Decimal(4, 3)
+  inferenceType String    @map("inference_type")
+  payload       Json
+  evidenceSpans Json      @map("evidence_spans")
+  confidence    Decimal   @db.Decimal(4, 3)
   /// PENDING/ACCEPTED/EDITED/REJECTED/HELD/EXPIRED (用語・状態・コード定義書v1.1 5章に準拠。
   /// 従来コメントはHELDが抜けていたため本パッチで訂正)
-  decision       String    @default("PENDING")
+  decision      String    @default("PENDING")
   /// 楽観ロック(API・イベント設計書v1.1 4.2節 expectedInferenceVersion対応)。[新設]
-  version        Int       @default(0)
-  decidedById    String?   @map("decided_by")
-  decidedAt      DateTime? @map("decided_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
+  version       Int       @default(0)
+  decidedById   String?   @map("decided_by")
+  decidedAt     DateTime? @map("decided_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
 
   @@map("ai_inferences")
 }
 
 /// TBL-015 ai_runs - モデル実行・費用・結果 [推論]
 model AiRun {
-  id             String    @id @default(uuid())
-  captureId      String?   @map("capture_id")
-  capture        Capture?  @relation(fields: [captureId], references: [id])
+  id            String    @id @default(uuid())
+  captureId     String?   @map("capture_id")
+  capture       Capture?  @relation(fields: [captureId], references: [id])
   /// 新設(2026-08-23・FN-PEM系対応): Captureに紐付かないAI呼び出し(PEM対話・仮説生成・
   /// 週次レビュー)のコスト集計用。captureIdがある行はcapture.workspaceId経由で辿れるが、
   /// PEM呼び出しはCaptureを持たないため、admin/ai-usage APIの集計から漏れないよう
   /// 直接workspaceIdを持たせる(MVPは1ユーザー=1 Workspace固定のため矛盾は生じない)。
-  workspaceId    String?   @map("workspace_id")
-  provider       String
-  model          String
-  promptVersion  String    @map("prompt_version")
-  schemaVersion  String    @map("schema_version")
-  inputTokens    Int?      @map("input_tokens")
-  outputTokens   Int?      @map("output_tokens")
-  costMicros     BigInt?   @map("cost_micros")
-  latencyMs      Int?      @map("latency_ms")
+  workspaceId   String?   @map("workspace_id")
+  provider      String
+  model         String
+  promptVersion String    @map("prompt_version")
+  schemaVersion String    @map("schema_version")
+  inputTokens   Int?      @map("input_tokens")
+  outputTokens  Int?      @map("output_tokens")
+  costMicros    BigInt?   @map("cost_micros")
+  latencyMs     Int?      @map("latency_ms")
   /// PENDING/SUCCEEDED/FAILED [推論]
-  status         String    @default("PENDING")
-  errorCode      String?   @map("error_code")
+  status        String    @default("PENDING")
+  errorCode     String?   @map("error_code")
   /// 新設(2026-08-21): Anthropic Batch API経由の実行はtrue(料金は50%引きで
   /// costMicros算出済み)。レポート・監査用に区別できるようにする。
-  batch          Boolean   @default(false)
-  startedAt      DateTime  @default(now()) @map("started_at")
-  finishedAt     DateTime? @map("finished_at")
+  batch         Boolean   @default(false)
+  startedAt     DateTime  @default(now()) @map("started_at")
+  finishedAt    DateTime? @map("finished_at")
 
   inferences AiInference[]
 
@@ -615,15 +629,15 @@ model AiRun {
 
 /// 新設: pgvector Embedding。DB設計書v1.1 7章「検索・Embedding」に対応。TBL番号未採番
 model ResponsibilityEmbedding {
-  responsibilityId String         @id @map("responsibility_id")
-  responsibility   Responsibility @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
-  workspaceId      String         @map("workspace_id")
-  domainId         String         @map("domain_id")
-  modelVersion     String         @map("model_version")
+  responsibilityId String                      @id @map("responsibility_id")
+  responsibility   Responsibility              @relation(fields: [responsibilityId], references: [id], onDelete: Cascade)
+  workspaceId      String                      @map("workspace_id")
+  domainId         String                      @map("domain_id")
+  modelVersion     String                      @map("model_version")
   /// pgvector型。previewFeatures=postgresqlExtensions前提でPrismaは型検証をスキップする
   embedding        Unsupported("vector(1536)")
-  createdAt        DateTime       @default(now()) @map("created_at")
-  updatedAt        DateTime       @updatedAt @map("updated_at")
+  createdAt        DateTime                    @default(now()) @map("created_at")
+  updatedAt        DateTime                    @updatedAt @map("updated_at")
 
   @@index([workspaceId, domainId])
   @@map("responsibility_embeddings")
@@ -658,17 +672,17 @@ model AiProviderConfig {
 /// 暗号化方式はTOTP秘密鍵(TBD-17暫定方針)と同じAES-256-GCM、鍵は別環境変数
 /// (AI_CREDENTIAL_ENCRYPTION_KEY)で分離する(MFA用鍵とは用途混在させない)。
 model AiProviderCredential {
-  id             String    @id @default(uuid())
-  workspaceId    String    @map("workspace_id")
-  workspace      Workspace @relation(fields: [workspaceId], references: [id])
+  id              String    @id @default(uuid())
+  workspaceId     String    @map("workspace_id")
+  workspace       Workspace @relation(fields: [workspaceId], references: [id])
   /// registry.tsのプロバイダーキー(例: "anthropic","openai")と対応
-  providerKey    String    @map("provider_key")
-  encryptedApiKey String   @map("encrypted_api_key")
+  providerKey     String    @map("provider_key")
+  encryptedApiKey String    @map("encrypted_api_key")
   /// UI表示用。キー末尾4文字のみ保持(全体は復号しないと分からないようにする)
-  last4          String    @map("last4")
-  updatedById    String    @map("updated_by")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  last4           String    @map("last4")
+  updatedById     String    @map("updated_by")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
 
   @@unique([workspaceId, providerKey])
   @@map("ai_provider_credentials")
@@ -680,26 +694,26 @@ model AiProviderCredential {
 
 /// TBL-016 pem_observations [推論・DB設計書4.5節に準拠]
 model PemObservation {
-  id             String    @id @default(uuid())
-  userId         String    @map("user_id")
-  user           User      @relation(fields: [userId], references: [id])
-  observationType String   @map("observation_type")
-  payload        Json
-  validUntil     DateTime? @map("valid_until")
-  occurredAt     DateTime  @default(now()) @map("occurred_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
+  id               String    @id @default(uuid())
+  userId           String    @map("user_id")
+  user             User      @relation(fields: [userId], references: [id])
+  observationType  String    @map("observation_type")
+  payload          Json
+  validUntil       DateTime? @map("valid_until")
+  occurredAt       DateTime  @default(now()) @map("occurred_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
   /// [2026-08-24訂正・Phase 0C-2] v4.0 16.3節により論理削除はinsert-onlyの
   /// PemEvidenceDeletionEvent(evidenceDeletion.ts参照)へ移行した。この列自体は
   /// 過去データとの後方互換のため残すが、以後のコードはこの列を読み書きしない
   /// (削除判定はgetDeletedEvidenceIds()を正とする)。
-  deletedAt      DateTime? @map("deleted_at")
+  deletedAt        DateTime? @map("deleted_at")
   /// 新設(2026-08-23・FN-PEM-02対応): observationType="TRANSITION"(生イベント取り込み)の
   /// 冪等性キー。機能別詳細設計書v1.1 13章「PEMObserverはResponsibilityTransitionedを
   /// 購読し、eventIdで重複排除する」に対応。EventLog.idを保持し、@uniqueによる
   /// DB制約で二重取り込みを防ぐ(worker/relay.tsと同じP2002依拠の冪等パターン)。
   /// observationType="OBSERVATION"(集計結果)の行はnull(集計は日次で再計算されるため
   /// 単一イベントに紐付かない)。
-  sourceEventLogId String?  @unique @map("source_event_log_id")
+  sourceEventLogId String?   @unique @map("source_event_log_id")
 
   evidenceLinks PemEvidenceLink[]
 
@@ -763,79 +777,79 @@ model PemMetricConsentEvent {
 /// 伴わない項目がある(clockOffset*・sourceDeviceId・clientEventId等。本ファイル冒頭の
 /// パッチスクリプトdocstring参照)。列の存在と機能の完成度は別である。
 model ResponsibilityExecutionEvent {
-  id                           String   @id @default(uuid())
-  workspaceId                  String   @map("workspace_id")
-  subjectUserId                String   @map("subject_user_id")
-  actorType                    String   @map("actor_type")
-  actorUserId                  String?  @map("actor_user_id")
+  id                           String                         @id @default(uuid())
+  workspaceId                  String                         @map("workspace_id")
+  subjectUserId                String                         @map("subject_user_id")
+  actorType                    String                         @map("actor_type")
+  actorUserId                  String?                        @map("actor_user_id")
   /// [新設] SYSTEM/WORKER由来イベントを生成した場合のサービス識別子。
   /// 現状USER操作のみのため常にnull(v4.0 4章)。
-  actorServiceId                String?  @map("actor_service_id")
+  actorServiceId               String?                        @map("actor_service_id")
   /// [新設] AI Agent由来イベントを生成した場合のAgent識別子。現状常にnull。
-  actorAgentId                   String?  @map("actor_agent_id")
+  actorAgentId                 String?                        @map("actor_agent_id")
   /// [新設] 代理操作を行った場合、代理権限を与えた本人のuserId。現状代理操作機能が
   /// 無いため常にnull。
-  delegatedByUserId              String?  @map("delegated_by_user_id")
+  delegatedByUserId            String?                        @map("delegated_by_user_id")
   /// [新設] 認証・認可判断の追跡ID(v4.0 4章)。PemAuthorizationContext.authenticationContextId
   /// をそのまま保存する。[既知の簡略化] 現状のtransitions/route.tsは真の認証コンテキストID
   /// ではなくuserIdを暫定的に渡しているため、値の質はその制約を引き継ぐ。
-  authenticationContextId        String?  @map("authentication_context_id")
+  authenticationContextId      String?                        @map("authentication_context_id")
   /// [新設] API要求単位の追跡ID(v4.0 5.3節)。x-request-idヘッダがあれば優先、
   /// 無ければ要求ごとにrandomUUID()で発行する(transitions/route.ts参照)。
-  requestId                      String   @map("request_id")
-  responsibilityId             String   @map("responsibility_id")
+  requestId                    String                         @map("request_id")
+  responsibilityId             String                         @map("responsibility_id")
   /// [2026-08-24改訂] 単一列(responsibilityId)参照から、(responsibilityId, workspaceId)の
   /// 複合参照へ変更した。EventのworkspaceIdとResponsibilityのworkspaceIdが常に一致する
   /// ことをDBレベルで保証する(v4.0 4.1節「tenantを跨ぐFK参照…を禁止する」)。
-  responsibility                Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  responsibility               Responsibility                 @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
   /// START/RESUME/INTERRUPT/DEFER/SWITCH_OUT/COMPLETE/REOPEN/RESPONSIBILITY_ABANDON/AUTO_PAUSE_CONFIRMED
-  eventType                     String   @map("event_type")
-  fromState                     String   @map("from_state")
-  toState                       String   @map("to_state")
-  responsibilityVersionBefore   Int      @map("responsibility_version_before")
-  responsibilityVersionAfter    Int      @map("responsibility_version_after")
-  responsibilitySequence        Int      @map("responsibility_sequence")
+  eventType                    String                         @map("event_type")
+  fromState                    String                         @map("from_state")
+  toState                      String                         @map("to_state")
+  responsibilityVersionBefore  Int                            @map("responsibility_version_before")
+  responsibilityVersionAfter   Int                            @map("responsibility_version_after")
+  responsibilitySequence       Int                            @map("responsibility_sequence")
   /// [新設] 欠番・commit順不一致を許容する参考識別子(v4.0 5.3節)。意味的順序・配送順・
   /// commit順の保証には使わない(responsibilitySequenceが意味的順序の正)。DB側の
   /// シーケンスで採番する。
-  globalSequence                 BigInt   @unique(map: "ree_global_sequence_uq") @default(autoincrement()) @map("global_sequence")
-  source                        String
+  globalSequence               BigInt                         @unique(map: "ree_global_sequence_uq") @default(autoincrement()) @map("global_sequence")
+  source                       String
   /// [新設] 端末識別子。オフライン同期・複数端末競合検知は未実装のため常にnull。
-  sourceDeviceId                  String?  @map("source_device_id")
+  sourceDeviceId               String?                        @map("source_device_id")
   /// [新設] 端末側の冪等キー(オフライン再送検知用)。未実装のため常にnull。
-  clientEventId                   String?  @map("client_event_id")
+  clientEventId                String?                        @map("client_event_id")
   /// [新設] 端末側の順序番号。未実装のため常にnull。
-  clientSequence                   BigInt?  @map("client_sequence")
+  clientSequence               BigInt?                        @map("client_sequence")
   /// [改訂] v4.0 6.1節「SYSTEM/WORKER由来イベントではclientOccurredAtをnullとし、
   /// サーバー時刻を採用する」に合わせ必須→任意化した(現状はUSER操作のみのため
   /// 実質常に値が入るが、将来SYSTEM/WORKER経路が実装された際に備える)。
-  clientOccurredAt              DateTime? @map("client_occurred_at")
-  serverRecordedAt              DateTime @default(now()) @map("server_recorded_at")
-  effectiveOccurredAt           DateTime @map("effective_occurred_at")
-  occurredAtQuality             String   @map("occurred_at_quality")
+  clientOccurredAt             DateTime?                      @map("client_occurred_at")
+  serverRecordedAt             DateTime                       @default(now()) @map("server_recorded_at")
+  effectiveOccurredAt          DateTime                       @map("effective_occurred_at")
+  occurredAtQuality            String                         @map("occurred_at_quality")
   /// [新設] 既知のclock offset(秒)。オフライン同期のclock補正は未実装のため常にnull。
-  clockOffsetSeconds              Int?     @map("clock_offset_seconds")
-  clockOffsetMeasuredAt           DateTime? @map("clock_offset_measured_at")
-  idempotencyKey                String   @map("idempotency_key")
+  clockOffsetSeconds           Int?                           @map("clock_offset_seconds")
+  clockOffsetMeasuredAt        DateTime?                      @map("clock_offset_measured_at")
+  idempotencyKey               String                         @map("idempotency_key")
   /// [新設] 同一idempotencyKeyでpayloadが異なる場合の409判定に使う要求本文のhash
   /// (v4.0 5.5節)。transitions/route.tsがsha256で計算して渡す。
-  requestPayloadHash              String   @map("request_payload_hash")
-  schemaVersion                 String   @map("schema_version")
-  correlationId                 String?  @map("correlation_id")
-  causationId                   String?  @map("causation_id")
+  requestPayloadHash           String                         @map("request_payload_hash")
+  schemaVersion                String                         @map("schema_version")
+  correlationId                String?                        @map("correlation_id")
+  causationId                  String?                        @map("causation_id")
   /// [改訂] 従来Json?(任意)だったが、v4.0 5.3節はJson(必須)を要求する。
   /// 既存null行はマイグレーションで{}へbackfillし、NOT NULL化した。
-  metadata                      Json     @default("{}")
+  metadata                     Json                           @default("{}")
   /// [新設] 行の物理作成時刻。従来欠落していた。
-  createdAt                      DateTime @default(now()) @map("created_at")
+  createdAt                    DateTime                       @default(now()) @map("created_at")
   /// [2026-08-25新設・Completion Gate 2.1] このEventを取り消したCorrection(REVOKE等)。
   /// 通常1件だが、将来の再訂正(訂正の訂正)に備え配列とする。
-  correctionsOfThisEvent        ResponsibilityLifecycleEvent[] @relation("LifecycleCorrectionOfEvent")
+  correctionsOfThisEvent       ResponsibilityLifecycleEvent[] @relation("LifecycleCorrectionOfEvent")
   /// [2026-08-25新設・Completion Gate 2.1] このEvent自身が、あるCorrectionの結果として
   /// 生成された場合の逆参照(例: COMPLETE取消により生成されたREOPEN Event)。
-  resultingFromLifecycleEvents  ResponsibilityLifecycleEvent[] @relation("LifecycleResultingEvent")
+  resultingFromLifecycleEvents ResponsibilityLifecycleEvent[] @relation("LifecycleResultingEvent")
   /// [2026-08-26新設・Undo Receipt] このEventを参照するBulkCompleteReceipt。
-  bulkCompleteReceipts           BulkCompleteReceipt[]
+  bulkCompleteReceipts         BulkCompleteReceipt[]
 
   /// [改訂] tenantId(workspaceId)を含む複合uniqueへ変更(v4.0 5.3節、批評4.5対応)。
   /// [2026-08-24再修正] 3つの@@unique全てに明示的なmap名を付与した。理由:
@@ -879,38 +893,38 @@ model ResponsibilityExecutionEvent {
 /// allowedActors=["USER"]のため使えないが、状態が変わった事実そのものはinsert-onlyで
 /// 記録する必要があるため、Correctionとは別kindとしてここに記録する。
 model ResponsibilityLifecycleEvent {
-  id                   String    @id @default(uuid())
-  workspaceId          String    @map("workspace_id")
-  subjectUserId        String    @map("subject_user_id")
-  responsibilityId     String    @map("responsibility_id")
+  id               String         @id @default(uuid())
+  workspaceId      String         @map("workspace_id")
+  subjectUserId    String         @map("subject_user_id")
+  responsibilityId String         @map("responsibility_id")
   /// [tenant境界の二重防御] ResponsibilityExecutionEventと同じ複合FK参照方式。
-  responsibility       Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  responsibility   Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
 
   /// CORRECTION / RECURRENCE_RESET(coreTypes.ts LIFECYCLE_EVENT_KINDS)。
-  kind                 String    @map("kind")
+  kind                String                        @map("kind")
   /// REPLACE / REVOKE / SPLIT / MERGE_REQUEST(coreTypes.ts CORRECTION_TYPES)。
   /// kind=RECURRENCE_RESETの場合は常にnull。
-  correctionType       String?   @map("correction_type")
-  correctionOfEventId  String?   @map("correction_of_event_id")
+  correctionType      String?                       @map("correction_type")
+  correctionOfEventId String?                       @map("correction_of_event_id")
   /// [tenant境界二重化] workspaceIdを含む複合FK(参照先はResponsibilityExecutionEventの
   /// 複合unique[id, workspaceId])。
-  correctionOfEvent    ResponsibilityExecutionEvent? @relation("LifecycleCorrectionOfEvent", fields: [correctionOfEventId, workspaceId], references: [id, workspaceId])
-  resultingEventId     String?   @map("resulting_event_id")
-  resultingEvent       ResponsibilityExecutionEvent? @relation("LifecycleResultingEvent", fields: [resultingEventId, workspaceId], references: [id, workspaceId])
+  correctionOfEvent   ResponsibilityExecutionEvent? @relation("LifecycleCorrectionOfEvent", fields: [correctionOfEventId, workspaceId], references: [id, workspaceId])
+  resultingEventId    String?                       @map("resulting_event_id")
+  resultingEvent      ResponsibilityExecutionEvent? @relation("LifecycleResultingEvent", fields: [resultingEventId, workspaceId], references: [id, workspaceId])
 
-  fromState            String    @map("from_state")
-  toState              String    @map("to_state")
+  fromState String @map("from_state")
+  toState   String @map("to_state")
 
-  reason               String?
-  actorType            String    @map("actor_type")
-  actorUserId          String?   @map("actor_user_id")
+  reason      String?
+  actorType   String  @map("actor_type")
+  actorUserId String? @map("actor_user_id")
 
   /// 同一の訂正対象への重複記録を防ぐ(bulkCompleteUndoDecision.ts参照)。
-  idempotencyKey       String    @map("idempotency_key")
+  idempotencyKey     String @map("idempotency_key")
   /// 同一idempotencyKeyでpayloadが異なる場合の409(IDEMPOTENCY_KEY_REUSED)判定に使う。
-  requestPayloadHash   String    @map("request_payload_hash")
+  requestPayloadHash String @map("request_payload_hash")
 
-  createdAt            DateTime  @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at")
 
   @@unique([workspaceId, subjectUserId, idempotencyKey], map: "rle_idempotency_uq")
   @@index([responsibilityId])
@@ -932,19 +946,19 @@ model ResponsibilityLifecycleEvent {
 /// 実際のfromStatus/toStatus/completeEventIdは常にこのテーブルから読む
 /// (クライアントが送ってくる値を一切信用しない)。
 model BulkCompleteReceipt {
-  id                String    @id @default(uuid())
-  workspaceId       String    @map("workspace_id")
-  subjectUserId     String    @map("subject_user_id")
-  responsibilityId  String    @map("responsibility_id")
+  id                         String                        @id @default(uuid())
+  workspaceId                String                        @map("workspace_id")
+  subjectUserId              String                        @map("subject_user_id")
+  responsibilityId           String                        @map("responsibility_id")
   /// [tenant境界の二重防御] 既存パターンと同じ複合FK参照方式。
-  responsibility    Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  responsibility             Responsibility                @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
   /// バッチ全体で共有するid(bulkComplete呼び出し単位)。監査・調査用。
-  operationId       String    @map("operation_id")
+  operationId                String                        @map("operation_id")
   /// 完了前の真の状態(サーバーがBulk Complete実行時に記録。クライアントからは
   /// 一切受け取らない)。
-  fromStatus        String    @map("from_status")
+  fromStatus                 String                        @map("from_status")
   /// 完了操作が実際に到達したstatus。
-  toStatus          String    @map("to_status")
+  toStatus                   String                        @map("to_status")
   /// [2026-08-26新設・外部監査P0-1是正]
   /// この完了操作の直後にResponsibilityが持っていたversion。「このレシートが
   /// 今のResponsibilityにとって最新の完了サイクルに対応しているか」の世代確認に
@@ -954,12 +968,12 @@ model BulkCompleteReceipt {
   /// しまう恐れがあった(外部監査で指摘)。versionは完了・Undoのたびに必ず
   /// +1されるため、これと一致するかどうかが「まさにこの完了操作が生んだ状態か」
   /// を一意に判定できる。
-  responsibilityVersionAfter Int @map("responsibility_version_after")
+  responsibilityVersionAfter Int                           @map("responsibility_version_after")
   /// このBulk Complete操作でExecution Ledgerへ実際に記録されたCOMPLETE Eventのid
   /// (Execution Ledger対象外型、またはPEM同意未取得等で記録できなかった場合はnull)。
-  completeEventId   String?   @map("complete_event_id")
-  completeEvent     ResponsibilityExecutionEvent? @relation(fields: [completeEventId, workspaceId], references: [id, workspaceId])
-  createdAt         DateTime  @default(now()) @map("created_at")
+  completeEventId            String?                       @map("complete_event_id")
+  completeEvent              ResponsibilityExecutionEvent? @relation(fields: [completeEventId, workspaceId], references: [id, workspaceId])
+  createdAt                  DateTime                      @default(now()) @map("created_at")
 
   consumption BulkCompleteUndoConsumption?
 
@@ -976,13 +990,13 @@ model BulkCompleteReceipt {
 /// (insert-only、receiptIdへunique制約)。PEM Execution Ledgerの有無に関わらず
 /// 全ての型・全ての同意状態で一様に機能する冪等性の正本。
 model BulkCompleteUndoConsumption {
-  id                  String   @id @default(uuid())
+  id                 String              @id @default(uuid())
   /// [receiptId単独のunique制約] 「1レシートにつき冪等記録は1件だけ」という
   /// 唯一性そのものを保証する(冪等性の核心)。下の複合unique(3列)とは別目的の
   /// 制約であり、両方が同時に必要。
-  receiptId           String   @unique @map("receipt_id")
-  workspaceId         String   @map("workspace_id")
-  subjectUserId       String   @map("subject_user_id")
+  receiptId          String              @unique @map("receipt_id")
+  workspaceId        String              @map("workspace_id")
+  subjectUserId      String              @map("subject_user_id")
   /// [2026-08-26改訂・外部監査「DB整合性上の不足」是正、および前回のPrisma
   /// バリデーションエラー(P1012)の是正]
   /// 従来はreceiptId単独でのFKだったため、DB制約だけではこのConsumptionの
@@ -996,24 +1010,24 @@ model BulkCompleteUndoConsumption {
   /// カバーしないため、Prismaの検証(P1012)に失敗していた。このモデル自身にも
   /// 同じ3列の複合uniqueを追加する(receiptId単独のuniqueとは目的が異なるため
   /// 両立させる。実データとしては両方とも常に満たされる)。
-  receipt             BulkCompleteReceipt @relation(fields: [receiptId, workspaceId, subjectUserId], references: [id, workspaceId, subjectUserId])
-  requestPayloadHash  String   @map("request_payload_hash")
-  createdAt           DateTime @default(now()) @map("created_at")
+  receipt            BulkCompleteReceipt @relation(fields: [receiptId, workspaceId, subjectUserId], references: [id, workspaceId, subjectUserId])
+  requestPayloadHash String              @map("request_payload_hash")
+  createdAt          DateTime            @default(now()) @map("created_at")
 
   @@unique([receiptId, workspaceId, subjectUserId], map: "bcuc_receipt_workspace_subject_uq")
   @@map("bulk_complete_undo_consumptions")
 }
 
 model PemHypothesis {
-  id          String    @id @default(uuid())
-  userId      String    @map("user_id")
-  user        User      @relation(fields: [userId], references: [id])
-  statement   String
-  sampleSize  Int       @map("sample_size")
-  windowFrom  DateTime  @map("window_from")
-  windowTo    DateTime  @map("window_to")
-  confidence  Decimal   @db.Decimal(4, 3)
-  validUntil  DateTime? @map("valid_until")
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  user              User      @relation(fields: [userId], references: [id])
+  statement         String
+  sampleSize        Int       @map("sample_size")
+  windowFrom        DateTime  @map("window_from")
+  windowTo          DateTime  @map("window_to")
+  confidence        Decimal   @db.Decimal(4, 3)
+  validUntil        DateTime? @map("valid_until")
   /// UNREVIEWED(未評決)/AGREED(合っている)/DISAGREED(違う)/PARTIALLY_AGREED(部分的に合っている)
   /// [出典: PEMサブシステム統合正本仕様書v4.0 12.2節]
   /// [2026-08-24訂正・Phase 0C-3] 従来はCONFIRMED/REJECTED/TEMPORARY/PENDINGという
@@ -1022,19 +1036,19 @@ model PemHypothesis {
   /// 対応する値が無い。既存TEMPORARY行はUNREVIEWEDへ移行し、元の値はlegacyUserVerdict
   /// (下記)へ退避した。「今後使わない」は引き続き本レコードのdeletedAt(forget操作、
   /// このモデルに限りv4.0 16.3節のinsert-only化対象外。衝突台帳未フラグ)として表現する。
-  userVerdict String    @default("UNREVIEWED") @map("user_verdict")
+  userVerdict       String    @default("UNREVIEWED") @map("user_verdict")
   /// [新設・Phase 0C-3] マイグレーション前のuserVerdict値の退避列(CONFIRMED/REJECTED/
   /// TEMPORARY/PENDING)。特にTEMPORARYだった仮説をPhase 1のTemporary State実装時に
   /// 洗い出せるようにするため削除しない。新規作成される行では常にnull。
-  legacyUserVerdict String? @map("legacy_user_verdict")
+  legacyUserVerdict String?   @map("legacy_user_verdict")
   /// 新設(2026-08-23・FN-PEM-03対応): AI-07自動生成時のみ設定する集計指標キー
   /// (例: "DEFER_RATE_BY_ESTIMATE"、lib/pem.tsのOBSERVATION.payload.metricと対応)。
   /// 「本人がREJECTした仮説は同じ根拠だけで再提案しない」(機能別詳細設計書v1.1 13章)を
   /// 満たすため、再生成前に同一metricの既存仮説を確認する用途に使う。初回対話由来(null)は対象外。
-  sourceMetric String?   @map("source_metric")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
-  deletedAt   DateTime? @map("deleted_at")
+  sourceMetric      String?   @map("source_metric")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  deletedAt         DateTime? @map("deleted_at")
 
   evidenceLinks PemEvidenceLink[]
 
@@ -1065,22 +1079,22 @@ model PemEvidenceLink {
 /// 想像で実装しない判断)。現状は新規対話を常にconversationKind="INITIAL"で作成する
 /// (lib/ai/pemOnboarding.tsのfindOrCreateCurrentConversation参照)。
 model PemOnboardingConversation {
-  id        String    @id @default(uuid())
-  userId    String    @map("user_id")
-  user      User      @relation(fields: [userId], references: [id])
+  id                 String    @id @default(uuid())
+  userId             String    @map("user_id")
+  user               User      @relation(fields: [userId], references: [id])
   /// INITIAL/RECALIBRATION/MAJOR_CHANGE(v4.0 11章)。既存データはbackfillでINITIALとする。
-  conversationKind String @default("INITIAL") @map("conversation_kind")
+  conversationKind   String    @default("INITIAL") @map("conversation_kind")
   /// ROLE/CURRENT_LOAD/FIXED_CONSTRAINTS/EXECUTION_CONTEXT/VALUES/REVIEW/DONE [推論]
-  state     String    @default("ROLE")
+  state              String    @default("ROLE")
   /// {role: "assistant"|"user", content: string, at: string}[] の対話履歴全体
-  messages  Json      @default("[]")
+  messages           Json      @default("[]")
   /// 本人未確認のFACT候補({statement, evidenceMessageIndex}[])。REVIEW段階で提示し、
   /// 確認されたものだけpem_observations(observationType="FACT")へ昇格させる。
-  proposedFacts       Json @default("[]") @map("proposed_facts")
-  proposedHypotheses  Json @default("[]") @map("proposed_hypotheses")
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  completedAt DateTime? @map("completed_at")
+  proposedFacts      Json      @default("[]") @map("proposed_facts")
+  proposedHypotheses Json      @default("[]") @map("proposed_hypotheses")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+  completedAt        DateTime? @map("completed_at")
 
   @@index([userId, createdAt])
   @@map("pem_onboarding_conversations")
@@ -1107,8 +1121,6 @@ model PemWeeklyReview {
   @@map("pem_weekly_reviews")
 }
 
-
-
 /// TBL(PEM Phase 0C) pem_evidence_deletion_events - Evidence削除Ledger(insert-only)
 /// [出典: PEMサブシステム統合正本仕様書v4.0 16.3節]
 model PemEvidenceDeletionEvent {
@@ -1132,16 +1144,16 @@ model PemEvidenceDeletionEvent {
 /// [出典: PEMサブシステム統合正本仕様書v4.0 7.2節]
 /// 論理Session1つにつき1行。startEventId(START/RESUMEイベント)で一意に定まる。
 model ExecutionSessionIdentity {
-  id                String   @id @default(uuid())
-  workspaceId       String   @map("workspace_id")
-  subjectUserId     String   @map("subject_user_id")
-  responsibilityId  String   @map("responsibility_id")
+  id               String         @id @default(uuid())
+  workspaceId      String         @map("workspace_id")
+  subjectUserId    String         @map("subject_user_id")
+  responsibilityId String         @map("responsibility_id")
   /// [v4.0 4.1節] tenant跨ぎ参照をDBで禁止する複合FK(ResponsibilityExecutionEvent
   /// と同じパターン。Phase 0A是正2参照)。
-  responsibility    Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  responsibility   Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
   /// このSessionを開始したResponsibilityExecutionEvent.id(START/RESUME)。
-  startEventId      String   @map("start_event_id")
-  createdAt         DateTime @default(now()) @map("created_at")
+  startEventId     String         @map("start_event_id")
+  createdAt        DateTime       @default(now()) @map("created_at")
 
   revisions ExecutionSessionRevision[]
 
@@ -1157,30 +1169,30 @@ model ExecutionSessionIdentity {
 /// 最大のrevision番号を持つ行として投影で決定する(SUPERSEDEDは独立したstatus値
 /// として保存しない)。
 model ExecutionSessionRevision {
-  id                     String    @id @default(uuid())
-  sessionIdentityId      String    @map("session_identity_id")
+  id                     String                   @id @default(uuid())
+  sessionIdentityId      String                   @map("session_identity_id")
   sessionIdentity        ExecutionSessionIdentity @relation(fields: [sessionIdentityId], references: [id])
   revision               Int
   /// fold algorithm(sessionProjection.ts computeExecutionSessions)自体の版。
-  derivationVersion      String    @map("derivation_version")
+  derivationVersion      String                   @map("derivation_version")
   /// OPEN/CLOSED_CONFIRMED/CLOSED_UNCONFIRMED(v4.0 7.1節・7.3節。値集合は原本に
   /// 明記が無いため本文の記述から導出。sessionPersistence.ts参照)。
   status                 String
-  startedAt              DateTime  @map("started_at")
-  endedAt                DateTime? @map("ended_at")
+  startedAt              DateTime                 @map("started_at")
+  endedAt                DateTime?                @map("ended_at")
   /// INTERRUPT/DEFER/SWITCH_OUT/COMPLETE/AUTO_PAUSE_CONFIRMED/TIMEOUT。
-  endReason              String?   @map("end_reason")
-  rawElapsedSeconds      Int       @map("raw_elapsed_seconds")
+  endReason              String?                  @map("end_reason")
+  rawElapsedSeconds      Int                      @map("raw_elapsed_seconds")
   /// Activity Segmentによる補正後の実作業秒数(v4.0 7.4節、未実装のため常にnull)。
-  correctedActiveSeconds Int?      @map("corrected_active_seconds")
+  correctedActiveSeconds Int?                     @map("corrected_active_seconds")
   /// [既知の簡略化] Activity Evidence Ledger未実装のため常に"EXECUTION_LEDGER_ONLY"。
-  measurementMode        String    @map("measurement_mode")
-  measurementQuality     String    @map("measurement_quality")
-  qualityReasonCodes     Json      @default("[]") @map("quality_reason_codes")
-  timeZoneId             String?   @map("time_zone_id")
-  utcOffsetMinutes       Int?      @map("utc_offset_minutes")
-  supersedesRevisionId   String?   @map("supersedes_revision_id")
-  createdAt              DateTime  @default(now()) @map("created_at")
+  measurementMode        String                   @map("measurement_mode")
+  measurementQuality     String                   @map("measurement_quality")
+  qualityReasonCodes     Json                     @default("[]") @map("quality_reason_codes")
+  timeZoneId             String?                  @map("time_zone_id")
+  utcOffsetMinutes       Int?                     @map("utc_offset_minutes")
+  supersedesRevisionId   String?                  @map("supersedes_revision_id")
+  createdAt              DateTime                 @default(now()) @map("created_at")
 
   @@unique([sessionIdentityId, revision], map: "esr_identity_revision_uq")
   @@map("execution_session_revisions")
@@ -1216,11 +1228,11 @@ model ReasonPrompt {
 /// DELIVERED/DISPLAYED/EXPIRED/DELIVERY_FAILEDへは到達しない(TRIGGERED直後に
 /// ANSWEREDまたはSKIPPEDのみ記録する。reasonLedger.ts参照)。
 model ReasonPromptStateEvent {
-  id         String   @id @default(uuid())
-  promptId   String   @map("prompt_id")
+  id         String       @id @default(uuid())
+  promptId   String       @map("prompt_id")
   prompt     ReasonPrompt @relation(fields: [promptId], references: [id])
   state      String
-  occurredAt DateTime @default(now()) @map("occurred_at")
+  occurredAt DateTime     @default(now()) @map("occurred_at")
 
   @@index([promptId])
   @@map("reason_prompt_state_events")
@@ -1233,24 +1245,24 @@ model ReasonPromptStateEvent {
 /// [既知の簡略化] 現行UIには構造化選択肢UIも自由記述AI分類パイプラインも無いため、
 /// reasonCode/aiClassifiedReasonCodeは常にnull、freeTextのみが実際に埋まる。
 model ExecutionReasonAnswer {
-  id                     String   @id @default(uuid())
-  workspaceId            String   @map("workspace_id")
-  subjectUserId          String   @map("subject_user_id")
-  promptId               String   @map("prompt_id")
+  id                     String       @id @default(uuid())
+  workspaceId            String       @map("workspace_id")
+  subjectUserId          String       @map("subject_user_id")
+  promptId               String       @map("prompt_id")
   prompt                 ReasonPrompt @relation(fields: [promptId], references: [id])
-  triggerEventId         String   @map("trigger_event_id")
+  triggerEventId         String       @map("trigger_event_id")
   /// 本人が選択したReason種別コード。現行UIには構造化選択肢が無いため常にnull。
-  reasonCode             String?  @map("reason_code")
+  reasonCode             String?      @map("reason_code")
   /// 自由記述からAIが分類したReason種別コード。分類パイプライン未実装のため常にnull。
-  aiClassifiedReasonCode String?  @map("ai_classified_reason_code")
-  freeText               String?  @map("free_text")
-  structuredDetail       Json?    @map("structured_detail")
-  questionVersion        String   @map("question_version")
+  aiClassifiedReasonCode String?      @map("ai_classified_reason_code")
+  freeText               String?      @map("free_text")
+  structuredDetail       Json?        @map("structured_detail")
+  questionVersion        String       @map("question_version")
   /// 訂正時、旧回答を指す(insert-only revision chain、v4.0 8.1節と同じ考え方)。
   /// 現状回答訂正UIが無いため常にnull。
-  revisionOfAnswerId     String?  @map("revision_of_answer_id")
-  answeredAt             DateTime @map("answered_at")
-  createdAt              DateTime @default(now()) @map("created_at")
+  revisionOfAnswerId     String?      @map("revision_of_answer_id")
+  answeredAt             DateTime     @map("answered_at")
+  createdAt              DateTime     @default(now()) @map("created_at")
 
   @@index([promptId])
   @@map("execution_reason_answers")
@@ -1267,27 +1279,27 @@ model ExecutionReasonAnswer {
 /// 実際に作成される。DECLARED_CONSTRAINT/INTERVENTION_PREFERENCEはそれを生成する
 /// UI・フローが無いため、型としては用意するが未使用。
 model BootstrapAssertion {
-  id                      String    @id @default(uuid())
-  userId                  String    @map("user_id")
-  user                    User      @relation(fields: [userId], references: [id])
+  id                    String    @id @default(uuid())
+  userId                String    @map("user_id")
+  user                  User      @relation(fields: [userId], references: [id])
   /// SELF_REPORT/INITIAL_HYPOTHESIS/DECLARED_CONSTRAINT/INTERVENTION_PREFERENCE
-  assertionType           String    @map("assertion_type")
-  statement               String
+  assertionType         String    @map("assertion_type")
+  statement             String
   /// このAssertionの根拠となったPemObservation(FACT)。SELF_REPORT型のみ設定。
-  sourceObservationId     String?   @map("source_observation_id")
+  sourceObservationId   String?   @map("source_observation_id")
   /// このAssertionの根拠となったPemHypothesis。INITIAL_HYPOTHESIS型のみ設定。
-  sourceHypothesisId      String?   @map("source_hypothesis_id")
+  sourceHypothesisId    String?   @map("source_hypothesis_id")
   /// 由来する初回対話。
-  conversationId          String?   @map("conversation_id")
+  conversationId        String?   @map("conversation_id")
   /// ACTIVE/EXPIRED/SUPERSEDED/WITHDRAWN [推論。v4.0は「status及びsupersession」と
   /// のみ記載し正式な値集合の明記が無いため、Hypothesis状態(12.2節)の考え方に
   /// 揃えて導出した]。
-  status                  String    @default("ACTIVE")
-  expiresAt               DateTime? @map("expires_at")
+  status                String    @default("ACTIVE")
+  expiresAt             DateTime? @map("expires_at")
   /// insert-only revision chain。新Assertionがこれを置き換える場合、新側の
   /// supersedesAssertionIdに旧AssertionのIDを入れる(旧行はUPDATEしない)。
-  supersedesAssertionId   String?   @map("supersedes_assertion_id")
-  createdAt               DateTime  @default(now()) @map("created_at")
+  supersedesAssertionId String?   @map("supersedes_assertion_id")
+  createdAt             DateTime  @default(now()) @map("created_at")
 
   @@index([userId, assertionType])
   @@map("bootstrap_assertions")
@@ -1317,20 +1329,20 @@ model Evidence {
 
 /// TBL-021 notifications [推論]
 model Notification {
-  id               String    @id @default(uuid())
-  userId           String    @map("user_id")
-  user             User      @relation(fields: [userId], references: [id])
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id])
   /// DEADLINE/FOLLOW_UP/RISK等 [推論]
-  type             String
-  dedupeKey        String    @map("dedupe_key")
-  payload          Json
-  channel          String    @default("IN_APP")
+  type        String
+  dedupeKey   String    @map("dedupe_key")
+  payload     Json
+  channel     String    @default("IN_APP")
   /// SCHEDULED/SENT/READ/SUPPRESSED [推論]
-  status           String    @default("SCHEDULED")
-  scheduledAt      DateTime  @map("scheduled_at")
-  sentAt           DateTime? @map("sent_at")
-  readAt           DateTime? @map("read_at")
-  createdAt        DateTime  @default(now()) @map("created_at")
+  status      String    @default("SCHEDULED")
+  scheduledAt DateTime  @map("scheduled_at")
+  sentAt      DateTime? @map("sent_at")
+  readAt      DateTime? @map("read_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
 
   @@unique([dedupeKey])
   @@index([userId, status])
@@ -1370,19 +1382,201 @@ model Integration {
 
 /// TBL-024 audit_logs - 管理・権限・外部操作 [推論]
 model AuditLog {
-  id           String   @id @default(uuid())
-  actorUserId  String?  @map("actor_user_id")
-  actorUser    User?    @relation("AuditActorUser", fields: [actorUserId], references: [id])
-  actorType    String   @map("actor_type")
-  action       String
-  targetType   String   @map("target_type")
-  targetId     String?  @map("target_id")
+  id          String   @id @default(uuid())
+  actorUserId String?  @map("actor_user_id")
+  actorUser   User?    @relation("AuditActorUser", fields: [actorUserId], references: [id])
+  actorType   String   @map("actor_type")
+  action      String
+  targetType  String   @map("target_type")
+  targetId    String?  @map("target_id")
   /// SUCCESS/FAILURE [推論]
-  result       String
-  reason       String?
-  ipAddress    String?  @map("ip_address")
-  occurredAt   DateTime @default(now()) @map("occurred_at")
+  result      String
+  reason      String?
+  ipAddress   String?  @map("ip_address")
+  occurredAt  DateTime @default(now()) @map("occurred_at")
 
   @@index([targetType, targetId])
   @@map("audit_logs")
+}
+
+// =====================================================================
+// V5-M1-A1 Project Context Domain基盤
+// 出典: ISMAY-V5-DOC-04(Project Context・外部連携境界仕様書) 2章・3章、
+//       ISMAY-V5-DOC-10(DB物理設計書) 3.2節、ISMAY_統合正本仕様書_v5_0 8章。
+// 範囲: DBモデルのみ(M1-A1)。API/UI/Formation/Atomicity/Case Patternは対象外。
+//
+// [DEC-1] ProjectContext.kind列は追加しない。統合正本仕様書8.4節は`kind`列を
+//   例示するが、29章2項「Context kind/lifecycleの最終Code Registry」は未確定と
+//   明記されており、対応分冊確定まで実装着手不可とされている。
+// [DEC-2] visibilityの既定値はDOC-04に明記が無いため、最も制限的な"PRIVATE"を
+//   既定とする(DOC-02 4章のVisibility Code、既存PemConsent等の
+//   「既定非公開」原則に整合させた実装判断)。
+// [DEC-3] description列名はDOC-04 2章の表記に従う(統合正本仕様書8.4節の
+//   "summary"と同一概念。DOC-04が本Gateの直接対象subvolumeのためこちらを採用)。
+// [DEC-4] ExternalContextReferenceの識別子はDOC-04 2章の表記
+//   (externalWorkspaceKey, externalProjectKey)に従う。DOC-04 5章の
+//   「provider=MERIDIAN, externalProjectKey, externalItemKey」はFormation
+//   Materialization時にResponsibility側が持つ識別子を指すと解釈し、
+//   ExternalContextReference(Context単位の参照)の列とは別領域として扱う
+//   (M1-B以降で要再確認)。
+// [DEC-5] direction/syncPolicy/statusの具体的許容値はDOC-04のどの章にも
+//   列挙されておらず、統合正本仕様書29章6項「External connector別scope、
+//   credential、replay防止」も未確定事項に指定されている。このためString列
+//   のみとし、Code Registryは値確定後の別Gateで追加する。
+// =====================================================================
+
+/// V5-DOC-04 2章 TBL: project_contexts
+model ProjectContext {
+  id                 String    @id @default(uuid())
+  workspaceId        String    @map("workspace_id")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id])
+  domainId           String    @map("domain_id")
+  domain             Domain    @relation(fields: [domainId, workspaceId], references: [id, workspaceId])
+  /// 観測対象(DOC-02 4章 subjectUserId原則)。統合正本仕様書8.4節のownerSubjectUserId。
+  ownerSubjectUserId String    @map("owner_subject_user_id")
+  ownerSubjectUser   User      @relation("ProjectContextOwner", fields: [ownerSubjectUserId], references: [id])
+  name               String
+  /// DOC-04 2章の表記。統合正本仕様書8.4節の"summary"と同一概念([DEC-3])。
+  description        String?
+  /// ACTIVE/PAUSED/COMPLETED/ARCHIVED(PROJECT_CONTEXT_LIFECYCLE_STATES)。
+  lifecycleState     String    @default("ACTIVE") @map("lifecycle_state")
+  /// PRIVATE/CONTEXT/WORKSPACE/EXPLICIT(VISIBILITIES)。既定[DEC-2]。
+  visibility         String    @default("PRIVATE")
+  startedAt          DateTime? @map("started_at")
+  targetEndAt        DateTime? @map("target_end_at")
+  version            Int       @default(0)
+  createdById        String    @map("created_by")
+  createdBy          User      @relation("ProjectContextCreatedBy", fields: [createdById], references: [id])
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+  deletedAt          DateTime? @map("deleted_at")
+
+  links              ProjectContextLink[]
+  linkEvents         ProjectContextLinkEvent[]
+  externalReferences ExternalContextReference[]
+  embeddings         ProjectContextEmbedding[]
+
+  /// [tenant境界二重防御] 既存Responsibility/BulkCompleteReceipt等と同じ複合unique方式。
+  @@unique([id, workspaceId], map: "project_contexts_id_workspace_uq")
+  @@index([workspaceId, lifecycleState])
+  @@index([workspaceId, domainId])
+  @@map("project_contexts")
+}
+
+/// V5-DOC-04 2章 TBL: project_context_links
+/// 現在アクティブなLinkの高速参照用テーブル。履歴の正本は
+/// ProjectContextLinkEvent(append-only)であり、本テーブルは
+/// そのProjectionに相当する(EventLog正本→Projection実体化と同じ設計原則)。
+model ProjectContextLink {
+  id               String         @id @default(uuid())
+  workspaceId      String         @map("workspace_id")
+  contextId        String         @map("context_id")
+  context          ProjectContext @relation(fields: [contextId, workspaceId], references: [id, workspaceId])
+  responsibilityId String         @map("responsibility_id")
+  responsibility   Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  /// PRIMARY/SUPPORTING/REFERENCE(PROJECT_CONTEXT_LINK_ROLES)。
+  role             String
+  /// USER/AI/IMPORT/SYSTEM。既存Responsibility.sourceKindと同じ語彙を再利用する。
+  sourceKind       String         @map("source_kind")
+  linkedAt         DateTime       @default(now()) @map("linked_at")
+  unlinkedAt       DateTime?      @map("unlinked_at")
+  createdAt        DateTime       @default(now()) @map("created_at")
+
+  /// active PRIMARY一意制約・(Context,Responsibility)組の一意制約はいずれも
+  /// Prismaのpartial unique非対応のためmigration.sqlで明示追加する(DOC-04 10章)。
+  @@index([workspaceId, contextId, unlinkedAt, role])
+  @@index([workspaceId, responsibilityId, unlinkedAt])
+  @@map("project_context_links")
+}
+
+/// V5-DOC-04 2章 TBL: project_context_link_events(append-only)
+model ProjectContextLinkEvent {
+  id                 String         @id @default(uuid())
+  workspaceId        String         @map("workspace_id")
+  contextId          String         @map("context_id")
+  context            ProjectContext @relation(fields: [contextId, workspaceId], references: [id, workspaceId])
+  responsibilityId   String         @map("responsibility_id")
+  responsibility     Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  /// LINK/UNLINK(統合正本仕様書8.4節 action)。
+  eventType          String         @map("event_type")
+  /// このEvent発生時点のrole。
+  role               String
+  beforeSnapshot     Json?          @map("before_snapshot")
+  afterSnapshot      Json?          @map("after_snapshot")
+  /// actorType=USERの場合のみ非null(DB CHECKで排他性を保証。DOC-10 6章)。
+  actorUserId        String?        @map("actor_user_id")
+  actorType          String         @map("actor_type")
+  idempotencyKey     String         @map("idempotency_key")
+  requestPayloadHash String         @map("request_payload_hash")
+  occurredAt         DateTime       @default(now()) @map("occurred_at")
+
+  @@unique([workspaceId, contextId, idempotencyKey], map: "pcle_idempotency_uq")
+  @@index([workspaceId, responsibilityId])
+  @@map("project_context_link_events")
+}
+
+/// V5-DOC-04 2章 TBL: external_context_references
+model ExternalContextReference {
+  id                   String         @id @default(uuid())
+  workspaceId          String         @map("workspace_id")
+  contextId            String         @map("context_id")
+  context              ProjectContext @relation(fields: [contextId, workspaceId], references: [id, workspaceId])
+  provider             String
+  externalWorkspaceKey String         @map("external_workspace_key")
+  externalProjectKey   String         @map("external_project_key")
+  canonicalUrl         String?        @map("canonical_url")
+  /// [DEC-5] 許容値未確定。String列のみ、値検証は別Gateで追加。
+  direction            String
+  syncPolicy           String         @map("sync_policy")
+  status               String
+  createdAt            DateTime       @default(now()) @map("created_at")
+  updatedAt            DateTime       @updatedAt @map("updated_at")
+
+  snapshotRevisions ProjectContextSnapshotRevision[]
+
+  /// [tenant境界二重防御] ProjectContextSnapshotRevisionからの複合FK参照先。
+  @@unique([id, workspaceId], map: "ecr_id_workspace_uq")
+  /// DOC-04 2章「provider/key unique」。
+  @@unique([workspaceId, provider, externalWorkspaceKey, externalProjectKey], map: "ecr_provider_key_uq")
+  @@index([workspaceId, contextId])
+  @@map("external_context_references")
+}
+
+/// V5-DOC-04 2章 TBL: project_context_snapshot_revisions
+/// immutable、revision単調増加。referenceId(ExternalContextReference)への
+/// 取得時点Snapshotであり、Context本体のSnapshotではない([DEC-4]参照)。
+model ProjectContextSnapshotRevision {
+  id            String                   @id @default(uuid())
+  workspaceId   String                   @map("workspace_id")
+  referenceId   String                   @map("reference_id")
+  reference     ExternalContextReference @relation(fields: [referenceId, workspaceId], references: [id, workspaceId])
+  revision      Int
+  sourceVersion String?                  @map("source_version")
+  payload       Json
+  payloadHash   String                   @map("payload_hash")
+  capturedAt    DateTime                 @default(now()) @map("captured_at")
+  expiresAt     DateTime?                @map("expires_at")
+
+  @@unique([referenceId, workspaceId, revision], map: "pcsr_reference_revision_uq")
+  @@map("project_context_snapshot_revisions")
+}
+
+/// V5-DOC-04 2章 TBL: project_context_embeddings(1 current/model)
+/// 既存ResponsibilityEmbeddingと同じUnsupported("vector(1536)")方式を踏襲する。
+model ProjectContextEmbedding {
+  id            String                      @id @default(uuid())
+  workspaceId   String                      @map("workspace_id")
+  contextId     String                      @map("context_id")
+  context       ProjectContext              @relation(fields: [contextId, workspaceId], references: [id, workspaceId])
+  model         String
+  dimensions    Int
+  sourceVersion Int                         @map("source_version")
+  /// pgvector型。previewFeatures=postgresqlExtensions前提でPrismaは型検証をスキップする
+  /// (ResponsibilityEmbeddingと同じ注記)。
+  embedding     Unsupported("vector(1536)")
+  updatedAt     DateTime                    @updatedAt @map("updated_at")
+
+  /// 1 current/model(DOC-04 2章)。
+  @@unique([workspaceId, contextId, model], map: "pce_context_model_uq")
+  @@map("project_context_embeddings")
 }
