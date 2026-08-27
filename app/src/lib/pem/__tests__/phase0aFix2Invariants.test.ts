@@ -65,7 +65,10 @@ check("Responsibilityへ複合unique(id, workspaceId)が追加され、Eventが�
 });
 
 check("metadataがJson(必須)へ変更されている", () => {
-  assert.ok(schemaSrc.includes('metadata                      Json     @default("{}")'));
+  // [自動修正・2026-08-27] `npx prisma format`によるschema.prismaの列整列で
+  // 空白幅が変わるたびにこの厳密一致assertが壊れていたため、空白量に依存しない
+  // 正規表現へ変更した(検査対象の列定義・型・defaultは変更していない)。
+  assert.ok(/metadata\s+Json\s+@default\("\{\}"\)/.test(schemaSrc));
 });
 
 console.log(`\n${passed}件すべて成功`);

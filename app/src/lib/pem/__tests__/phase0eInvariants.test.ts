@@ -32,7 +32,12 @@ check("lib/ai/pemOnboarding.tsが新規対話をconversationKind=\"INITIAL\"で�
 
 check("schema.prismaのPemOnboardingConversationがconversationKind列を持つ", () => {
   const src = readFileSync(resolve(__dirname, "../../../../prisma/schema.prisma"), "utf-8");
-  assert.ok(src.includes('conversationKind String @default("INITIAL") @map("conversation_kind")'));
+  // [自動修正・2026-08-27] `npx prisma format`によるschema.prismaの列整列で
+  // 空白幅が変わるたびにこの厳密一致assertが壊れていたため、空白量に依存しない
+  // 正規表現へ変更した(検査対象の列定義・型・default・mapは変更していない)。
+  assert.ok(
+    /conversationKind\s+String\s+@default\("INITIAL"\)\s+@map\("conversation_kind"\)/.test(src),
+  );
   assert.ok(
     !src.includes('userId    String    @unique @map("user_id")\n  user      User      @relation(fields: [userId], references: [id])\n  /// ROLE'),
     "PemOnboardingConversation.userIdのunique制約が残っている",
