@@ -5,6 +5,7 @@ import { ExtractionResultSchema } from "@/lib/ai/schema";
 import { getActiveExtractionProvider } from "@/lib/ai/config";
 import { estimateCostMicros } from "@/lib/ai/pricing";
 import type { AiExtractionProvider, AiExtractionOutcome, AiExtractionUsage } from "@/lib/ai/provider";
+import { writeShadowFormationSession, type ShadowSourceCaptureContext } from "@/lib/formation/shadowWrite";
 
 /**
  * FN-AI-01 責任候補抽出(機能別詳細設計書v1.1 3章「Worker手順」1〜7に対応)。
@@ -134,7 +135,13 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
     }
 
     // Worker手順6〜7: ai_run/ai_inferences保存、Capture=READY、InferenceReadyイベント発行
-    const inferenceCount = await persistSuccess(capture.id, processingVersion, ai, parsed.data, outcome.usage);
+    const inferenceCount = await persistSuccess(capture.id, processingVersion, ai, parsed.data, outcome.usage, false, {
+      id: capture.id,
+      workspaceId: capture.workspaceId,
+      domainId: capture.domainId,
+      createdById: capture.createdById,
+      rawText: capture.rawText,
+    });
     return { status: "READY", inferenceCount };
   }
 
@@ -227,8 +234,14 @@ async function persistSuccess(
   result: { candidates: import("@/lib/ai/schema").ResponsibilityCandidate[]; captureSummary?: string },
   usage: AiExtractionUsage,
   batch = false,
+  /**
+   * [V5-M1-B2・DEC-009] REALTIME経路(runExtractionForCapture)のみ渡される。
+   * Batch経路(finalizeBatchExtraction)はこのGateではshadow書込み対象外のため
+   * undefinedのまま呼ばれ、その場合は下記でshadow書込み自体をスキップする。
+   */
+  shadowContext?: ShadowSourceCaptureContext,
 ): Promise<number> {
-  return db.$transaction(async (tx: Prisma.TransactionClient) => {
+  const { count, aiRunId } = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const run = await tx.aiRun.create({
       data: {
         captureId,
@@ -291,8 +304,24 @@ async function persistSuccess(
       });
     }
 
-    return result.candidates.length;
+    return { count: result.candidates.length, aiRunId: run.id };
   });
+
+  // [V5-M1-B2] 本体のtransactionが確定した後に、best-effortでFormation Session
+  // shadow構造を書く(DOC-03 10章「M1-B1はshadow Session生成のみ」の実配線)。
+  // writeShadowFormationSession自身が内部で例外を握りつぶすため、ここでの失敗が
+  // 本関数の戻り値(count)やCapture=READY確定へ影響することは無い。
+  if (shadowContext) {
+    await writeShadowFormationSession({
+      capture: shadowContext,
+      aiRunId,
+      schemaVersion: ai.schemaVersion,
+      candidates: result.candidates,
+      captureSummary: result.captureSummary,
+    });
+  }
+
+  return count;
 }
 
 async function persistFailure(
