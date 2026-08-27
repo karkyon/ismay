@@ -54,6 +54,16 @@ export function MicIcon(props: IconProps) {
   );
 }
 
+/** 「案件」(Project Context)ナビ用。フォルダのモチーフ(2026-08-27追加・V5-M1-A UI)。
+ * 他アイコンと同じ2px線・角丸ラインで揃え、複数責任を束ねる入れ物のイメージにした。 */
+export function ContextIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5Z" />
+    </svg>
+  );
+}
+
 /** 「今後」ナビ用。カレンダーのモチーフ。 */
 export function CalendarIcon(props: IconProps) {
   return (
