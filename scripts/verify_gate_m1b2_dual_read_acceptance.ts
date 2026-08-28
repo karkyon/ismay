@@ -228,37 +228,57 @@ async function main(): Promise<void> {
     workspaceId = membership?.workspaceId ?? null;
     if (!workspaceId) throw new Error("Workspaceを特定できませんでした");
 
-    const createRes = await api(jar, "POST", "/api/v1/captures", {
-      sourceType: "TEXT",
-      rawText: RAW_TEXT,
-      clientDraftId: `gate-m1b2-dualread-${RUN_ID}`,
-    });
-    if (createRes.status !== 201 && createRes.status !== 200) throw new Error(`Capture作成失敗: ${JSON.stringify(createRes.json)}`);
-    const captureId: string = createRes.json.data.id;
-    console.log(`Capture作成: ${captureId}`);
-
-    const analyzeRes = await api(jar, "POST", `/api/v1/captures/${captureId}/analyze`);
-    if (analyzeRes.status !== 200) throw new Error(`解析要求失敗: ${JSON.stringify(analyzeRes.json)}`);
-
-    console.log("AI解析の完了をポーリング中(最大60秒)...");
+    // [2026-08-28修正] LLM抽出は非決定的であり、同じ入力でも候補数が毎回同じとは限らない
+    // (実際に候補1件のみ返るケースが観測された)。本テストはACCEPT/REJECTを両方試すため
+    // 最低2候補必要。実AI呼出しをモックに置き換えるのではなく、最大3回まで「新規Captureで
+    // 再試行」することで、実際のAI呼出しを使い続けたまま揺らぎを吸収する。
+    const MAX_CAPTURE_ATTEMPTS = 3;
+    let captureId = "";
+    let aiRun: { id: string } | null = null;
+    let aiInferences: Awaited<ReturnType<typeof db.aiInference.findMany>> = [];
     let finalStatus: string | null = null;
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      await sleep(2000);
-      const capture = await db.capture.findUnique({ where: { id: captureId }, select: { processingStatus: true } });
-      if (capture && (capture.processingStatus === "READY" || capture.processingStatus === "FAILED")) {
-        finalStatus = capture.processingStatus;
-        break;
-      }
-    }
-    if (!finalStatus) throw new Error("60秒以内にAI解析が完了しませんでした(タイムアウト)");
-    console.log(`AI解析完了: processingStatus=${finalStatus}`);
 
-    const aiRun = await db.aiRun.findFirst({ where: { captureId }, orderBy: { finishedAt: "desc" } });
-    if (!aiRun) throw new Error("AiRunが1件も作成されていません");
-    const aiInferences = await db.aiInference.findMany({ where: { captureId, aiRunId: aiRun.id }, orderBy: { createdAt: "asc" } });
-    ok("0. 候補が2件以上ある(ACCEPT/REJECTを両方試すため)", aiInferences.length >= 2, `count=${aiInferences.length}`);
-    if (aiInferences.length < 2) throw new Error("候補数不足のため以降のACCEPT/REJECT検証を中止します");
+    for (let attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS; attempt++) {
+      const createRes = await api(jar, "POST", "/api/v1/captures", {
+        sourceType: "TEXT",
+        rawText: RAW_TEXT,
+        clientDraftId: `gate-m1b2-dualread-${RUN_ID}-${attempt}`,
+      });
+      if (createRes.status !== 201 && createRes.status !== 200) throw new Error(`Capture作成失敗: ${JSON.stringify(createRes.json)}`);
+      captureId = createRes.json.data.id;
+      console.log(`Capture作成(試行${attempt}/${MAX_CAPTURE_ATTEMPTS}): ${captureId}`);
+
+      const analyzeRes = await api(jar, "POST", `/api/v1/captures/${captureId}/analyze`);
+      if (analyzeRes.status !== 200) throw new Error(`解析要求失敗: ${JSON.stringify(analyzeRes.json)}`);
+
+      console.log("AI解析の完了をポーリング中(最大60秒)...");
+      finalStatus = null;
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        await sleep(2000);
+        const capture = await db.capture.findUnique({ where: { id: captureId }, select: { processingStatus: true } });
+        if (capture && (capture.processingStatus === "READY" || capture.processingStatus === "FAILED")) {
+          finalStatus = capture.processingStatus;
+          break;
+        }
+      }
+      if (!finalStatus) throw new Error("60秒以内にAI解析が完了しませんでした(タイムアウト)");
+      console.log(`AI解析完了: processingStatus=${finalStatus}`);
+
+      aiRun = await db.aiRun.findFirst({ where: { captureId }, orderBy: { finishedAt: "desc" } });
+      if (!aiRun) throw new Error("AiRunが1件も作成されていません");
+      aiInferences = await db.aiInference.findMany({ where: { captureId, aiRunId: aiRun.id }, orderBy: { createdAt: "asc" } });
+
+      if (aiInferences.length >= 2) break;
+      console.log(`  候補${aiInferences.length}件(2件未満)のため再試行します...`);
+    }
+
+    ok(
+      "0. 候補が2件以上ある(ACCEPT/REJECTを両方試すため)",
+      aiInferences.length >= 2,
+      `count=${aiInferences.length} (${MAX_CAPTURE_ATTEMPTS}回試行)`,
+    );
+    if (aiInferences.length < 2 || !aiRun) throw new Error(`候補数不足のため以降のACCEPT/REJECT検証を中止します(${MAX_CAPTURE_ATTEMPTS}回試行後もcount=${aiInferences.length})`);
 
     const clientSessionKey = `shadow:${aiRun.id}`;
     const session = await db.formationSession.findFirst({ where: { captureId, clientSessionKey } });
