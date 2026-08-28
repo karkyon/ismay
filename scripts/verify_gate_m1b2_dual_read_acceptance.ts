@@ -358,10 +358,20 @@ async function main(): Promise<void> {
     failures.push(`予期しない例外: ${err instanceof Error ? err.message : String(err)}`);
     console.error(err);
   } finally {
-    console.log("\n[CLEANUP] テストデータを削除します...");
-    if (userId) await cleanupTestUser(userId, workspaceId);
-    if (otherUserId) await cleanupTestUser(otherUserId, otherWorkspaceId);
-    console.log("[CLEANUP] 完了。");
+    // [2026-08-28追加] 失敗時にKEEP_TEST_DATA_ON_FAILURE=1が設定されていれば、
+    // 原因調査のためテストデータ(Capture/AiRun/Job/FormationSession等)を削除せず残す。
+    // 通常実行(成功時、またはこの環境変数が無い場合)は従来通り必ず削除する。
+    const keepOnFailure = failed > 0 && process.env.KEEP_TEST_DATA_ON_FAILURE === "1";
+    if (keepOnFailure) {
+      console.log("\n[CLEANUP] KEEP_TEST_DATA_ON_FAILURE=1のため、失敗時のテストデータ削除をスキップします。");
+      console.log(`[CLEANUP] 手動調査後、次回本スクリプトをKEEP_TEST_DATA_ON_FAILURE無しで再実行すればsweepOrphansが自動的に削除します。`);
+      console.log(`[CLEANUP] userId=${userId} workspaceId=${workspaceId}`);
+    } else {
+      console.log("\n[CLEANUP] テストデータを削除します...");
+      if (userId) await cleanupTestUser(userId, workspaceId);
+      if (otherUserId) await cleanupTestUser(otherUserId, otherWorkspaceId);
+      console.log("[CLEANUP] 完了。");
+    }
   }
 
   console.log(`\n合計: ${passed}件成功 / ${failed}件失敗`);
