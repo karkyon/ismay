@@ -120,6 +120,62 @@ const tooMany = { candidates: Array.from({ length: 21 }, (_, i) => ({ candidateI
 const tooManyResult = parseExtractionResultLenient(tooMany);
 ok("21件ケース: ok=false(候補数上限20はshape段階で維持される)", tooManyResult.ok === false);
 
+// -------------------------------------------------------------------
+// candidatesがJSON化された文字列で返るケース(実障害再現) → coerceして救済される
+// -------------------------------------------------------------------
+const stringifiedCandidates = {
+  candidates: JSON.stringify([
+    { candidateId: "c1", type: "TASK", title: "文字列化された配列からの復元", evidenceSpans: [{ start: 0, end: 5 }], confidence: 0.8 },
+  ]),
+  captureSummary: "文字列化ケース",
+};
+const stringifiedResult = parseExtractionResultLenient(stringifiedCandidates);
+ok("文字列化candidates再現: ok=true(JSON.parseで救済される)", stringifiedResult.ok === true);
+if (stringifiedResult.ok) {
+  ok("文字列化candidates再現: 候補1件が復元される", stringifiedResult.candidates.length === 1 && stringifiedResult.candidates[0]?.candidateId === "c1");
+}
+
+// candidatesが文字列だが、JSONとしてparseできない(本当に壊れている)場合は従来通り失敗
+const stringifiedButInvalid = { candidates: "これは配列のJSON文字列ではありません" };
+const stringifiedButInvalidResult = parseExtractionResultLenient(stringifiedButInvalid);
+ok("文字列化candidates(JSONとして不正): ok=false(救済されない)", stringifiedButInvalidResult.ok === false);
+
+// -------------------------------------------------------------------
+// dateMentions.normalizedAtがタイムゾーンオフセット付き(実障害再現) → 受理される
+// -------------------------------------------------------------------
+const withOffsetDate = {
+  candidates: [
+    {
+      candidateId: "c1",
+      type: "TASK",
+      title: "来週火曜までに月次レポートを提出",
+      evidenceSpans: [{ start: 0, end: 10 }],
+      confidence: 0.8,
+      dateMentions: [
+        {
+          rawExpression: "来週火曜",
+          // 実障害の再現: UTC('Z')ではなくAsia/Tokyoのオフセット付き(+09:00)。
+          // offset:true指定前はz.string().datetime()がこれを一律拒否し、
+          // 日付言及を含む候補だけの単発Captureが丸ごとFAILEDになっていた。
+          normalizedAt: "2026-09-01T09:00:00+09:00",
+          meaning: "HARD_DEADLINE",
+          timezone: "Asia/Tokyo",
+          confidence: 0.9,
+        },
+      ],
+    },
+  ],
+};
+const withOffsetDateResult = parseExtractionResultLenient(withOffsetDate);
+ok("オフセット付き日時再現: ok=true(候補が落ちない)", withOffsetDateResult.ok === true);
+if (withOffsetDateResult.ok) {
+  ok("オフセット付き日時再現: 候補1件が残る", withOffsetDateResult.candidates.length === 1);
+  ok(
+    "オフセット付き日時再現: normalizedAtがそのまま保持される",
+    withOffsetDateResult.candidates[0]?.dateMentions[0]?.normalizedAt === "2026-09-01T09:00:00+09:00",
+  );
+}
+
 console.log(`\n${passed}件成功 / ${failed}件失敗`);
 if (failed > 0) {
   console.log("\n失敗した項目:");

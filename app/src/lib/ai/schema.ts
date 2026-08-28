@@ -13,8 +13,15 @@ export const DATE_MEANINGS = ["HARD_DEADLINE", "SOFT_TARGET", "FOLLOW_UP", "EVEN
 
 const DateMentionSchema = z.object({
   rawExpression: z.string().min(1).max(200),
-  /// ISO 8601。解釈不能な場合はモデルが省略してよい(z.undefined相当)
-  normalizedAt: z.string().datetime().optional(),
+  /// ISO 8601。解釈不能な場合はモデルが省略してよい(z.undefined相当)。
+  /// [2026-08-28修正] offset:trueを指定しないとzodはUTC('Z'終端)のみ受理し、
+  /// タイムゾーンオフセット付き(例: "+09:00")を拒否する。本アプリはAsia/Tokyo運用
+  /// (extract.ts DEFAULT_TIMEZONE)であり、モデルがローカルタイムゾーンのオフセット付き
+  /// 日時を返すのは自然かつ妥当な挙動なので、offset:trueで許容する
+  /// (実障害: 日付言及を含む候補が高確率でInvalid ISO datetimeとして丸ごと
+  /// 落ちていた。候補が1件しか無いCaptureでは、この1件がdropされるだけで
+  /// Capture全体がAI_SCHEMA_INVALID→FAILEDになっていた)。
+  normalizedAt: z.string().datetime({ offset: true }).optional(),
   meaning: z.enum(DATE_MEANINGS),
   timezone: z.string().min(1).max(64),
   confidence: z.number().min(0).max(1),
@@ -103,10 +110,40 @@ export interface LenientExtractionParseFailure {
   reason: string;
 }
 
+/**
+ * [2026-08-28追加] 実障害の再現: claude-haiku-4-5がまれに`candidates`フィールドを
+ * (ツール呼び出しのJSON構造上は配列であるべきところ)JSON化した文字列として
+ * 返すことがある(zodはこれを受け取ると、型不一致"expected array, received string"と、
+ * 文字列としてのサイズ超過"Too big: expected string to have <=20 characters"の
+ * 2つのissueを同時に出す。max(20)は本来「配列の要素数上限20」の意図だが、実行時の
+ * 値が文字列だったためzod v4は文字列の長さとして評価している)。
+ *
+ * candidatesが文字列であり、かつそれが妥当なJSON配列としてparseできる場合のみ
+ * 配列へ差し替える。parseに失敗する場合(本当に配列ではない不正な文字列)は、
+ * 元のrawJsonのまま返し、従来通り構造的失敗として扱う(想像で救済範囲を広げない)。
+ */
+function coerceStringifiedCandidates(rawJson: unknown): unknown {
+  if (
+    typeof rawJson !== "object" ||
+    rawJson === null ||
+    !("candidates" in rawJson) ||
+    typeof (rawJson as { candidates: unknown }).candidates !== "string"
+  ) {
+    return rawJson;
+  }
+  try {
+    const parsedCandidates = JSON.parse((rawJson as { candidates: string }).candidates);
+    if (!Array.isArray(parsedCandidates)) return rawJson;
+    return { ...(rawJson as Record<string, unknown>), candidates: parsedCandidates };
+  } catch {
+    return rawJson;
+  }
+}
+
 export function parseExtractionResultLenient(
   rawJson: unknown,
 ): LenientExtractionParseSuccess | LenientExtractionParseFailure {
-  const shape = ExtractionShapeSchema.safeParse(rawJson);
+  const shape = ExtractionShapeSchema.safeParse(coerceStringifiedCandidates(rawJson));
   if (!shape.success) {
     return { ok: false, reason: shape.error.issues.map((i) => i.message).join("; ").slice(0, 500) };
   }
