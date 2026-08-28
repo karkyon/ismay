@@ -546,8 +546,13 @@ async function cleanupUser(db: typeof import("../app/src/lib/db")["db"], userId:
     if (responsibilityIds.length > 0) {
       await db.eventLog.deleteMany({ where: { aggregateType: "Responsibility", aggregateId: { in: responsibilityIds } } }).catch(() => null);
       await db.outboxEvent.deleteMany({ where: { aggregateId: { in: responsibilityIds } } }).catch(() => null);
+      // [2026-08-28修正・実障害] responsibility_embeddings.responsibility_idは
+      // schema.prismaで@db.Uuid注釈が無くPrisma String@idの既定(実カラム型はtext)。
+      // ::uuid[]キャストだと"operator does not exist: text = uuid"(42883)で失敗する
+      // (実行ログで確認済み。.catchで握りつぶされ他のcleanupには影響しないが、本来
+      // このDELETE自体は成功すべきなので正しいtext[]キャストに修正する)。
       await db.$executeRawUnsafe(
-        `DELETE FROM responsibility_embeddings WHERE responsibility_id = ANY($1::uuid[])`,
+        `DELETE FROM responsibility_embeddings WHERE responsibility_id = ANY($1::text[])`,
         responsibilityIds,
       ).catch(() => null);
     }
