@@ -71,6 +71,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         return apiError("IDEMPOTENCY_KEY_REUSED", "同一operationIdで異なる内容のリクエストが送信されました");
       case "CORRUPTED_CANDIDATE_DATA":
         return apiError("VALIDATION_FAILED", "候補データが不正なためMaterializeできません");
+      case "CANDIDATE_ALREADY_MATERIALIZED":
+        // [B3.1新設] 異operationIdの並行実行が同一候補を先にmaterialize済みだった。
+        // クライアントは最新のSession状態を再取得し、まだ対象があれば新しい
+        // operationIdで再試行できる(この呼び出し自体は何もResponsibility化していない)。
+        return apiError("VERSION_CONFLICT", "この候補は別の操作により既にMaterialize済みです。最新の状態を取得してください", {
+          retryable: true,
+        });
     }
   }
 

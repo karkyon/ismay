@@ -49,24 +49,24 @@ model User {
   updatedAt                 DateTime  @updatedAt @map("updated_at")
   deletedAt                 DateTime? @map("deleted_at")
 
-  workspaceMembers           WorkspaceMember[]
-  sessions                   UserSession[]
-  totpSecret                 UserTotpSecret?
-  capturesCreated            Capture[]                   @relation("CaptureCreatedBy")
-  responsibilitiesCreated    Responsibility[]            @relation("ResponsibilityCreatedBy")
-  responsibilitiesUpdated    Responsibility[]            @relation("ResponsibilityUpdatedBy")
-  pemObservations            PemObservation[]
-  pemHypotheses              PemHypothesis[]
-  pemOnboardingConversations PemOnboardingConversation[]
-  pemWeeklyReviews           PemWeeklyReview[]
-  pemConsentEvents           PemConsentEvent[]
-  pemMetricConsentEvents     PemMetricConsentEvent[]
-  pemEvidenceDeletionEvents  PemEvidenceDeletionEvent[]
-  bootstrapAssertions        BootstrapAssertion[]
-  notifications              Notification[]
-  auditLogsAsActor           AuditLog[]                  @relation("AuditActorUser")
+  workspaceMembers                   WorkspaceMember[]
+  sessions                           UserSession[]
+  totpSecret                         UserTotpSecret?
+  capturesCreated                    Capture[]                         @relation("CaptureCreatedBy")
+  responsibilitiesCreated            Responsibility[]                  @relation("ResponsibilityCreatedBy")
+  responsibilitiesUpdated            Responsibility[]                  @relation("ResponsibilityUpdatedBy")
+  pemObservations                    PemObservation[]
+  pemHypotheses                      PemHypothesis[]
+  pemOnboardingConversations         PemOnboardingConversation[]
+  pemWeeklyReviews                   PemWeeklyReview[]
+  pemConsentEvents                   PemConsentEvent[]
+  pemMetricConsentEvents             PemMetricConsentEvent[]
+  pemEvidenceDeletionEvents          PemEvidenceDeletionEvent[]
+  bootstrapAssertions                BootstrapAssertion[]
+  notifications                      Notification[]
+  auditLogsAsActor                   AuditLog[]                        @relation("AuditActorUser")
   /// [V5-M1-A1新設] Context本人(観測対象)としての逆relation。
-  projectContextsOwned       ProjectContext[]            @relation("ProjectContextOwner")
+  projectContextsOwned               ProjectContext[]                  @relation("ProjectContextOwner")
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
@@ -76,7 +76,7 @@ model User {
   formationAnswerEventsAsActor       FormationAnswerEvent[]
   formationCandidateDecisionsAsActor FormationCandidateDecisionEvent[]
   /// [V5-M1-A1新設] Context作成者としての逆relation。
-  projectContextsCreated     ProjectContext[]            @relation("ProjectContextCreatedBy")
+  projectContextsCreated             ProjectContext[]                  @relation("ProjectContextCreatedBy")
 
   @@map("users")
 }
@@ -176,10 +176,10 @@ model Domain {
   updatedAt   DateTime  @updatedAt @map("updated_at")
   deletedAt   DateTime? @map("deleted_at")
 
-  captures         Capture[]
-  responsibilities Responsibility[]
+  captures          Capture[]
+  responsibilities  Responsibility[]
   /// [V5-M1-A1新設] ProjectContextからの複合FK参照先として必要。
-  projectContexts  ProjectContext[]
+  projectContexts   ProjectContext[]
   /// [V5-M1-B1新設] FormationSessionからの複合FK参照先として必要。
   formationSessions FormationSession[]
 
@@ -238,12 +238,12 @@ model Capture {
   updatedAt          DateTime  @updatedAt @map("updated_at")
   deletedAt          DateTime? @map("deleted_at")
 
-  responsibilities Responsibility[]
-  aiInferences     AiInference[]
-  aiRuns           AiRun[]
+  responsibilities       Responsibility[]
+  aiInferences           AiInference[]
+  aiRuns                 AiRun[]
   /// 新設: 画像OCRの複数ページ結合用(2026-08-21追加)。1枚のみの場合も1件作成する
   /// (imageObjectKey単体列は旧データ互換のためのみ残す。新規アップロードは常にこちら経由)。
-  images           CaptureImage[]
+  images                 CaptureImage[]
   /// [V5-M1-B1新設] FormationSession/FormationSourceAnchorからの複合FK参照先として必要。
   formationSessions      FormationSession[]
   formationSourceAnchors FormationSourceAnchor[]
@@ -330,21 +330,21 @@ model Responsibility {
   updatedAt                  DateTime                       @updatedAt @map("updated_at")
   deletedAt                  DateTime?                      @map("deleted_at")
 
-  taskDetail               TaskDetail?
-  commitmentDetail         CommitmentDetail?
-  decisionDetail           DecisionDetail?
-  waitingDetail            WaitingDetail?
-  constraints              Constraint[]
-  recurrenceRule           RecurrenceRule?
-  relationsFrom            ResponsibilityRelation[]  @relation("RelationFrom")
-  relationsTo              ResponsibilityRelation[]  @relation("RelationTo")
-  evidences                Evidence[]
-  embedding                ResponsibilityEmbedding?
-  tags                     ResponsibilityTag[]
-  cycleItems               CycleItem[]
+  taskDetail                  TaskDetail?
+  commitmentDetail            CommitmentDetail?
+  decisionDetail              DecisionDetail?
+  waitingDetail               WaitingDetail?
+  constraints                 Constraint[]
+  recurrenceRule              RecurrenceRule?
+  relationsFrom               ResponsibilityRelation[]     @relation("RelationFrom")
+  relationsTo                 ResponsibilityRelation[]     @relation("RelationTo")
+  evidences                   Evidence[]
+  embedding                   ResponsibilityEmbedding?
+  tags                        ResponsibilityTag[]
+  cycleItems                  CycleItem[]
   /// [V5-M1-A1新設]
-  projectContextLinks      ProjectContextLink[]
-  projectContextLinkEvents ProjectContextLinkEvent[]
+  projectContextLinks         ProjectContextLink[]
+  projectContextLinkEvents    ProjectContextLinkEvent[]
   /// [V5-M1-B1新設] MaterializationReceiptItemからの複合FK参照先として必要。
   materializationReceiptItems MaterializationReceiptItem[]
 
@@ -1645,10 +1645,10 @@ model FormationSession {
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
-  events         FormationSessionEvent[]
-  candidates     FormationCandidateIdentity[]
-  questions      FormationQuestion[]
-  receipts       MaterializationReceipt[]
+  events     FormationSessionEvent[]
+  candidates FormationCandidateIdentity[]
+  questions  FormationQuestion[]
+  receipts   MaterializationReceipt[]
 
   /// Idempotency-Key再送検出用(DOC-03 7章 POST /formation-sessions)。
   @@unique([workspaceId, captureId, clientSessionKey], map: "formation_sessions_idempotency_uq")
@@ -1687,15 +1687,15 @@ model FormationSessionEvent {
 
 /// V5-DOC-03 4章 TBL: formation_candidate_identities(Session内安定ID)
 model FormationCandidateIdentity {
-  id               String           @id @default(uuid())
-  workspaceId      String           @map("workspace_id")
-  sessionId        String           @map("session_id")
-  session          FormationSession @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
+  id              String           @id @default(uuid())
+  workspaceId     String           @map("workspace_id")
+  sessionId       String           @map("session_id")
+  session         FormationSession @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
   /// Session内で安定した識別子(例: "c1","c2"。UI・回答Eventが再解析後も同じ候補を指すため)。
-  candidateKey     String           @map("candidate_key")
+  candidateKey    String           @map("candidate_key")
   /// 最新のCandidateRevision.revision値(Projectionの高速参照用。正本はrevision行そのもの)。
-  currentRevision  Int              @default(0) @map("current_revision")
-  createdAt        DateTime         @default(now()) @map("created_at")
+  currentRevision Int              @default(0) @map("current_revision")
+  createdAt       DateTime         @default(now()) @map("created_at")
 
   revisions      FormationCandidateRevision[]
   questions      FormationQuestion[]
@@ -1737,26 +1737,26 @@ model FormationCandidateRevision {
 
 /// V5-DOC-03 4章 TBL: formation_source_anchors(原文位置根拠)
 model FormationSourceAnchor {
-  id                 String                     @id @default(uuid())
-  workspaceId        String                     @map("workspace_id")
-  revisionId         String                     @map("revision_id")
-  revision           FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  id                String                     @id @default(uuid())
+  workspaceId       String                     @map("workspace_id")
+  revisionId        String                     @map("revision_id")
+  revision          FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
   /// TEXT_OFFSET/AUDIO_TIMECODE/MEETING_SPEAKER/IMAGE_BBOX(M1-LOC機能、
   /// HANDOFF v1 M1「Text offset、音声timecode、会議speaker、画像page/bbox Adapter」)。
-  sourceKind         String                     @map("source_kind")
-  captureId          String                     @map("capture_id")
-  capture            Capture                    @relation(fields: [captureId, workspaceId], references: [id, workspaceId])
+  sourceKind        String                     @map("source_kind")
+  captureId         String                     @map("capture_id")
+  capture           Capture                    @relation(fields: [captureId, workspaceId], references: [id, workspaceId])
   /// TEXT_OFFSET用。DOC-10 6章「0<=start<end<=sourceLength」のうちDB CHECKで
   /// 保証できるのはstart>=0・end>startまで(sourceLengthはCapture側の値のため
   /// application層で追加検証する)。
-  startOffset        Int?                       @map("start_offset")
-  endOffset           Int?                      @map("end_offset")
+  startOffset       Int?                       @map("start_offset")
+  endOffset         Int?                       @map("end_offset")
   /// IMAGE_BBOX用。DOC-10 6章「画像regionは0..1」の正規化座標をJSONで保持。
-  imageRegion         Json?                      @map("image_region")
-  excerptHash         String                     @map("excerpt_hash")
+  imageRegion       Json?                      @map("image_region")
+  excerptHash       String                     @map("excerpt_hash")
   /// pem/coreTypes.tsのPiiClassification語彙を再利用する(新規語彙を発明しない)。
-  piiClassification   String                     @map("pii_classification")
-  createdAt           DateTime                   @default(now()) @map("created_at")
+  piiClassification String                     @map("pii_classification")
+  createdAt         DateTime                   @default(now()) @map("created_at")
 
   @@index([workspaceId, revisionId])
   @@map("formation_source_anchors")
@@ -1787,22 +1787,22 @@ model FormationQuestion {
 
 /// V5-DOC-03 4章 TBL: formation_answer_events(append-only、訂正はrevisionOf)
 model FormationAnswerEvent {
-  id            String            @id @default(uuid())
-  workspaceId   String            @map("workspace_id")
-  questionId    String            @map("question_id")
-  question      FormationQuestion @relation(fields: [questionId, workspaceId], references: [id, workspaceId])
+  id           String                 @id @default(uuid())
+  workspaceId  String                 @map("workspace_id")
+  questionId   String                 @map("question_id")
+  question     FormationQuestion      @relation(fields: [questionId, workspaceId], references: [id, workspaceId])
   /// ANSWERED/UNKNOWN/DEFERRED/DO_NOT_MATERIALIZE(DOC-02 6章QuestionAnswer)。
-  answerKind    String            @map("answer_kind")
-  valueJson     Json?             @map("value_json")
+  answerKind   String                 @map("answer_kind")
+  valueJson    Json?                  @map("value_json")
   /// DOC-03 4章では単一必須fieldとして定義(質問への回答は常に本人。
   /// FormationSessionEventのような汎用actorType化はしない)。
-  actorUserId   String            @map("actor_user_id")
-  actorUser     User              @relation(fields: [actorUserId], references: [id])
-  occurredAt    DateTime          @default(now()) @map("occurred_at")
+  actorUserId  String                 @map("actor_user_id")
+  actorUser    User                   @relation(fields: [actorUserId], references: [id])
+  occurredAt   DateTime               @default(now()) @map("occurred_at")
   /// 訂正時は新規行を追加し、元の回答行を指す(UPDATE禁止、append-only)。
-  revisionOfId  String?           @map("revision_of_id")
-  revisionOf    FormationAnswerEvent?  @relation("FormationAnswerCorrection", fields: [revisionOfId], references: [id])
-  corrections   FormationAnswerEvent[] @relation("FormationAnswerCorrection")
+  revisionOfId String?                @map("revision_of_id")
+  revisionOf   FormationAnswerEvent?  @relation("FormationAnswerCorrection", fields: [revisionOfId], references: [id])
+  corrections  FormationAnswerEvent[] @relation("FormationAnswerCorrection")
 
   @@index([workspaceId, questionId])
   @@map("formation_answer_events")
@@ -1829,6 +1829,12 @@ model FormationCandidateDecisionEvent {
   actorUser   User                       @relation(fields: [actorUserId], references: [id])
   occurredAt  DateTime                   @default(now()) @map("occurred_at")
 
+  /// [2026-08-29追加・B3.1是正B31-04/B31-06] 採否対象Revisionは1候補につき1回だけ
+  /// 固定される(=1候補につきDecision Eventは高々1件)という不変条件を、
+  /// application層の事前SELECT(ALREADY_DECIDED判定)だけでなくDB制約でも保証する。
+  /// 主防御はmaterialize.ts側のSession行FOR UPDATE lockによる直列化だが、
+  /// 万一lockを経由しない書込み経路が将来追加された場合の多層防御として追加する。
+  @@unique([workspaceId, candidateId], map: "formation_candidate_decision_events_workspace_candidate_uq")
   @@index([workspaceId, candidateId])
   @@map("formation_candidate_decision_events")
 }
@@ -1854,18 +1860,25 @@ model MaterializationReceipt {
 
 /// V5-DOC-03 4章 TBL: materialization_receipt_items(1候補1生成)
 model MaterializationReceiptItem {
-  id                   String                     @id @default(uuid())
-  workspaceId          String                     @map("workspace_id")
-  receiptId            String                     @map("receipt_id")
-  receipt              MaterializationReceipt     @relation(fields: [receiptId, workspaceId], references: [id, workspaceId])
-  candidateId          String                     @map("candidate_id")
-  candidate            FormationCandidateIdentity @relation(fields: [candidateId, workspaceId], references: [id, workspaceId])
-  candidateRevisionId  String                     @map("candidate_revision_id")
-  candidateRevision    FormationCandidateRevision @relation(fields: [candidateRevisionId, workspaceId], references: [id, workspaceId])
-  responsibilityId     String                     @map("responsibility_id")
-  responsibility       Responsibility             @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  id                  String                     @id @default(uuid())
+  workspaceId         String                     @map("workspace_id")
+  receiptId           String                     @map("receipt_id")
+  receipt             MaterializationReceipt     @relation(fields: [receiptId, workspaceId], references: [id, workspaceId])
+  candidateId         String                     @map("candidate_id")
+  candidate           FormationCandidateIdentity @relation(fields: [candidateId, workspaceId], references: [id, workspaceId])
+  candidateRevisionId String                     @map("candidate_revision_id")
+  candidateRevision   FormationCandidateRevision @relation(fields: [candidateRevisionId, workspaceId], references: [id, workspaceId])
+  responsibilityId    String                     @map("responsibility_id")
+  responsibility      Responsibility             @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
 
-  /// 1候補1生成(DOC-03 4章「1候補1生成、tenant複合FK」)。
+  /// [2026-08-29修正・B3.1是正B31-01] 旧`@@unique([receiptId, candidateId])`は
+  /// 同一Receipt内の重複しか防げず、異なるReceipt/operationIdから同じcandidateが
+  /// 複数回materializeされることをDBレベルで防げていなかった(監査で指摘)。
+  /// candidateはtenant全体を通じて一度しかmaterializeされてはならない
+  /// (DOC-03 4章「1候補1生成」の本来の意味)ため、workspaceId+candidateIdの
+  /// global一意制約を追加する。旧制約は後方互換のため残す(このglobal制約に
+  /// 包含されるため実害は無い)。
   @@unique([receiptId, candidateId], map: "materialization_receipt_items_receipt_candidate_uq")
+  @@unique([workspaceId, candidateId], map: "materialization_receipt_items_workspace_candidate_uq")
   @@map("materialization_receipt_items")
 }

@@ -321,7 +321,13 @@ async function main(): Promise<void> {
       // 検証用に壊したhashを元に戻す(以降のcleanupに影響しないが一応整合させる)
       await db.materializationReceipt.update({
         where: { id: materialized.receiptId },
-        data: { requestHash: computeMaterializeRequestHash({ sessionId: sessionA.sessionId, workspaceId: workspace.id }) },
+        data: {
+          requestHash: computeMaterializeRequestHash({
+            sessionId: sessionA.sessionId,
+            workspaceId: workspace.id,
+            expectedVersion: sessionAfterBadVersion.version,
+          }),
+        },
       });
     }
 
