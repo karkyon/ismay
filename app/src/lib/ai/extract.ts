@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
-import { ExtractionResultSchema } from "@/lib/ai/schema";
+import { parseExtractionResultLenient } from "@/lib/ai/schema";
 import { getActiveExtractionProvider } from "@/lib/ai/config";
 import { estimateCostMicros } from "@/lib/ai/pricing";
 import type { AiExtractionProvider, AiExtractionOutcome, AiExtractionUsage } from "@/lib/ai/provider";
@@ -128,14 +128,24 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
     }
 
     lastUsage = outcome.usage;
-    const parsed = ExtractionResultSchema.safeParse(outcome.rawJson);
-    if (!parsed.success) {
-      lastFailureReason = `AI_SCHEMA_INVALID: ${parsed.error.issues.map((i) => i.message).join("; ").slice(0, 500)}`;
-      continue; // 構造違反は修復可能な失敗として再試行対象
+    const parsed = parseExtractionResultLenient(outcome.rawJson);
+    if (!parsed.ok) {
+      lastFailureReason = `AI_SCHEMA_INVALID: ${parsed.reason}`;
+      continue; // 構造違反(または全候補が個別検証に失敗)は修復可能な失敗として再試行対象
+    }
+    if (parsed.droppedCount > 0) {
+      // [2026-08-28追加] 一部候補のみ構造異常だった場合、その候補だけを捨てて残りを
+      // 採用する(道連れ全滅を防ぐ)。何が・なぜ落ちたかは観測できるようログする。
+      debugServer.event("extract/runExtractionForCapture", "PARTIAL_CANDIDATES_DROPPED", {
+        captureId: capture.id,
+        droppedCount: parsed.droppedCount,
+        keptCount: parsed.candidates.length,
+        dropReasons: parsed.dropReasons,
+      });
     }
 
     // Worker手順6〜7: ai_run/ai_inferences保存、Capture=READY、InferenceReadyイベント発行
-    const inferenceCount = await persistSuccess(capture.id, processingVersion, ai, parsed.data, outcome.usage, false, {
+    const inferenceCount = await persistSuccess(capture.id, processingVersion, ai, parsed, outcome.usage, false, {
       id: capture.id,
       workspaceId: capture.workspaceId,
       domainId: capture.domainId,
@@ -182,14 +192,24 @@ export async function finalizeBatchExtraction(
     return { status: "FAILED", reason: outcome.message };
   }
 
-  const parsed = ExtractionResultSchema.safeParse(outcome.rawJson);
-  if (!parsed.success) {
-    const reason = `AI_SCHEMA_INVALID: ${parsed.error.issues.map((i) => i.message).join("; ").slice(0, 500)}`;
+  const parsed = parseExtractionResultLenient(outcome.rawJson);
+  if (!parsed.ok) {
+    const reason = `AI_SCHEMA_INVALID: ${parsed.reason}`;
     await persistFailure(capture.id, processingVersion, ai, reason, outcome.usage, true);
     return { status: "FAILED", reason };
   }
+  if (parsed.droppedCount > 0) {
+    debugServer.event("extract/finalizeBatchExtraction", "PARTIAL_CANDIDATES_DROPPED", {
+      captureId: capture.id,
+      droppedCount: parsed.droppedCount,
+      keptCount: parsed.candidates.length,
+      dropReasons: parsed.dropReasons,
+    });
+  }
 
-  const inferenceCount = await persistSuccess(capture.id, processingVersion, ai, parsed.data, outcome.usage, true);
+  // [DEC-009] Batch経路はこのGate(M1-B2)ではFormation shadow書込みの対象外のため、
+  // shadowContext(第7引数)は渡さない(persistSuccess側でundefinedなら自動スキップされる)。
+  const inferenceCount = await persistSuccess(capture.id, processingVersion, ai, parsed, outcome.usage, true);
   return { status: "READY", inferenceCount };
 }
 

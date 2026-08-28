@@ -72,6 +72,74 @@ export type ResponsibilityCandidate = z.infer<typeof ResponsibilityCandidateSche
 export type ExtractionResult = z.infer<typeof ExtractionResultSchema>;
 
 /**
+ * [2026-08-28追加] ExtractionResultSchema(厳格版)は、20件中1件でも候補の
+ * 構造が壊れていると"candidates"配列全体がinvalidになり、残り19件の正しい候補まで
+ * 道連れで失われてAI_SCHEMA_INVALID→Capture=FAILEDになってしまう欠陥があった
+ * (実例: claude-haiku-4-5がevidenceSpansを配列ではなく説明文字列で返した1件が
+ * あっただけで、他の妥当な候補も含め抽出結果が丸ごと破棄された)。
+ *
+ * この関数は「候補単位」で検証し、壊れた候補だけを落として、有効な候補が
+ * 1件でも残ればそれを採用する(全滅した場合のみ従来通り失敗扱いにする)。
+ * トップレベルの形(candidatesが配列であること等)はそのまま厳格にチェックする
+ * (AIの応答がJSON構造そのものとして壊れている場合は、個別候補の問題ではなく
+ * 再試行対象の構造的失敗として扱う)。
+ */
+const ExtractionShapeSchema = z.object({
+  candidates: z.array(z.unknown()).max(20),
+  captureSummary: z.string().max(120).optional(),
+});
+
+export interface LenientExtractionParseSuccess {
+  ok: true;
+  candidates: ResponsibilityCandidate[];
+  captureSummary?: string;
+  /** 構造上位は妥当だが、個々の候補として検証に失敗し破棄した件数。 */
+  droppedCount: number;
+  /** 破棄理由(候補index付き)。debugServer.eventでの観測用。 */
+  dropReasons: string[];
+}
+export interface LenientExtractionParseFailure {
+  ok: false;
+  reason: string;
+}
+
+export function parseExtractionResultLenient(
+  rawJson: unknown,
+): LenientExtractionParseSuccess | LenientExtractionParseFailure {
+  const shape = ExtractionShapeSchema.safeParse(rawJson);
+  if (!shape.success) {
+    return { ok: false, reason: shape.error.issues.map((i) => i.message).join("; ").slice(0, 500) };
+  }
+
+  const candidates: ResponsibilityCandidate[] = [];
+  const dropReasons: string[] = [];
+  shape.data.candidates.forEach((item, index) => {
+    const parsed = ResponsibilityCandidateSchema.safeParse(item);
+    if (parsed.success) {
+      candidates.push(parsed.data);
+    } else {
+      dropReasons.push(`candidates[${index}]: ${parsed.error.issues.map((i) => i.message).join(", ").slice(0, 200)}`);
+    }
+  });
+
+  // 元々0件(AIが「抽出対象なし」と判断)は正常系。全滅(1件以上あったが全部壊れていた)のみ失敗扱い。
+  if (candidates.length === 0 && shape.data.candidates.length > 0) {
+    return {
+      ok: false,
+      reason: `全${shape.data.candidates.length}件の候補が個別検証に失敗しました: ${dropReasons.join(" | ").slice(0, 400)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    candidates,
+    captureSummary: shape.data.captureSummary,
+    droppedCount: dropReasons.length,
+    dropReasons,
+  };
+}
+
+/**
  * Anthropic Tool Use用のJSON Schema(手書き。上記zodスキーマと意味的に対応させる)。
  * zodスキーマは「保存前の最終防衛線」、こちらは「モデルに構造化出力を強制する側」であり、
  * 二重チェックになる(片方だけでは、モデルがJSON Schemaを無視した出力をした場合に守れない)。
