@@ -176,6 +176,98 @@ if (withOffsetDateResult.ok) {
   );
 }
 
+// -------------------------------------------------------------------
+// 日付のみ("2026-09-01"、時刻無し)も受理される
+// -------------------------------------------------------------------
+const withDateOnly = {
+  candidates: [
+    {
+      candidateId: "c1",
+      type: "TASK",
+      title: "来週火曜までに月次レポートを提出",
+      evidenceSpans: [{ start: 0, end: 10 }],
+      confidence: 0.8,
+      dateMentions: [
+        {
+          rawExpression: "来週火曜",
+          normalizedAt: "2026-09-01",
+          meaning: "HARD_DEADLINE",
+          timezone: "Asia/Tokyo",
+          confidence: 0.9,
+        },
+      ],
+    },
+  ],
+};
+const withDateOnlyResult = parseExtractionResultLenient(withDateOnly);
+ok("日付のみnormalizedAt再現: ok=true(候補が落ちない)", withDateOnlyResult.ok === true);
+if (withDateOnlyResult.ok) {
+  ok("日付のみnormalizedAt再現: 候補1件が残る", withDateOnlyResult.candidates.length === 1);
+}
+
+// -------------------------------------------------------------------
+// 実障害の生ログをそのまま再現(2026-08-28 omega-dev2 journalctlより採取):
+// 配列自体は正しく閉じているが、末尾に"<parameter name=\"captureSummary\">..."という
+// XML風の余剰テキストが混入するケース。
+// -------------------------------------------------------------------
+const realWorldTrailingXmlArtifact = {
+  candidates:
+    '[\n' +
+    '  {\n' +
+    '    "candidateId": "cand_001",\n' +
+    '    "type": "TASK",\n' +
+    '    "title": "月次レポートを作成して提出する",\n' +
+    '    "description": "来週火曜までに月次レポートを作成し提出する必要がある",\n' +
+    '    "evidenceSpans": [\n' +
+    '      {\n' +
+    '        "start": 0,\n' +
+    '        "end": 27\n' +
+    '      }\n' +
+    '    ],\n' +
+    '    "confidence": 0.95,\n' +
+    '    "dateMentions": [\n' +
+    '      {\n' +
+    '        "rawExpression": "来週火曜",\n' +
+    '        "meaning": "HARD_DEADLINE",\n' +
+    '        "normalizedAt": "2026-09-01",\n' +
+    '        "timezone": "Asia/Tokyo",\n' +
+    '        "confidence": 0.9\n' +
+    '      }\n' +
+    '    ]\n' +
+    '  }\n' +
+    '],\n' +
+    '<parameter name="captureSummary">来週火曜までに月次レポートを作成して提出する',
+};
+const trailingXmlResult = parseExtractionResultLenient(realWorldTrailingXmlArtifact);
+ok("実障害再現(末尾XML風混入): ok=true(末尾切り捨てで救済される)", trailingXmlResult.ok === true);
+if (trailingXmlResult.ok) {
+  ok("実障害再現(末尾XML風混入): 候補1件が復元される", trailingXmlResult.candidates.length === 1);
+  ok(
+    "実障害再現(末尾XML風混入): 日付のみのnormalizedAt('2026-09-01')が受理される",
+    trailingXmlResult.candidates[0]?.dateMentions[0]?.normalizedAt === "2026-09-01",
+  );
+}
+
+// 同じ実障害の別バリエーション: 末尾が`"captureSummary": "..."`(JSONの続き)の場合
+const realWorldTrailingJsonArtifact = {
+  candidates:
+    '[\n' +
+    '  {\n' +
+    '    "candidateId": "cand_001",\n' +
+    '    "type": "TASK",\n' +
+    '    "title": "月次レポートを作成して提出する",\n' +
+    '    "evidenceSpans": [{ "start": 0, "end": 27 }],\n' +
+    '    "confidence": 0.95\n' +
+    '  }\n' +
+    '],\n' +
+    '"captureSummary": "来週火曜までに月次レポートを作成して提出する"\n',
+};
+const trailingJsonResult = parseExtractionResultLenient(realWorldTrailingJsonArtifact);
+ok("実障害再現(末尾JSON風混入): ok=true(末尾切り捨てで救済される)", trailingJsonResult.ok === true);
+if (trailingJsonResult.ok) {
+  ok("実障害再現(末尾JSON風混入): 候補1件が復元される", trailingJsonResult.candidates.length === 1);
+}
+
 console.log(`\n${passed}件成功 / ${failed}件失敗`);
 if (failed > 0) {
   console.log("\n失敗した項目:");

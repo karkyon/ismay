@@ -131,19 +131,6 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
     const parsed = parseExtractionResultLenient(outcome.rawJson);
     if (!parsed.ok) {
       lastFailureReason = `AI_SCHEMA_INVALID: ${parsed.reason}`;
-      // [2026-08-28診断追加・一時的] AI_SCHEMA_INVALIDがcandidatesの型不一致
-      // (JSON化された文字列で返る等)で繰り返し発生しているため、原因特定用に
-      // AIの生レスポンス(outcome.rawJson)をそのままログへ出す。ai_runs.error_codeは
-      // 500文字に切り詰められ、かつcandidatesの実際の中身(型・値)が見えないため。
-      // 個人情報を含みうる原文由来のデータだが、既存のdebugServer.input/state等でも
-      // 同様にCapture本文やAI出力をログしている(このリポジトリの既存運用方針)ため、
-      // 一時的な調査用途としてこの粒度で出力する。原因特定後に削除する。
-      debugServer.error("extract/runExtractionForCapture", "AI_SCHEMA_INVALID_RAW_RESPONSE(診断用・一時)", {
-        captureId: capture.id,
-        attempt,
-        rawJsonType: typeof outcome.rawJson,
-        rawJson: outcome.rawJson,
-      });
       continue; // 構造違反(または全候補が個別検証に失敗)は修復可能な失敗として再試行対象
     }
     if (parsed.droppedCount > 0) {

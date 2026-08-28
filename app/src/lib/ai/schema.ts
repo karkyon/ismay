@@ -14,14 +14,18 @@ export const DATE_MEANINGS = ["HARD_DEADLINE", "SOFT_TARGET", "FOLLOW_UP", "EVEN
 const DateMentionSchema = z.object({
   rawExpression: z.string().min(1).max(200),
   /// ISO 8601。解釈不能な場合はモデルが省略してよい(z.undefined相当)。
-  /// [2026-08-28修正] offset:trueを指定しないとzodはUTC('Z'終端)のみ受理し、
-  /// タイムゾーンオフセット付き(例: "+09:00")を拒否する。本アプリはAsia/Tokyo運用
-  /// (extract.ts DEFAULT_TIMEZONE)であり、モデルがローカルタイムゾーンのオフセット付き
-  /// 日時を返すのは自然かつ妥当な挙動なので、offset:trueで許容する
+  /// [2026-08-28修正・実障害2件を反映]
+  /// (a) offset:trueを指定しないとzodはUTC('Z'終端)のみ受理し、タイムゾーンオフセット
+  ///     付き(例: "+09:00")を拒否する。本アプリはAsia/Tokyo運用(extract.ts
+  ///     DEFAULT_TIMEZONE)であり、モデルがローカルタイムゾーンのオフセット付き日時を
+  ///     返すのは自然かつ妥当な挙動なので、offset:trueで許容する。
+  /// (b) モデルは時刻を伴わない日付のみ("2026-09-01")も高頻度で返す(時刻粒度が
+  ///     不明な締切は当然の挙動)。z.string().datetime()は時刻部を必須とするため、
+  ///     日付のみも受理できるようz.string().date()とのunionにする。
   /// (実障害: 日付言及を含む候補が高確率でInvalid ISO datetimeとして丸ごと
   /// 落ちていた。候補が1件しか無いCaptureでは、この1件がdropされるだけで
   /// Capture全体がAI_SCHEMA_INVALID→FAILEDになっていた)。
-  normalizedAt: z.string().datetime({ offset: true }).optional(),
+  normalizedAt: z.union([z.string().datetime({ offset: true }), z.string().date()]).optional(),
   meaning: z.enum(DATE_MEANINGS),
   timezone: z.string().min(1).max(64),
   confidence: z.number().min(0).max(1),
@@ -131,12 +135,33 @@ function coerceStringifiedCandidates(rawJson: unknown): unknown {
   ) {
     return rawJson;
   }
+  const candidatesStr = (rawJson as { candidates: string }).candidates;
+
+  // 素直にJSONとしてparseを試みる(candidates文字列そのものが完全なJSON配列の場合)。
+  const direct = tryParseJsonArray(candidatesStr);
+  if (direct) return { ...(rawJson as Record<string, unknown>), candidates: direct };
+
+  // [2026-08-28追加・実障害再現] claude-haiku-4-5が、配列自体は正しく閉じた直後に
+  // 本来トップレベルの別フィールドであるべき内容(例: `<parameter
+  // name="captureSummary">...` というXML風の余剰テキストや、`"captureSummary":
+  // "..."` というJSONの続き)を同じcandidates文字列の中に混入させて返すことがある
+  // (実ログで複数回確認)。配列部分自体は毎回有効なJSONとして完結しているため、
+  // 文字列内で最後に現れる"]"までを配列の終端とみなして切り出し、再度parseを試みる。
+  const lastBracket = candidatesStr.lastIndexOf("]");
+  if (lastBracket !== -1) {
+    const truncated = tryParseJsonArray(candidatesStr.slice(0, lastBracket + 1));
+    if (truncated) return { ...(rawJson as Record<string, unknown>), candidates: truncated };
+  }
+
+  return rawJson;
+}
+
+function tryParseJsonArray(str: string): unknown[] | null {
   try {
-    const parsedCandidates = JSON.parse((rawJson as { candidates: string }).candidates);
-    if (!Array.isArray(parsedCandidates)) return rawJson;
-    return { ...(rawJson as Record<string, unknown>), candidates: parsedCandidates };
+    const parsed = JSON.parse(str);
+    return Array.isArray(parsed) ? parsed : null;
   } catch {
-    return rawJson;
+    return null;
   }
 }
 
