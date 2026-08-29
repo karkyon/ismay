@@ -5,6 +5,15 @@ import { debugServer } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { findFormationSessionForCapture } from "@/lib/formation/legacyProjectionResolver";
+
+/**
+ * [B4.2新設・2026-08-29] cutover flag。旧route(inferences/[id]/decision)と
+ * 同じ環境変数・同じ既定値(未設定=false)を参照する。InboxClientはこの値と
+ * `formationSessionId`の両方を見て、Formation経路のUIを出すかlegacy UIのまま
+ * にするかを決める(監査「B4.1即時完了・B4.2連続実装指示」B4.2受入項目2・3・10)。
+ */
+const CHG011_SHARED_CORE_ENABLED = process.env.FEATURE_CHG011_SHARED_CORE === "true";
 
 /**
  * UI-04向け詳細取得。
@@ -68,7 +77,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   }
 
   const { aiRuns, _count, ...captureFields } = capture;
-  return apiOk({ capture: { ...captureFields, imagePageCount: _count.images }, latestAiRun: aiRuns[0] ?? null });
+  // [B4.2新設・2026-08-29] Session-backed Captureかどうかを画面が判断できるよう、
+  // cutover flag状態と対応FormationSessionIdを同梱する(受入項目2・3・10)。
+  const formationSession = await findFormationSessionForCapture(db, { captureId: id, workspaceId });
+  return apiOk({
+    capture: { ...captureFields, imagePageCount: _count.images },
+    latestAiRun: aiRuns[0] ?? null,
+    formationSessionId: formationSession?.id ?? null,
+    cutoverEnabled: CHG011_SHARED_CORE_ENABLED,
+  });
 }
 
 const UpdateCaptureSchema = z.object({

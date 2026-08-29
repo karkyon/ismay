@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, startTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { isTypingTarget } from "@/lib/keyboard";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { formatRelativeTime } from "@/lib/format";
 import { QuickCaptureForm } from "@/components/capture/QuickCaptureForm";
+import { FormationSessionPanel } from "@/components/capture/FormationSessionPanel";
 
 interface CaptureListItem {
   id: string;
@@ -31,6 +32,12 @@ interface CaptureDetail extends CaptureListItem {
   imagePageCount: number;
   /** 新設(2026-08-21): 音声話題自動分割で生成された場合、分割元CaptureのID。 */
   splitFromCaptureId: string | null;
+}
+
+/** [B4.2新設・2026-08-29] Session-backed Captureかどうかの判定に使う。 */
+interface CaptureDetailMeta {
+  formationSessionId: string | null;
+  cutoverEnabled: boolean;
 }
 
 interface CandidateDateMention {
@@ -179,6 +186,7 @@ export function InboxClient() {
   const [loadingList, setLoadingList] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CaptureDetail | null>(null);
+  const [detailMeta, setDetailMeta] = useState<CaptureDetailMeta>({ formationSessionId: null, cutoverEnabled: false });
   const [latestAiRun, setLatestAiRun] = useState<LatestAiRun | null>(null);
   const [inferences, setInferences] = useState<InferenceItem[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -231,6 +239,12 @@ export function InboxClient() {
       const body = await detailRes.json();
       setDetail(body.data.capture);
       setLatestAiRun(body.data.latestAiRun ?? null);
+      // [B4.2新設・2026-08-29] Session-backed Captureかどうかを記録し、
+      // cutover flag ON時はAI候補欄をFormationSessionPanelへ切り替える。
+      setDetailMeta({
+        formationSessionId: body.data.formationSessionId ?? null,
+        cutoverEnabled: body.data.cutoverEnabled ?? false,
+      });
     } else {
       // [2026-08-21追加] 失敗時はdetailを消してエラーメッセージを表示する(古いメモの
       // 詳細を誤表示したまま放置しない)。500の場合はJSONで返らないことがあるためcatchする。
@@ -238,6 +252,7 @@ export function InboxClient() {
       debugLog.event("InboxClient", "loadDetail failed", body?.error);
       setDetail(null);
       setLatestAiRun(null);
+      setDetailMeta({ formationSessionId: null, cutoverEnabled: false });
       setDetailError(body?.error?.message ?? `メモの詳細取得に失敗しました(サーバーエラー ${detailRes.status})`);
     }
     if (inferRes.ok) {
@@ -249,8 +264,15 @@ export function InboxClient() {
     if (!silent) setLoadingDetail(false);
   }, []);
 
+  // [B4.2b是正・2026-08-29] react-hooks/set-state-in-effect対応(既存の
+  // pre-existing違反。eslint-config-next 16のcore-web-vitalsに含まれる
+  // ルールで、effect本体からsetStateを同期的に呼ぶ関数を直接呼ぶことを禁止する。
+  // startTransitionで包むことで、Reactへ「この更新は緊急ではない」と伝える
+  // 標準的な回避策(挙動自体は変えない、mount時fetchのタイミングも不変)。
   useEffect(() => {
-    loadList();
+    startTransition(() => {
+      loadList();
+    });
   }, [loadList]);
 
   async function saveTitle() {
@@ -277,7 +299,11 @@ export function InboxClient() {
   }
 
   useEffect(() => {
-    if (selectedId) loadDetail(selectedId);
+    if (selectedId) {
+      startTransition(() => {
+        loadDetail(selectedId);
+      });
+    }
   }, [selectedId, loadDetail]);
 
   // [2026-08-20追加] QUEUED/PROCESSING中は結果を見るために手動リロードが必要だった。
@@ -680,6 +706,14 @@ export function InboxClient() {
                   </div>
                 )}
 
+                {detailMeta.cutoverEnabled && detailMeta.formationSessionId ? (
+                  // [B4.2新設・2026-08-29] Session-backed Captureはこちらへ切り替わる。
+                  // 旧AI候補UI(下のelse節)とは二重表示にならない(受入項目2・3)。
+                  <FormationSessionPanel
+                    sessionId={detailMeta.formationSessionId}
+                    onChanged={() => selectedId && loadDetail(selectedId, true)}
+                  />
+                ) : (
                 <div className="border-t border-line bg-canvas/60 px-5 py-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
@@ -843,6 +877,7 @@ export function InboxClient() {
                   )}
                   {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
                 </div>
+                )}
               </div>
             )}
           </div>
