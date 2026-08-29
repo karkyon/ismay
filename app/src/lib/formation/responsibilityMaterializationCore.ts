@@ -42,6 +42,21 @@ export interface ResponsibilityCreationInput {
   originInferenceId?: string;
   /** 相関ID(HTTPリクエストヘッダ由来)。両呼び出し元ともoptionalで渡す。 */
   correlationId?: string;
+  /** [B4.1新設・B41-01是正] EventLog(AI_CANDIDATE_DECIDED).afterJson.decisionへ
+   *  実際に記録する値。旧routeはACCEPT→"ACCEPTED"・EDIT→"EDITED"の2値を
+   *  `AiInference.decision`へ書くが、この共通コアは従来"ACCEPTED"を決め打ちで
+   *  記録しており、Flag ON時にEDITしても常にEventLogがACCEPTEDになる不整合が
+   *  あった(監査「Gate M1-B4.1」B41-01)。呼び出し元が実際の決定値を明示する。
+   */
+  decisionValue: "ACCEPTED" | "EDITED";
+  /** [B4.1新設・B31-06 embedding同値性] 旧routeがEmbedding生成時に渡している
+   *  actor/counterparty(FN-GR-01 embeddingText)。Formation起源の候補にも
+   *  同じfieldがproposedFieldsに存在するため、呼び出し元がそのまま渡す。
+   *  この共通コア自体はEmbeddingを呼ばない(post-commit best-effort処理は
+   *  呼び出し元の責務のまま)が、戻り値へ含めて呼び出し元のembed呼出しで
+   *  使えるようにする。 */
+  actor?: string | null;
+  counterparty?: string | null;
   provenance:
     | { kind: "AI_INFERENCE"; inferenceId: string }
     | { kind: "FORMATION_CANDIDATE"; sessionId: string; candidateIdentityId: string };
@@ -59,6 +74,11 @@ export interface CreatedResponsibility {
   domainId: string;
   title: string;
   description: string | null;
+  /** [B4.1新設] 呼び出し元がpost-commit embed呼出しでactor/counterpartyを
+   *  渡せるよう、入力をそのまま素通しして返す(このファイル自身はEmbeddingを
+   *  一切呼ばない設計を維持する)。 */
+  actor?: string | null;
+  counterparty?: string | null;
 }
 
 export async function createResponsibilityWithLinks(
@@ -153,7 +173,7 @@ export async function createResponsibilityWithLinks(
       aggregateId: responsibility.id,
       eventType: "AI_CANDIDATE_DECIDED",
       beforeJson: { ...provenanceRef, decision: "PENDING" },
-      afterJson: { ...provenanceRef, decision: "ACCEPTED", responsibilityId: responsibility.id },
+      afterJson: { ...provenanceRef, decision: input.decisionValue, responsibilityId: responsibility.id },
       actorType: "USER",
       actorId: input.actorUserId,
       correlationId: input.correlationId,
@@ -192,5 +212,7 @@ export async function createResponsibilityWithLinks(
     domainId: responsibility.domainId,
     title: responsibility.title,
     description: responsibility.description,
+    actor: input.actor ?? null,
+    counterparty: input.counterparty ?? null,
   };
 }

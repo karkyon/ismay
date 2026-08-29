@@ -220,6 +220,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         actorUserId: auth.user.userId,
         suggestedTags: candidate.suggestedTags,
         correlationId: req.headers.get("x-correlation-id") ?? undefined,
+        // [B4.1是正・B41-01] storedDecisionは"ACCEPTED"|"EDITED"のいずれか
+        // (decisionは"ACCEPT"|"EDIT"のみこの分岐へ来るためDECISION_TO_STOREDの
+        // 値もこの2つに限られる)。EventLog.afterJson.decisionをAiInference.decision
+        // と一致させる。
+        decisionValue: storedDecision as "ACCEPTED" | "EDITED",
+        actor: candidate.actor ?? null,
+        counterparty: candidate.counterparty ?? null,
         provenance: { kind: "AI_INFERENCE", inferenceId: inference.id },
         blockedByResponsibilityIds,
         blocksResponsibilityIds,

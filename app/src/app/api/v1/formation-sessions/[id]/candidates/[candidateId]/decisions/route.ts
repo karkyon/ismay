@@ -73,6 +73,28 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         });
       case "ALREADY_DECIDED":
         return apiError("STATE_TRANSITION_INVALID", `この候補は既に${result.existingDecision}として処理済みです`);
+      case "ALREADY_MATERIALIZED_BY_LEGACY":
+        // [B4.1新設・3.3節] 対応する旧AiInferenceが既にACCEPTED/EDITEDで、
+        // 既存Responsibilityも存在する(=旧経路で既にmaterialize済み)。
+        return apiError(
+          "STATE_TRANSITION_INVALID",
+          `この候補は旧経路(inferenceId=${result.legacyInferenceId})で既に${result.legacyDecision}として処理済みです`,
+          { retryable: false, extra: { legacyInferenceId: result.legacyInferenceId, legacyDecision: result.legacyDecision } },
+        );
+      case "ALREADY_DECIDED_BY_LEGACY":
+        return apiError(
+          "STATE_TRANSITION_INVALID",
+          `この候補は旧経路(inferenceId=${result.legacyInferenceId})で既に${result.legacyDecision}として処理済みです`,
+          { retryable: false, extra: { legacyInferenceId: result.legacyInferenceId, legacyDecision: result.legacyDecision } },
+        );
+      case "LEGACY_PROJECTION_CONFLICT":
+        // [B4.1新設・3.3節] 旧AiInferenceの決定値とResponsibility有無の組合せが
+        // 破損している。想像で修復せず、明示的にconflictとして停止する。
+        return apiError(
+          "STATE_TRANSITION_INVALID",
+          `旧経路データの整合性が確認できません(inferenceId=${result.legacyInferenceId}、decision=${result.legacyDecision}のResponsibilityが見つかりません)`,
+          { retryable: false, extra: { legacyInferenceId: result.legacyInferenceId, legacyDecision: result.legacyDecision } },
+        );
     }
   }
 

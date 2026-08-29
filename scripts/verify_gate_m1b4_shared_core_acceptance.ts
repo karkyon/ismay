@@ -376,6 +376,15 @@ async function main(): Promise<void> {
     // されれば、そのまま活きるようになる設計)が、このGateでは実行到達を証明できない
     // ため「未検証」として正直に記録する。B31-07自体の解消(状態遷移規則の変更)は
     // カルキョンさんの意思決定が必要なため、このGateのコード変更には含めない。
+    // [B4.1是正・2026-08-29] このコメントブロックは執筆当時(Gate M1-B4)、
+    // B31-07未解消のため「1回目materialize後Sessionが常にCONFIRMEDへ進み、
+    // cross-operation BLOCKS解決コードは到達不能」という事実を記録するための
+    // ものだった。Gate M1-B4.1でB31-07自体を解消した(pending>0なら
+    // PARTIALLY_CONFIRMEDを維持する状態遷移へ変更、詳細は
+    // app/src/lib/formation/materialize.ts参照)ため、このシナリオは
+    // 「今は正しく2回目Decision→2回目Materializeが成立し、当時到達不能だった
+    // cross-operation BLOCKS解決コードが実際に到達・機能する」ことを検証する
+    // 形へ更新した(想像ではなく、この直前の実行ログで確認した実挙動に基づく)。
     const fx3 = await makeFixture(db, "s3");
     userIds.push(fx3.userId);
     const cap3 = await makeCapture(fx3, "見積書を送付後に契約書を締結する");
@@ -399,7 +408,6 @@ async function main(): Promise<void> {
       actorUserId: fx3.userId,
     });
     ok("[S3] Decision記録成功(A、1回目)", decA3.ok === true);
-    // [修正] S2と同じ理由。recordCandidateDecision後の最新versionを取り直す。
     const sess3Latest = await db.formationSession.findUniqueOrThrow({ where: { id: sess3.sessionId } });
     const mat3a = await materializeFormationSession({
       sessionId: sess3.sessionId,
@@ -413,6 +421,12 @@ async function main(): Promise<void> {
       mat3a.ok === true && mat3a.items.length === 1,
       JSON.stringify(mat3a),
     );
+    const sess3AfterMatA = await db.formationSession.findUniqueOrThrow({ where: { id: sess3.sessionId } });
+    ok(
+      "[S3・B4.1是正確認] Bがpendingのまま残るため1回目materialize後もSession=PARTIALLY_CONFIRMED(旧: 常にCONFIRMEDだった)",
+      sess3AfterMatA.state === "PARTIALLY_CONFIRMED",
+      sess3AfterMatA.state,
+    );
     if (mat3a.ok) {
       const decB3 = await recordCandidateDecision({
         sessionId: sess3.sessionId,
@@ -423,13 +437,42 @@ async function main(): Promise<void> {
         actorUserId: fx3.userId,
       });
       ok(
-        "[S3・B31-07の具体的裏付け] 1回目materialize後Session.stateが既にCONFIRMEDと" +
-          "なるため、Bの2回目DecisionはINVALID_SESSION_STATEで拒否される" +
-          "(=priorReceiptItemsによるcross-operation BLOCKS解決は現状到達不能)",
-        decB3.ok === false && decB3.error === "INVALID_SESSION_STATE",
+        "[S3・B31-07解消確認] SessionがPARTIALLY_CONFIRMEDのままのため、Bの2回目Decisionが成功する(旧: INVALID_SESSION_STATEで拒否されていた)",
+        decB3.ok === true,
         JSON.stringify(decB3),
       );
+      if (decB3.ok) {
+        const sess3Latest2 = await db.formationSession.findUniqueOrThrow({ where: { id: sess3.sessionId } });
+        const mat3b = await materializeFormationSession({
+          sessionId: sess3.sessionId,
+          workspaceId: fx3.workspaceId,
+          operationId: "op-s3-b",
+          expectedVersion: sess3Latest2.version,
+          actorUserId: fx3.userId,
+        });
+        ok(
+          "[S3・cross-operation BLOCKS解決・当時到達不能だったコードが実際に機能する] 2回目Materialize(Bのみ)が成功する",
+          mat3b.ok === true && mat3b.items.length === 1,
+          JSON.stringify(mat3b),
+        );
+        if (mat3b.ok) {
+          const respA = mat3a.ok ? mat3a.items[0].responsibilityId : null;
+          const respB = mat3b.items[0].responsibilityId;
+          const relations = await db.responsibilityRelation.findMany({
+            where: { fromId: respA ?? undefined, toId: respB, relationType: "BLOCKS" },
+          });
+          ok(
+            "[S3・B4.1新設priorReceiptItemsの実証] 別operationId(過去commit済み)を跨いだBLOCKS Relation(A→B)が1件だけ生成される",
+            relations.length === 1 && relations[0].status === "CONFIRMED",
+            `count=${relations.length}`,
+          );
+        }
+        const sess3Final = await db.formationSession.findUniqueOrThrow({ where: { id: sess3.sessionId } });
+        ok("[S3] 2回目materialize後、pending=0となりSession=CONFIRMED", sess3Final.state === "CONFIRMED", sess3Final.state);
+      }
     }
+
+    // [B4.1新設] B31-07既知事象アサーションはB4.1で不要になった(上記で置き換え済み)。
 
     // --- cleanup用に生成したworkspaceId一覧をcleanup前に記録 ---
     const memberships = await db.workspaceMember.findMany({

@@ -49,15 +49,30 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
     null,
   );
   const workspaceId = membership?.workspaceId ?? null;
+  let resolvedWorkspaceIdOuter: string | null = workspaceId;
 
-  if (workspaceId) {
-    const captures = await step(
+  // [B4.1是正・2026-08-29] workspaceMember行が(過去の途中失敗runで)既に
+  // 削除済みの場合、workspaceId経由だけではこのuserが作成したCaptureを
+  // 見失う(membershipが無い=workspaceId=nullとなり、この関数のCapture探索
+  // ブロック自体がまるごとスキップされていた)。userId(createdById)経由でも
+  // 必ずCaptureを探し、両方の結果を合算する。
+  const capturesByCreator = await step(
+    errors,
+    "capture.findMany(createdById)",
+    () => db.capture.findMany({ where: { createdById: userId }, select: { id: true, workspaceId: true } }),
+    [] as { id: string; workspaceId: string }[],
+  );
+  const resolvedWorkspaceId = workspaceId ?? capturesByCreator[0]?.workspaceId ?? null;
+  resolvedWorkspaceIdOuter = resolvedWorkspaceId;
+
+  if (resolvedWorkspaceId) {
+    const capturesByWorkspace = await step(
       errors,
       "capture.findMany",
-      () => db.capture.findMany({ where: { workspaceId }, select: { id: true } }),
+      () => db.capture.findMany({ where: { workspaceId: resolvedWorkspaceId }, select: { id: true } }),
       [] as { id: string }[],
     );
-    const captureIds = captures.map((c) => c.id);
+    const captureIds = [...new Set([...capturesByWorkspace, ...capturesByCreator].map((c) => c.id))];
 
     const sessions = captureIds.length
       ? await step(
@@ -103,7 +118,7 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
     const responsibilities = await step(
       errors,
       "responsibility.findMany",
-      () => db.responsibility.findMany({ where: { workspaceId, originCaptureId: { in: captureIds } }, select: { id: true } }),
+      () => db.responsibility.findMany({ where: { workspaceId: resolvedWorkspaceId, originCaptureId: { in: captureIds } }, select: { id: true } }),
       [] as { id: string }[],
     );
     const responsibilityIds = responsibilities.map((r) => r.id);
@@ -139,15 +154,22 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
         0,
       );
     }
-    await step(errors, "responsibility.deleteMany", () => db.responsibility.deleteMany({ where: { workspaceId, originCaptureId: { in: captureIds } } }), { count: 0 });
+    await step(errors, "responsibility.deleteMany", () => db.responsibility.deleteMany({ where: { workspaceId: resolvedWorkspaceId, originCaptureId: { in: captureIds } } }), { count: 0 });
     // [B4新設・2026-08-29] Tag自動付与(B31-06是正)に伴う対応。ResponsibilityTagは
     // onDelete: Cascadeのため上のresponsibility.deleteManyで自動的に消えるが、
     // Tag行自体(workspaceId_name一意)はcascade対象外のため明示的に消す
     // (残すとtest再実行時にupsertで再利用されるだけで実害は無いが、
     // 「実行したゴミファイルはちゃんとかたずけろ」の方針を徹底する)。
-    await step(errors, "tag.deleteMany", () => db.tag.deleteMany({ where: { workspaceId } }), { count: 0 });
+    await step(errors, "tag.deleteMany", () => db.tag.deleteMany({ where: { workspaceId: resolvedWorkspaceId } }), { count: 0 });
     await step(errors, "eventLog.deleteMany(Capture)", () => db.eventLog.deleteMany({ where: { aggregateId: { in: captureIds } } }), { count: 0 });
     await step(errors, "outboxEvent.deleteMany(Capture)", () => db.outboxEvent.deleteMany({ where: { aggregateId: { in: captureIds } } }), { count: 0 });
+    // [B4.1新設・2026-08-29] AiInference.aiRunIdがAiRunを参照するため、
+    // aiInference→aiRunの順でcapture.deleteManyより先に削除する
+    // (このコメントブロックの2つ上のGate M1-B4.1で初めて必要になった対応。
+    // 前回の修正時、GitHub未push状態のこの箇所を素のHEADから再構成した際に
+    // 誤って失われていたため、ここで再度・確実に追加する)。
+    await step(errors, "aiInference.deleteMany", () => db.aiInference.deleteMany({ where: { captureId: { in: captureIds } } }), { count: 0 });
+    await step(errors, "aiRun.deleteMany", () => db.aiRun.deleteMany({ where: { captureId: { in: captureIds } } }), { count: 0 });
     await step(errors, "capture.deleteMany", () => db.capture.deleteMany({ where: { id: { in: captureIds } } }), {
       count: 0,
     });
@@ -156,14 +178,14 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
   await step(errors, "workspaceMember.deleteMany", () => db.workspaceMember.deleteMany({ where: { userId } }), {
     count: 0,
   });
-  if (workspaceId) {
-    await step(errors, "workspace.deleteMany", () => db.workspace.deleteMany({ where: { id: workspaceId } }), {
+  if (resolvedWorkspaceIdOuter) {
+    await step(errors, "workspace.deleteMany", () => db.workspace.deleteMany({ where: { id: resolvedWorkspaceIdOuter } }), {
       count: 0,
     });
   }
   await step(errors, "user.deleteMany", () => db.user.deleteMany({ where: { id: userId } }), { count: 0 });
 
-  return { userId, workspaceId, errors };
+  return { userId, workspaceId: resolvedWorkspaceIdOuter, errors };
 }
 
 /**

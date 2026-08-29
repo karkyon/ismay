@@ -5,6 +5,7 @@ import { debugServer } from "@/lib/debugServer";
 import { ResponsibilityCandidateSchema } from "@/lib/ai/schema";
 import { embedAndStoreResponsibility } from "@/lib/ai/relatedResponsibilities";
 import { createResponsibilityWithLinks } from "@/lib/formation/responsibilityMaterializationCore";
+import { resolveLegacyProjectionMap } from "@/lib/formation/legacyProjectionResolver";
 import {
   resolveFormationSessionTransition,
   isValidCandidateDecisionEventValue,
@@ -113,7 +114,17 @@ export type RecordCandidateDecisionResult =
   | { ok: false; error: "REVISION_CONFLICT"; latestRevision: number }
   | { ok: false; error: "ALREADY_DECIDED"; existingDecision: string }
   | { ok: false; error: "INVALID_SESSION_STATE"; sessionState: string }
-  | { ok: false; error: "INVALID_DECISION_VALUE" };
+  | { ok: false; error: "INVALID_DECISION_VALUE" }
+  /** [B4.1新設・3.3節] 対応する旧AiInferenceが既にACCEPTED/EDITEDで、
+   *  既存Responsibilityも存在する(=旧経路で既にmaterialize済み)。新しい
+   *  Decision Event/Responsibilityは作らない。 */
+  | { ok: false; error: "ALREADY_MATERIALIZED_BY_LEGACY"; legacyInferenceId: string; legacyDecision: string }
+  /** [B4.1新設・3.3節] 対応する旧AiInferenceがREJECTED/HELD。意味を推測して
+   *  Formation decisionへ自動変換しない。 */
+  | { ok: false; error: "ALREADY_DECIDED_BY_LEGACY"; legacyInferenceId: string; legacyDecision: string }
+  /** [B4.1新設・3.3節] 旧AiInferenceの決定値とResponsibility有無の組合せが
+   *  破損している(例: ACCEPTEDなのにResponsibilityが無い)。勝手に修復しない。 */
+  | { ok: false; error: "LEGACY_PROJECTION_CONFLICT"; legacyInferenceId: string; legacyDecision: string };
 
 export interface MaterializeFormationSessionParams {
   sessionId: string;
@@ -287,6 +298,41 @@ export async function recordCandidateDecision(
         return { ok: false, error: "REVISION_CONFLICT", latestRevision: identity.currentRevision } as const;
       }
 
+      // [B4.1新設・3.3節] 旧新横断guard。Session行lock配下(=このtx)で、対応する
+      // 旧AiInferenceの状態を確認する。legacy側が既に確定していれば、Formation側の
+      // 新しいDecision Event/Responsibilityは作らない(旧新二重生成防止、B41-02)。
+      const legacyMap = await resolveLegacyProjectionMap(tx, { sessionId, workspaceId });
+      const legacyEntry = legacyMap?.byCandidateKey.get(identity.candidateKey) ?? null;
+      if (legacyEntry) {
+        if (legacyEntry.decision === "ACCEPTED" || legacyEntry.decision === "EDITED") {
+          if (legacyEntry.responsibilityId) {
+            return {
+              ok: false,
+              error: "ALREADY_MATERIALIZED_BY_LEGACY",
+              legacyInferenceId: legacyEntry.inferenceId,
+              legacyDecision: legacyEntry.decision,
+            } as const;
+          }
+          // ACCEPTED/EDITEDなのにResponsibilityが見つからない = 破損。想像で
+          // 修復せず、conflictとして停止する(3.3節「勝手に修復しない」)。
+          return {
+            ok: false,
+            error: "LEGACY_PROJECTION_CONFLICT",
+            legacyInferenceId: legacyEntry.inferenceId,
+            legacyDecision: legacyEntry.decision,
+          } as const;
+        }
+        if (legacyEntry.decision === "REJECTED" || legacyEntry.decision === "HELD") {
+          return {
+            ok: false,
+            error: "ALREADY_DECIDED_BY_LEGACY",
+            legacyInferenceId: legacyEntry.inferenceId,
+            legacyDecision: legacyEntry.decision,
+          } as const;
+        }
+        // legacyEntry.decision === "PENDING": Formation側の決定を許可する(3.3節)。
+      }
+
       // Session行lock配下で直列化されているため、このSELECTは以後race無く
       // 信頼できる(以前はここが「事前SELECTのみ」でDB制約が無かった、B31-04b)。
       const existingDecision = await tx.formationCandidateDecisionEvent.findFirst({
@@ -407,13 +453,16 @@ function toReplayResult(receipt: ReceiptForReplay): MaterializeFormationSessionR
   };
 }
 
-/** [B3.2新設・B32-01] commit後にembedするResponsibilityの最小入力。 */
+/** [B3.2新設・B32-01] commit後にembedするResponsibilityの最小入力。
+ *  [B4.1新設・B31-06] actor/counterpartyを追加(旧route embedding同値性)。 */
 export interface EmbedResponsibilityInput {
   responsibilityId: string;
   workspaceId: string;
   domainId: string;
   title: string;
   description?: string | null;
+  actor?: string | null;
+  counterparty?: string | null;
 }
 
 export interface MaterializationPostCommitDeps {
@@ -441,6 +490,11 @@ export async function materializeFormationSession(
   // 対象だったかをこの値から再確認する(tx callbackのlocal変数`acceptedTargets`は
   // catchブロックから参照できないため)。
   let attemptedCandidateIds: string[] = [];
+  // [B4.1新設・B31-06 embedding同値性] post-commit embed呼出しでactor/counterparty
+  // を渡すため、tx内で解決した値をcandidateId単位で外側scopeへ持ち出す
+  // (txコールバックの戻り値はMaterializeFormationSessionResultに固定されている
+  // ため、attemptedCandidateIdsと同じ「外側let変数へ書き込む」方式を踏襲する)。
+  const actorCounterpartyByCandidateId = new Map<string, { actor: string | null; counterparty: string | null }>();
   const requestHash = computeMaterializeRequestHash({ sessionId, workspaceId, expectedVersion });
 
   // 冪等性チェック(DOC-03 6章2「operationIdとrequestHashの冪等性を検証。
@@ -517,6 +571,19 @@ export async function materializeFormationSession(
         alreadyMaterializedRows.map((i: { candidateId: string }) => i.candidateId),
       );
 
+      // [B4.1新設・3.4節 Partial Materialize] pending count(=Formation
+      // Decision Eventが1件も無い候補数)を、この時点のDB実態から再計算する。
+      // recordCandidateDecisionの「acceptedとpending混在」判定と同じ定義
+      // (FormationCandidateDecisionEventの有無)を踏襲する。
+      const allDecisionRows = await tx.formationCandidateDecisionEvent.findMany({
+        where: { workspaceId, candidateId: { in: identities.map((c: { id: string }) => c.id) } },
+        select: { candidateId: true },
+        distinct: ["candidateId"],
+      });
+      const decidedCandidateIds = new Set(allDecisionRows.map((d: { candidateId: string }) => d.candidateId));
+      const pendingCount = identities.filter((c: { id: string }) => !decidedCandidateIds.has(c.id)).length;
+      const acceptedMaterializedCountBefore = alreadyMaterializedCandidateIds.size;
+
       const acceptedTargets: { identityId: string; candidateKey: string; decisionRevisionId: string }[] = [];
       for (const identity of identities) {
         if (alreadyMaterializedCandidateIds.has(identity.id)) continue;
@@ -533,7 +600,11 @@ export async function materializeFormationSession(
         }
       }
 
-      if (acceptedTargets.length === 0) {
+      // [B4.1是正・3.4節] 新規Acceptedが0件でも、pending=0かつ過去materialized>0
+      // なら「明示finalize」として0 item Receiptを許可する(旧仕様は常に
+      // NO_ACCEPTED_CANDIDATESで拒否しており、B31-07の一因だった)。
+      const isExplicitZeroItemFinalize = acceptedTargets.length === 0 && pendingCount === 0 && acceptedMaterializedCountBefore > 0;
+      if (acceptedTargets.length === 0 && !isExplicitZeroItemFinalize) {
         return { ok: false, error: "NO_ACCEPTED_CANDIDATES" } as const;
       }
       // [B3.2新設・B32-03] 以降でP2002が起きた場合にcatch側で使うため、対象
@@ -614,6 +685,11 @@ export async function materializeFormationSession(
           targetAt: targetAt ? new Date(targetAt) : null,
           actorUserId,
           suggestedTags: candidate.suggestedTags,
+          // [B4.1是正・B41-01] Formation起源はrecordCandidateDecisionで
+          // ACCEPTEDの候補だけがacceptedTargetsへ入るため、常にACCEPTED。
+          decisionValue: "ACCEPTED",
+          actor: candidate.actor ?? null,
+          counterparty: candidate.counterparty ?? null,
           provenance: { kind: "FORMATION_CANDIDATE", sessionId, candidateIdentityId: target.identityId },
           blockedByResponsibilityIds,
           // 逆方向(自分が後発ブロック元になるケース)は、下の逐次スキャンで
@@ -645,6 +721,10 @@ export async function materializeFormationSession(
         linkInfoByPayloadCandidateId.set(candidate.candidateId, {
           responsibilityId: created.id,
           blockedByCandidateIds: candidate.blockedByCandidateIds,
+        });
+        actorCounterpartyByCandidateId.set(target.identityId, {
+          actor: candidate.actor ?? null,
+          counterparty: candidate.counterparty ?? null,
         });
 
         // [B3.1] ここでのINSERT失敗(P2002、materialization_receipt_items_
@@ -691,16 +771,53 @@ export async function materializeFormationSession(
         },
       });
 
-      // REVIEW_READY/PARTIALLY_CONFIRMED --commit--> CONFIRMED(DOC-03 3章)。
-      // atomicity Assessmentは未実装のため常に「解決済み」として扱う
+      // [B4.1是正・3.4節 Partial Materialize] pendingCountは新規決定を作らない
+      // materializeでは変化しない(recordCandidateDecisionだけがDecision Eventを
+      // 作る)。処理後にpending>0なら、SessionはPARTIALLY_CONFIRMEDを維持する
+      // (MATERIALIZATION_COMMITTEDは記録するがSESSION_CONFIRMEDは記録しない)。
+      // pending=0なら、今回または過去のACCEPTED実績(items.length>0または
+      // acceptedMaterializedCountBefore>0)をもってCONFIRMEDへ進める。
+      // 全候補が非ACCEPTEDでmaterialized実績も無い場合はこのtx冒頭の
+      // NO_ACCEPTED_CANDIDATESで既に弾かれているため、ここへは到達しない。
+      let sessionState: string;
+      if (pendingCount > 0) {
+        if (session.state === "REVIEW_READY") {
+          const toPartial = resolveFormationSessionTransition("REVIEW_READY", "PARTIAL_DECISIONS");
+          if (!toPartial) {
+            throw new Error("coreTypes不整合: REVIEW_READY--PARTIAL_DECISIONS-->の遷移が定義されていません");
+          }
+          await tx.formationSession.update({
+            where: { id: sessionId },
+            data: { state: toPartial, version: { increment: 1 } },
+          });
+          sessionState = toPartial;
+        } else {
+          // 既にPARTIALLY_CONFIRMED。stateは変えないがversionは他の更新操作と
+          // 同様に前進させる(optimistic lock一貫性のため)。
+          await tx.formationSession.update({
+            where: { id: sessionId },
+            data: { version: { increment: 1 } },
+          });
+          sessionState = session.state;
+        }
+        debugServer.event("formation/materialize", "MATERIALIZATION_COMMITTED", {
+          sessionId,
+          operationId,
+          receiptId: receipt.id,
+          itemCount: items.length,
+          sessionState,
+          pendingCount,
+        });
+        return { ok: true, receiptId: receipt.id, operationId, items, replay: false } as const;
+      }
+
+      // pendingCount === 0: REVIEW_READY/PARTIALLY_CONFIRMED --commit--> CONFIRMED
+      // (DOC-03 3章)。atomicity Assessmentは未実装のため常に「解決済み」として扱う
       // (このファイル冒頭コメントのスコープ注記を参照)。
       const toConfirmed = resolveFormationSessionTransition(session.state, "COMMIT");
       if (!toConfirmed) {
         throw new Error("coreTypes不整合: " + session.state + "--commit-->の遷移が定義されていません");
       }
-      // [B3.1是正] Session行はこのtransaction冒頭でFOR UPDATE済みのため、
-      // ここでのupdateは単純なwhere:{id}で安全(CAS updateMany+count確認は
-      // もう不要。lockが同じ保証をより強く与える)。
       await tx.formationSession.update({
         where: { id: sessionId },
         data: { state: toConfirmed, version: { increment: 1 } },
@@ -722,6 +839,8 @@ export async function materializeFormationSession(
         operationId,
         receiptId: receipt.id,
         itemCount: items.length,
+        sessionState: toConfirmed,
+        pendingCount,
       });
 
       return { ok: true, receiptId: receipt.id, operationId, items, replay: false } as const;
@@ -790,12 +909,18 @@ export async function materializeFormationSession(
         select: { id: true, workspaceId: true, domainId: true, title: true, description: true },
       });
       if (!responsibility) continue;
+      // [B4.1是正・B31-06 embedding同値性] 旧routeはEmbedding生成時にactor/
+      // counterpartyを渡すが、Formation側は従来渡していなかった(監査
+      // 「Gate M1-B4.1」項目3.1.5)。tx内で解決済みの値をcandidateId経由で渡す。
+      const actorCounterparty = actorCounterpartyByCandidateId.get(item.candidateId);
       await deps.embedAndStoreResponsibility({
         responsibilityId: responsibility.id,
         workspaceId: responsibility.workspaceId,
         domainId: responsibility.domainId,
         title: responsibility.title,
         description: responsibility.description,
+        actor: actorCounterparty?.actor ?? null,
+        counterparty: actorCounterparty?.counterparty ?? null,
       }).catch((err: unknown) => {
         debugServer.error("formation/materialize", "embedAndStoreResponsibility例外", err);
       });
