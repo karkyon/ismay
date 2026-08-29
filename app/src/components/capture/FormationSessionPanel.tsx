@@ -175,6 +175,10 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
       (c) => selectedIds.has(c.identityId) && !c.formationDecision && c.currentRevision,
     );
     if (targets.length === 0) return;
+    // [B4.3追加是正・誤操作防止] 既存`ResponsibilitiesClient.tsx`の一括操作と同じ
+    // 確認ダイアログパターンをそのまま踏襲する(想像で新しいUIパターンを作らない)。
+    const label = decision === "ACCEPTED" ? "採用" : "却下";
+    if (!confirm(`選択した${targets.length}件を「${label}」します。よろしいですか?`)) return;
     setBulkBusy(true);
     setError("");
     debugLog.event("FormationSessionPanel", "bulkDecide", { count: targets.length, decision });
