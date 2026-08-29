@@ -3,8 +3,8 @@ import { db } from "@/lib/db";
 import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import { ResponsibilityCandidateSchema } from "@/lib/ai/schema";
-import { initialStatusFor } from "@/lib/responsibility";
 import { embedAndStoreResponsibility } from "@/lib/ai/relatedResponsibilities";
+import { createResponsibilityWithLinks } from "@/lib/formation/responsibilityMaterializationCore";
 import {
   resolveFormationSessionTransition,
   isValidCandidateDecisionEventValue,
@@ -540,6 +540,40 @@ export async function materializeFormationSession(
       // candidateId一覧を外側scopeへ記録しておく。
       attemptedCandidateIds = acceptedTargets.map((t) => t.identityId);
 
+      // [B4新設・B31-06] BLOCKS Relation解決のため、「payload上のcandidateId(AI生成の
+      // 論理ID) → {今回/過去に作成済みのResponsibility.id, その候補自身の
+      // blockedByCandidateIds}」を集約するmap(旧routeの「同一Capture内の他ACCEPTED/
+      // EDITED候補」探索を、Session範囲へ翻訳したもの)。DBの物理IDである
+      // identity.id/target.identityIdとは別物であることに注意。
+      interface CandidateLinkInfo {
+        responsibilityId: string;
+        blockedByCandidateIds: string[];
+      }
+      const linkInfoByPayloadCandidateId = new Map<string, CandidateLinkInfo>();
+
+      // 既にmaterialize済み(=別operationIdの過去commitで既にResponsibility化済み)の
+      // Session内候補も、BLOCKS解決の相手候補になり得るため事前に引いておく。
+      const priorReceiptItems = await tx.materializationReceiptItem.findMany({
+        where: { workspaceId, candidateId: { in: identities.map((c: { id: string }) => c.id) } },
+        select: { candidateId: true, candidateRevisionId: true, responsibilityId: true },
+      });
+      if (priorReceiptItems.length > 0) {
+        const priorRevisions = await tx.formationCandidateRevision.findMany({
+          where: { id: { in: priorReceiptItems.map((i) => i.candidateRevisionId) }, workspaceId },
+        });
+        const priorRevisionById = new Map(priorRevisions.map((r) => [r.id, r]));
+        for (const priorItem of priorReceiptItems) {
+          const priorRevision = priorRevisionById.get(priorItem.candidateRevisionId);
+          if (!priorRevision) continue;
+          const priorParsed = ResponsibilityCandidateSchema.safeParse(priorRevision.proposedFields);
+          if (!priorParsed.success) continue;
+          linkInfoByPayloadCandidateId.set(priorParsed.data.candidateId, {
+            responsibilityId: priorItem.responsibilityId,
+            blockedByCandidateIds: priorParsed.data.blockedByCandidateIds,
+          });
+        }
+      }
+
       const items: MaterializedItem[] = [];
       for (const target of acceptedTargets) {
         // 採否対象Revisionを固定(決定時点のrevisionId、currentRevisionではない。
@@ -559,52 +593,58 @@ export async function materializeFormationSession(
         const hardDeadlineAt = candidate.dateMentions.find((d) => d.meaning === "HARD_DEADLINE")?.normalizedAt;
         const targetAt = candidate.dateMentions.find((d) => d.meaning === "SOFT_TARGET")?.normalizedAt;
 
-        const responsibility = await tx.responsibility.create({
-          data: {
-            workspaceId,
-            domainId: session.domainId,
-            originCaptureId: session.captureId,
-            type: revision.type,
-            title: revision.title,
-            description: revision.description ?? null,
-            status: initialStatusFor(revision.type),
-            importance: candidate.importance ?? null,
-            confidence: revision.confidence,
-            sourceKind: "AI",
-            hardDeadlineAt: hardDeadlineAt ? new Date(hardDeadlineAt) : null,
-            targetAt: targetAt ? new Date(targetAt) : null,
-            createdById: actorUserId,
-            updatedById: actorUserId,
-          },
+        // [B4新設・B31-06] 順方向: この候補がblockedByCandidateIdsとして指定した
+        // 相手が、既に(今回のtx内 or 過去のcommitで)Responsibility化済みであれば
+        // そのIDを集める。旧routeの「同一Capture内の他ACCEPTED/EDITED候補」探索を
+        // 「同一FormationSession内の他候補」探索へ翻訳したもの。
+        const blockedByResponsibilityIds = candidate.blockedByCandidateIds
+          .map((cid) => linkInfoByPayloadCandidateId.get(cid)?.responsibilityId)
+          .filter((v): v is string => typeof v === "string");
+
+        const created = await createResponsibilityWithLinks(tx, {
+          workspaceId,
+          domainId: session.domainId,
+          originCaptureId: session.captureId,
+          type: revision.type,
+          title: revision.title,
+          description: revision.description ?? null,
+          importance: candidate.importance ?? null,
+          confidence: revision.confidence,
+          hardDeadlineAt: hardDeadlineAt ? new Date(hardDeadlineAt) : null,
+          targetAt: targetAt ? new Date(targetAt) : null,
+          actorUserId,
+          suggestedTags: candidate.suggestedTags,
+          provenance: { kind: "FORMATION_CANDIDATE", sessionId, candidateIdentityId: target.identityId },
+          blockedByResponsibilityIds,
+          // 逆方向(自分が後発ブロック元になるケース)は、下の逐次スキャンで
+          // まとめて解決する(旧routeの「逆方向: 既に採用済みの他候補が...」
+          // ループと同義。createResponsibilityWithLinks自体はこの時点で自分より
+          // 後に処理される候補の存在を知り得ないため、ここでは常に空で呼ぶ)。
+          blocksResponsibilityIds: [],
         });
 
-        await tx.eventLog.create({
-          data: {
-            aggregateType: "Responsibility",
-            aggregateId: responsibility.id,
-            eventType: "AI_CANDIDATE_DECIDED",
-            beforeJson: { candidateId: target.identityId, decision: "PENDING" },
-            afterJson: { candidateId: target.identityId, decision: "ACCEPTED", responsibilityId: responsibility.id },
-            actorType: "USER",
-            actorId: actorUserId,
-          },
-        });
-
-        await tx.outboxEvent.create({
-          data: {
-            eventName: "ResponsibilityCreated.v1",
-            eventVersion: "1",
-            aggregateId: responsibility.id,
-            aggregateVersion: responsibility.version,
-            payload: {
-              responsibilityId: responsibility.id,
-              workspaceId,
-              domainId: responsibility.domainId,
-              type: responsibility.type,
-              fromFormationSessionId: sessionId,
-              fromCandidateId: target.identityId,
+        // [B4新設・B31-06] 逆方向: 既にResponsibility化済みの他候補(今回のtx内で
+        // 先に処理したものを含む)が、この候補(今作成したResponsibility)を
+        // blockedByCandidateIdsに含めていた場合、ここで解決する。
+        for (const [otherPayloadId, otherInfo] of linkInfoByPayloadCandidateId) {
+          if (otherPayloadId === candidate.candidateId) continue;
+          if (!otherInfo.blockedByCandidateIds.includes(candidate.candidateId)) continue;
+          await tx.responsibilityRelation.create({
+            data: {
+              fromId: created.id,
+              toId: otherInfo.responsibilityId,
+              relationType: "BLOCKS",
+              status: "CONFIRMED",
+              sourceKind: "AI",
+              confirmedById: actorUserId,
+              confirmedAt: new Date(),
             },
-          },
+          });
+        }
+
+        linkInfoByPayloadCandidateId.set(candidate.candidateId, {
+          responsibilityId: created.id,
+          blockedByCandidateIds: candidate.blockedByCandidateIds,
         });
 
         // [B3.1] ここでのINSERT失敗(P2002、materialization_receipt_items_
@@ -615,7 +655,7 @@ export async function materializeFormationSession(
         items.push({
           candidateId: target.identityId,
           candidateRevisionId: revision.id,
-          responsibilityId: responsibility.id,
+          responsibilityId: created.id,
         });
       }
 

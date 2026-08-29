@@ -109,6 +109,21 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
     const responsibilityIds = responsibilities.map((r) => r.id);
 
     if (responsibilityIds.length > 0) {
+      // [B4新設・2026-08-29] materialize.ts側にもTag自動付与・BLOCKS Relation解決
+      // (B31-06是正)が追加されたことに伴う対応。ResponsibilityRelationは
+      // fromId/toIdともonDelete指定なし(デフォルトRESTRICT)のため、これを先に
+      // 消さないとresponsibility.deleteMany自体がFK違反で失敗し、cleanup全体が
+      // 中断してtest用行が残ってしまう(実際にこのGateでBLOCKS Relationを
+      // 初めてmaterialize.ts経由で作るようになって顕在化した)。
+      await step(
+        errors,
+        "responsibilityRelation.deleteMany",
+        () =>
+          db.responsibilityRelation.deleteMany({
+            where: { OR: [{ fromId: { in: responsibilityIds } }, { toId: { in: responsibilityIds } }] },
+          }),
+        { count: 0 },
+      );
       await step(errors, "eventLog.deleteMany(Responsibility)", () => db.eventLog.deleteMany({ where: { aggregateType: "Responsibility", aggregateId: { in: responsibilityIds } } }), { count: 0 });
       await step(errors, "outboxEvent.deleteMany(Responsibility)", () => db.outboxEvent.deleteMany({ where: { aggregateId: { in: responsibilityIds } } }), { count: 0 });
       // [2026-08-28修正・実障害の踏襲] responsibility_embeddings.responsibility_idは
@@ -125,6 +140,12 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
       );
     }
     await step(errors, "responsibility.deleteMany", () => db.responsibility.deleteMany({ where: { workspaceId, originCaptureId: { in: captureIds } } }), { count: 0 });
+    // [B4新設・2026-08-29] Tag自動付与(B31-06是正)に伴う対応。ResponsibilityTagは
+    // onDelete: Cascadeのため上のresponsibility.deleteManyで自動的に消えるが、
+    // Tag行自体(workspaceId_name一意)はcascade対象外のため明示的に消す
+    // (残すとtest再実行時にupsertで再利用されるだけで実害は無いが、
+    // 「実行したゴミファイルはちゃんとかたずけろ」の方針を徹底する)。
+    await step(errors, "tag.deleteMany", () => db.tag.deleteMany({ where: { workspaceId } }), { count: 0 });
     await step(errors, "eventLog.deleteMany(Capture)", () => db.eventLog.deleteMany({ where: { aggregateId: { in: captureIds } } }), { count: 0 });
     await step(errors, "outboxEvent.deleteMany(Capture)", () => db.outboxEvent.deleteMany({ where: { aggregateId: { in: captureIds } } }), { count: 0 });
     await step(errors, "capture.deleteMany", () => db.capture.deleteMany({ where: { id: { in: captureIds } } }), {

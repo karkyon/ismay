@@ -9,6 +9,21 @@ import { apiOk, apiError } from "@/lib/auth/response";
 import { RESPONSIBILITY_TYPES, initialStatusFor } from "@/lib/responsibility";
 import { ResponsibilityCandidateSchema } from "@/lib/ai/schema";
 import { embedAndStoreResponsibility, findRelatedResponsibilities } from "@/lib/ai/relatedResponsibilities";
+import { createResponsibilityWithLinks } from "@/lib/formation/responsibilityMaterializationCore";
+
+/**
+ * [B4新設・CHG-011 Feature Flag委譲・2026-08-29]
+ * 監査「Gate M1-B4 次工程指示」B31-05/B31-06是正(案B・カルキョンさん承認)。
+ * `true`の場合のみ、下のResponsibility作成+Tag付与+BLOCKS解決+EventLog+Outboxを
+ * `@/lib/formation/responsibilityMaterializationCore`の共通コア関数へ委譲する
+ * (新Formation Materialize(`materialize.ts`)と実装を1本化)。`false`または未設定
+ * (デフォルト)の場合は、このファイル本来の既存inline実装をそのまま使う
+ * (blast radius最小化方針。ロールバックは環境変数変更のみで即時可能、再deploy不要)。
+ * 委譲後もこのroute自身が`db.$transaction`でDecision記録とResponsibility作成を
+ * 同一transactionに包む点は変わらないため、非atomicity(B31-05)は生じない
+ * (共通コア関数自体はtransactionを開始しない設計、同ファイルのコメント参照)。
+ */
+const CHG011_SHARED_CORE_ENABLED = process.env.FEATURE_CHG011_SHARED_CORE === "true";
 
 /**
  * API-AI-01: POST /inferences/{id}/decision 候補採否(FN-AI-01/UI-04)
@@ -154,67 +169,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       throw new Error("ISMAY_VERSION_CONFLICT");
     }
 
-    const responsibility = await tx.responsibility.create({
-      data: {
-        workspaceId,
-        domainId: inference.capture.domainId ?? defaultDomainId,
-        originCaptureId: inference.captureId,
-        originInferenceId: inference.id,
-        type: finalType,
-        title: finalTitle,
-        description: finalDescription ?? null,
-        status: initialStatusFor(finalType),
-        importance: finalImportance ?? null,
-        confidence: candidate.confidence,
-        sourceKind: "AI",
-        hardDeadlineAt: finalHardDeadlineAt ? new Date(finalHardDeadlineAt) : null,
-        targetAt: finalTargetAt ? new Date(finalTargetAt) : null,
-        startAfterAt: finalStartAfterAt ? new Date(finalStartAfterAt) : null,
-        createdById: auth.user.userId,
-        updatedById: auth.user.userId,
-      },
-    });
-    debugServer.state("POST /inferences/[id]/decision", "AiInference.decision", {
-      inferenceId: inference.id,
-      decision: storedDecision,
-    });
+    let responsibility: { id: string; domainId: string; title: string; description: string | null };
 
-    // [2026-08-21追加] カルキョンさんの指摘「文字起こし文章の内容によりカテゴリやタグ付けが
-    // 関連付けられるようになっているのか」に対応。AIが提案したタグ(suggestedTags)を、
-    // 既存タグは再利用・未登録のタグは自動作成のうえ、採用したResponsibilityへ付与する。
-    if (candidate.suggestedTags.length > 0) {
-      for (const tagName of candidate.suggestedTags.slice(0, 3)) {
-        const trimmed = tagName.trim();
-        if (!trimmed) continue;
-        const tag = await tx.tag.upsert({
-          where: { workspaceId_name: { workspaceId, name: trimmed } },
-          create: { workspaceId, name: trimmed },
-          update: {},
-          select: { id: true },
-        });
-        await tx.responsibilityTag.create({
-          data: { responsibilityId: responsibility.id, tagId: tag.id },
-        });
-      }
-      debugServer.event("POST /inferences/[id]/decision", "AI提案タグを自動付与", {
-        responsibilityId: responsibility.id,
-        tags: candidate.suggestedTags,
-      });
-    }
-
-    // [2026-08-20追加] カルキョンさんの指示「候補間の親子・依存関係を自動検出しろ」に対応。
-    // 同一Capture内の他候補で、AIがblockedByCandidateIdsとして関連付けたものが
-    // 既に採用済み(Responsibility化済み)であれば、ここでResponsibilityRelationを
-    // 自動生成する。他Captureをまたぐ意味的関連付け(FN-GR-01)はスコープ外。
-    if (candidate.blockedByCandidateIds.length > 0) {
+    if (CHG011_SHARED_CORE_ENABLED) {
+      // [B4新設・CHG-011有効時] Responsibility作成+Tag付与+BLOCKS解決+EventLog+Outboxを
+      // 共通コア関数へ委譲する。BLOCKS解決の相手探索(同一Capture内のACCEPTED/EDITED
+      // 候補)自体はこのroute固有のデータモデル(AiInference)に依存するため、
+      // ここで解決してから共通コアへ「解決済みの相手Responsibility ID一覧」だけを渡す
+      // (共通コア側はAiInferenceを一切知らない、というB31-05/06是正時の設計方針)。
       const siblingInferences = await tx.aiInference.findMany({
-        where: {
-          captureId: inference.captureId,
-          decision: { in: ["ACCEPTED", "EDITED"] },
-          id: { not: inference.id },
-        },
+        where: { captureId: inference.captureId, decision: { in: ["ACCEPTED", "EDITED"] }, id: { not: inference.id } },
         select: { id: true, payload: true },
       });
+      const blockedByResponsibilityIds: string[] = [];
       for (const sibling of siblingInferences) {
         const siblingCandidate = ResponsibilityCandidateSchema.safeParse(sibling.payload);
         if (!siblingCandidate.success) continue;
@@ -223,11 +190,153 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           where: { originInferenceId: sibling.id },
           select: { id: true },
         });
-        if (!blockingResponsibility) continue;
+        if (blockingResponsibility) blockedByResponsibilityIds.push(blockingResponsibility.id);
+      }
+      const blocksResponsibilityIds: string[] = [];
+      for (const sibling of siblingInferences) {
+        const siblingCandidate = ResponsibilityCandidateSchema.safeParse(sibling.payload);
+        if (!siblingCandidate.success) continue;
+        if (!siblingCandidate.data.blockedByCandidateIds.includes(candidate.candidateId)) continue;
+        const dependentResponsibility = await tx.responsibility.findFirst({
+          where: { originInferenceId: sibling.id },
+          select: { id: true },
+        });
+        if (dependentResponsibility) blocksResponsibilityIds.push(dependentResponsibility.id);
+      }
+
+      responsibility = await createResponsibilityWithLinks(tx, {
+        workspaceId,
+        domainId: inference.capture.domainId ?? defaultDomainId,
+        originCaptureId: inference.captureId,
+        originInferenceId: inference.id,
+        type: finalType,
+        title: finalTitle,
+        description: finalDescription ?? null,
+        importance: finalImportance ?? null,
+        confidence: candidate.confidence,
+        hardDeadlineAt: finalHardDeadlineAt ? new Date(finalHardDeadlineAt) : null,
+        targetAt: finalTargetAt ? new Date(finalTargetAt) : null,
+        startAfterAt: finalStartAfterAt ? new Date(finalStartAfterAt) : null,
+        actorUserId: auth.user.userId,
+        suggestedTags: candidate.suggestedTags,
+        correlationId: req.headers.get("x-correlation-id") ?? undefined,
+        provenance: { kind: "AI_INFERENCE", inferenceId: inference.id },
+        blockedByResponsibilityIds,
+        blocksResponsibilityIds,
+      });
+      debugServer.event("POST /inferences/[id]/decision", "CHG011_SHARED_CORE_DELEGATED", {
+        responsibilityId: responsibility.id,
+      });
+    } else {
+      // [既存inline実装・変更なし] CHG-011未有効時は本来の実装をそのまま使う。
+      const created = await tx.responsibility.create({
+        data: {
+          workspaceId,
+          domainId: inference.capture.domainId ?? defaultDomainId,
+          originCaptureId: inference.captureId,
+          originInferenceId: inference.id,
+          type: finalType,
+          title: finalTitle,
+          description: finalDescription ?? null,
+          status: initialStatusFor(finalType),
+          importance: finalImportance ?? null,
+          confidence: candidate.confidence,
+          sourceKind: "AI",
+          hardDeadlineAt: finalHardDeadlineAt ? new Date(finalHardDeadlineAt) : null,
+          targetAt: finalTargetAt ? new Date(finalTargetAt) : null,
+          startAfterAt: finalStartAfterAt ? new Date(finalStartAfterAt) : null,
+          createdById: auth.user.userId,
+          updatedById: auth.user.userId,
+        },
+      });
+      responsibility = created;
+      debugServer.state("POST /inferences/[id]/decision", "AiInference.decision", {
+        inferenceId: inference.id,
+        decision: storedDecision,
+      });
+
+      if (candidate.suggestedTags.length > 0) {
+        for (const tagName of candidate.suggestedTags.slice(0, 3)) {
+          const trimmed = tagName.trim();
+          if (!trimmed) continue;
+          const tag = await tx.tag.upsert({
+            where: { workspaceId_name: { workspaceId, name: trimmed } },
+            create: { workspaceId, name: trimmed },
+            update: {},
+            select: { id: true },
+          });
+          await tx.responsibilityTag.create({
+            data: { responsibilityId: created.id, tagId: tag.id },
+          });
+        }
+        debugServer.event("POST /inferences/[id]/decision", "AI提案タグを自動付与", {
+          responsibilityId: created.id,
+          tags: candidate.suggestedTags,
+        });
+      }
+
+      if (candidate.blockedByCandidateIds.length > 0) {
+        const siblingInferences = await tx.aiInference.findMany({
+          where: {
+            captureId: inference.captureId,
+            decision: { in: ["ACCEPTED", "EDITED"] },
+            id: { not: inference.id },
+          },
+          select: { id: true, payload: true },
+        });
+        for (const sibling of siblingInferences) {
+          const siblingCandidate = ResponsibilityCandidateSchema.safeParse(sibling.payload);
+          if (!siblingCandidate.success) continue;
+          if (!candidate.blockedByCandidateIds.includes(siblingCandidate.data.candidateId)) continue;
+          const blockingResponsibility = await tx.responsibility.findFirst({
+            where: { originInferenceId: sibling.id },
+            select: { id: true },
+          });
+          if (!blockingResponsibility) continue;
+          await tx.responsibilityRelation.create({
+            data: {
+              fromId: blockingResponsibility.id,
+              toId: created.id,
+              relationType: "BLOCKS",
+              status: "CONFIRMED",
+              sourceKind: "AI",
+              confirmedById: auth.user.userId,
+              confirmedAt: new Date(),
+            },
+          });
+          debugServer.event("POST /inferences/[id]/decision", "RESPONSIBILITY_RELATION_CREATED(採用時解決)", {
+            fromId: blockingResponsibility.id,
+            toId: created.id,
+          });
+        }
+      }
+
+      const dependentSiblingInferences = await tx.aiInference.findMany({
+        where: {
+          captureId: inference.captureId,
+          decision: { in: ["ACCEPTED", "EDITED"] },
+          id: { not: inference.id },
+        },
+        select: { id: true, payload: true },
+      });
+      for (const sibling of dependentSiblingInferences) {
+        const siblingCandidate = ResponsibilityCandidateSchema.safeParse(sibling.payload);
+        if (!siblingCandidate.success) continue;
+        if (!siblingCandidate.data.blockedByCandidateIds.includes(candidate.candidateId)) continue;
+        const dependentResponsibility = await tx.responsibility.findFirst({
+          where: { originInferenceId: sibling.id },
+          select: { id: true },
+        });
+        if (!dependentResponsibility) continue;
+        const alreadyExists = await tx.responsibilityRelation.findFirst({
+          where: { fromId: created.id, toId: dependentResponsibility.id, relationType: "BLOCKS" },
+          select: { id: true },
+        });
+        if (alreadyExists) continue;
         await tx.responsibilityRelation.create({
           data: {
-            fromId: blockingResponsibility.id,
-            toId: responsibility.id,
+            fromId: created.id,
+            toId: dependentResponsibility.id,
             relationType: "BLOCKS",
             status: "CONFIRMED",
             sourceKind: "AI",
@@ -235,89 +344,44 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
             confirmedAt: new Date(),
           },
         });
-        debugServer.event("POST /inferences/[id]/decision", "RESPONSIBILITY_RELATION_CREATED(採用時解決)", {
-          fromId: blockingResponsibility.id,
-          toId: responsibility.id,
+        debugServer.event("POST /inferences/[id]/decision", "RESPONSIBILITY_RELATION_CREATED(逆方向解決)", {
+          fromId: created.id,
+          toId: dependentResponsibility.id,
         });
       }
-    }
 
-    // 逆方向: 既に採用済みの他候補が、この候補(今作成したResponsibility)を
-    // blockedByCandidateIdsに含めていた場合(=先にブロック元でない方が採用されていた場合)、
-    // 今このタイミングで関係を解決する。
-    const dependentSiblingInferences = await tx.aiInference.findMany({
-      where: {
-        captureId: inference.captureId,
-        decision: { in: ["ACCEPTED", "EDITED"] },
-        id: { not: inference.id },
-      },
-      select: { id: true, payload: true },
-    });
-    for (const sibling of dependentSiblingInferences) {
-      const siblingCandidate = ResponsibilityCandidateSchema.safeParse(sibling.payload);
-      if (!siblingCandidate.success) continue;
-      if (!siblingCandidate.data.blockedByCandidateIds.includes(candidate.candidateId)) continue;
-      const dependentResponsibility = await tx.responsibility.findFirst({
-        where: { originInferenceId: sibling.id },
-        select: { id: true },
-      });
-      if (!dependentResponsibility) continue;
-      // 既に(採用順序次第で)上のループで作成済みの場合はスキップする
-      const alreadyExists = await tx.responsibilityRelation.findFirst({
-        where: { fromId: responsibility.id, toId: dependentResponsibility.id, relationType: "BLOCKS" },
-        select: { id: true },
-      });
-      if (alreadyExists) continue;
-      await tx.responsibilityRelation.create({
+      await tx.eventLog.create({
         data: {
-          fromId: responsibility.id,
-          toId: dependentResponsibility.id,
-          relationType: "BLOCKS",
-          status: "CONFIRMED",
-          sourceKind: "AI",
-          confirmedById: auth.user.userId,
-          confirmedAt: new Date(),
+          aggregateType: "Responsibility",
+          aggregateId: created.id,
+          eventType: "AI_CANDIDATE_DECIDED",
+          beforeJson: { inferenceId: inference.id, decision: "PENDING" },
+          afterJson: { inferenceId: inference.id, decision: storedDecision, responsibilityId: created.id },
+          actorType: "USER",
+          actorId: auth.user.userId,
+          correlationId: req.headers.get("x-correlation-id") ?? undefined,
         },
       });
-      debugServer.event("POST /inferences/[id]/decision", "RESPONSIBILITY_RELATION_CREATED(逆方向解決)", {
-        fromId: responsibility.id,
-        toId: dependentResponsibility.id,
+      debugServer.event("POST /inferences/[id]/decision", "AI_CANDIDATE_DECIDED", { aggregateId: created.id });
+
+      await tx.outboxEvent.create({
+        data: {
+          eventName: "ResponsibilityCreated.v1",
+          eventVersion: "1",
+          aggregateId: created.id,
+          aggregateVersion: created.version,
+          correlationId: req.headers.get("x-correlation-id") ?? undefined,
+          payload: {
+            responsibilityId: created.id,
+            workspaceId,
+            domainId: created.domainId,
+            type: created.type,
+            fromInferenceId: inference.id,
+          },
+        },
       });
+      debugServer.event("POST /inferences/[id]/decision", "ResponsibilityCreated.v1", { aggregateId: created.id });
     }
-
-    await tx.eventLog.create({
-      data: {
-        aggregateType: "Responsibility",
-        aggregateId: responsibility.id,
-        eventType: "AI_CANDIDATE_DECIDED",
-        beforeJson: { inferenceId: inference.id, decision: "PENDING" },
-        afterJson: { inferenceId: inference.id, decision: storedDecision, responsibilityId: responsibility.id },
-        actorType: "USER",
-        actorId: auth.user.userId,
-        correlationId: req.headers.get("x-correlation-id") ?? undefined,
-      },
-    });
-    debugServer.event("POST /inferences/[id]/decision", "AI_CANDIDATE_DECIDED", { aggregateId: responsibility.id });
-
-    await tx.outboxEvent.create({
-      data: {
-        eventName: "ResponsibilityCreated.v1",
-        eventVersion: "1",
-        aggregateId: responsibility.id,
-        aggregateVersion: responsibility.version,
-        correlationId: req.headers.get("x-correlation-id") ?? undefined,
-        payload: {
-          responsibilityId: responsibility.id,
-          workspaceId,
-          domainId: responsibility.domainId,
-          type: responsibility.type,
-          fromInferenceId: inference.id,
-        },
-      },
-    });
-    debugServer.event("POST /inferences/[id]/decision", "ResponsibilityCreated.v1", {
-      aggregateId: responsibility.id,
-    });
 
     return responsibility;
   }).catch((e: unknown) => {
