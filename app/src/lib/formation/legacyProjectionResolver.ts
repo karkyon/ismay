@@ -138,3 +138,79 @@ export async function findFormationSessionForCapture(
     select: { id: true },
   });
 }
+
+// ---------------------------------------------------------------------------
+// [B4.3新設] legacy/Formation 競合検出(read-only、pure関数)。
+// 出典: HANDOFF_2026-08-29_B4.1_B4.2.md §4-3
+//       「legacy/Formation競合表示(項目6)。FormationSessionPanel.tsxは
+//       legacyProjection.conflictCodeがあれば警告バッジを出す最低限の実装のみ。
+//       詳細な競合内容の表示は未実装」。
+//
+// [経緯・既存実装との差分] 従来`formation-sessions/[id]/route.ts`はinline実装で
+// 「legacy ACCEPTED/EDITEDなのにResponsibilityが見つからない」(データ破損)の
+// 1パターンのみをLEGACY_PROJECTION_CONFLICTとして検出していた。この関数は
+// それに加え、「legacyとFormationの両方に決定が存在し、かつ採否の意味が
+// 食い違っている」パターンをDECISION_MISMATCHとして新たに検出する
+// (旧経路はB4.2のcutover guardにより通常は塞がれるが、guard導入前の残存データ、
+// またはFlag OFF期間中に生じたデータについて、想像で無視せず明示的に検知する)。
+// ---------------------------------------------------------------------------
+
+export type CandidateConflictCode = "LEGACY_PROJECTION_CONFLICT" | "DECISION_MISMATCH";
+
+export interface ConflictLegacyEntryInput {
+  /** PENDING/ACCEPTED/EDITED/REJECTED/HELD */
+  decision: string;
+  responsibilityId: string | null;
+}
+
+export interface ConflictFormationDecisionInput {
+  /** ACCEPTED/REJECTED/DEFERRED/DO_NOT_MATERIALIZE */
+  decision: string;
+}
+
+/**
+ * candidate 1件分の legacyEntry・formationDecision(あれば)から conflictCode を
+ * 決定論的に計算する。DB非依存の純粋関数(`formation-sessions/[id]/route.ts`と
+ * `scripts/verify_gate_m1b43_bulk_and_conflict.ts`の両方から直接呼べる)。
+ *
+ * 判定順序:
+ *   1. legacyEntryが無ければconflictは無い(旧経路自体に対応データが無いため)。
+ *   2. legacy側がACCEPTED/EDITEDなのにResponsibilityが見つからない場合は
+ *      データ破損そのものであり、Formation側の決定有無に関わらず最優先で
+ *      LEGACY_PROJECTION_CONFLICTを返す(既存実装のスコープをそのまま継承)。
+ *   3. 上記に該当せず、かつFormation側にも決定が存在する場合のみ、
+ *      「legacyが実質ACCEPTED相当なのにFormationがREJECTED相当」または
+ *      「legacyが実質REJECTED相当なのにFormationがACCEPTED」を
+ *      DECISION_MISMATCHとして検出する。
+ *   4. どちらにも該当しなければnull(legacy PENDING、または両者が同じ意味の
+ *      決定である場合。DEFERRED/DO_NOT_MATERIALIZEはlegacy側に対応語彙が
+ *      無いため、REJECTED相当として扱う=想像で新しい対応関係を発明しない)。
+ */
+export function computeCandidateConflict(input: {
+  legacyEntry: ConflictLegacyEntryInput | null;
+  formationDecision: ConflictFormationDecisionInput | null;
+}): CandidateConflictCode | null {
+  const { legacyEntry, formationDecision } = input;
+  if (!legacyEntry) return null;
+
+  const legacyAcceptedLike = legacyEntry.decision === "ACCEPTED" || legacyEntry.decision === "EDITED";
+  const legacyRejectedLike = legacyEntry.decision === "REJECTED" || legacyEntry.decision === "HELD";
+
+  if (legacyAcceptedLike && !legacyEntry.responsibilityId) {
+    return "LEGACY_PROJECTION_CONFLICT";
+  }
+
+  if (formationDecision) {
+    const formationAccepted = formationDecision.decision === "ACCEPTED";
+    const formationRejectedLike =
+      formationDecision.decision === "REJECTED" ||
+      formationDecision.decision === "DEFERRED" ||
+      formationDecision.decision === "DO_NOT_MATERIALIZE";
+
+    if ((legacyAcceptedLike && formationRejectedLike) || (legacyRejectedLike && formationAccepted)) {
+      return "DECISION_MISMATCH";
+    }
+  }
+
+  return null;
+}

@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { requireAuth } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
-import { resolveLegacyProjectionMap } from "@/lib/formation/legacyProjectionResolver";
+import { resolveLegacyProjectionMap, computeCandidateConflict } from "@/lib/formation/legacyProjectionResolver";
 
 /**
  * V5-M1-B4.1: GET /formation-sessions/{id} 正式Projection API。
@@ -14,7 +14,16 @@ import { resolveLegacyProjectionMap } from "@/lib/formation/legacyProjectionReso
  * IDは404として存在を漏らさない(既存project-contexts/[id]と同じIDOR対策)。
  *
  * このAPI自体は読み取り専用。書込みは既存の
- * `POST /:id/candidates/:cid/decisions`・`POST /:id/materialize`が担う。
+ * `POST /:id/candidates/:cid/decisions`・`POST /:id/candidates/bulk-decisions`・
+ * `POST /:id/materialize`が担う。
+ *
+ * [B4.3是正] `legacyProjection.conflictCode`の算出を、このfile内のinline三項演算子
+ * (「legacy ACCEPTED/EDITEDなのにResponsibilityが無い」の1パターンのみ検出)から、
+ * `computeCandidateConflict`(legacyProjectionResolver.ts)へ委譲するよう変更した。
+ * 同関数は上記に加え「legacyとFormationの決定が食い違うDECISION_MISMATCH」も
+ * 検出する(HANDOFF_2026-08-29_B4.1_B4.2.md §4-3「legacy/Formation競合表示」)。
+ * 併せて`legacyProjection.decidedAt`をレスポンスへ追加し、UI側が競合の詳細
+ * (いつ・どちらの決定と食い違っているか)を表示できるようにした。
  */
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
@@ -111,13 +120,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
         ? {
             inferenceId: legacyEntry.inferenceId,
             decision: legacyEntry.decision,
+            decidedAt: legacyEntry.decidedAt,
             responsibilityId: legacyEntry.responsibilityId,
-            // [3.3節同様] ACCEPTED/EDITEDなのにResponsibilityが見つからない場合を
-            // 破損として明示する(想像で補完しない)。
-            conflictCode:
-              (legacyEntry.decision === "ACCEPTED" || legacyEntry.decision === "EDITED") && !legacyEntry.responsibilityId
-                ? ("LEGACY_PROJECTION_CONFLICT" as const)
-                : null,
+            // [B4.3是正] 破損検出(ACCEPTED/EDITEDなのにResponsibility無し)に加え、
+            // legacyとFormationの決定が食い違うDECISION_MISMATCHも検出する
+            // (想像で補完せず、明示的にconflictとして提示する)。
+            conflictCode: computeCandidateConflict({
+              legacyEntry: { decision: legacyEntry.decision, responsibilityId: legacyEntry.responsibilityId },
+              formationDecision: decisionEvent ? { decision: decisionEvent.decision } : null,
+            }),
           }
         : null,
     });

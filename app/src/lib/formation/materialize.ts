@@ -430,6 +430,63 @@ export async function recordCandidateDecision(
 }
 
 // ---------------------------------------------------------------------------
+// [B4.3新設] Bulk decisions: 複数candidateへのACCEPT/REJECT等を1リクエストで処理する。
+// 出典: HANDOFF_2026-08-29_B4.1_B4.2.md §4-2「Bulk ACCEPT/REJECT(監査資料B4.2
+// 受入項目9)」。
+//
+// [設計方針・非atomicity の明示] `recordCandidateDecision`は候補1件ごとに
+// Session行FOR UPDATEロックを取る独立transactionである(このファイル冒頭
+// B31-04/B31-04bのコメント参照)。この関数はその1件用関数を配列分だけ順番に
+// 呼び出すだけであり、複数candidateをまたぐ単一transactionには**しない**
+// (全件成功/全件失敗のall-or-nothingではない)。理由は2つ:
+//   1. 既存`recordCandidateDecision`のSession行lock・旧新横断guard・
+//      revision楽観ロック等の不変条件(B31-01〜04b)を、bulk専用の新しい
+//      transaction境界の中で再実装すると、想像に基づく再実装になり
+//      「絶対ルール: 想像で修正しない」に反する。
+//   2. 1件ごとに成否が独立している方が、UIが「10件中8件成功・2件は
+//      revision不一致で失敗」のような部分結果を正しく提示できる
+//      (bulk operationsの既存実装`executeBulkAction`(responsibilities/bulk)も
+//      affected/skippedの部分成功パターンであり、本関数はこの既存方針を踏襲する)。
+// 呼び出し元(bulk-decisions/route.ts)は、items内で同一candidateIdを複数回
+// 指定した場合も想定内として扱う(2回目はALREADY_DECIDEDとして返る。これは
+// bugではなく、1件ずつ順番に処理した結果の自然な挙動)。
+// ---------------------------------------------------------------------------
+
+export interface BulkCandidateDecisionItem {
+  candidateId: string;
+  expectedRevision: number;
+  decision: CandidateDecisionEventValue;
+  reasonCode?: string;
+}
+
+export interface BulkCandidateDecisionItemResult {
+  candidateId: string;
+  result: RecordCandidateDecisionResult;
+}
+
+export async function recordCandidateDecisionsBulk(params: {
+  sessionId: string;
+  workspaceId: string;
+  actorUserId: string;
+  items: BulkCandidateDecisionItem[];
+}): Promise<BulkCandidateDecisionItemResult[]> {
+  const results: BulkCandidateDecisionItemResult[] = [];
+  for (const item of params.items) {
+    const result = await recordCandidateDecision({
+      sessionId: params.sessionId,
+      workspaceId: params.workspaceId,
+      candidateId: item.candidateId,
+      expectedRevision: item.expectedRevision,
+      decision: item.decision,
+      reasonCode: item.reasonCode,
+      actorUserId: params.actorUserId,
+    });
+    results.push({ candidateId: item.candidateId, result });
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // API-F06: POST /:id/materialize
 // ---------------------------------------------------------------------------
 
