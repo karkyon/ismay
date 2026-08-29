@@ -50,6 +50,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { installAiNetworkDenyGuard, selfTestAiNetworkDenyGuard } from "./lib/aiNetworkDenyGuard";
+import { cleanupFormationVerifyUser, assertNoLeftoverFormationVerifyUsers } from "./lib/formationVerifyCleanup";
 
 function loadDotEnv(envPath: string): void {
   let content: string;
@@ -96,24 +98,69 @@ function ok(name: string, cond: boolean, detail?: string): void {
 }
 
 async function main(): Promise<void> {
-  const { db } = await import("../app/src/lib/db");
-  const { recordCandidateDecision, materializeFormationSession, computeMaterializeRequestHash } = await import(
-    "../app/src/lib/formation/materialize"
-  );
+  // [B3.2新設・B32-01] AI provider host(OpenAI/Anthropic)への通信を、実際に
+  // ネットワークへ出す前に機械的に遮断するguardを最初に設置する。APIキーが
+  // .envに設定されていても、このguard配下ではEmbedding API等への通信は0件になる。
+  const denyGuard = installAiNetworkDenyGuard();
+  const guardSelfTestPassed = await selfTestAiNetworkDenyGuard(denyGuard);
+  ok("[非課金guard] AI network deny guardのpure self-testが機能する", guardSelfTestPassed);
+  // [バグ修正・2026-08-29 実行ログで判明] self-test自身がapi.openai.comへの
+  // dummy callを1件意図的に発生させ、それをguardが正しく検知・記録する
+  // (deniedCallAttemptsへ1件積む)ことをもって「self-testが機能する」と
+  // 判定している。したがって以降の「scenario実行中はAI通信0件」assertionは、
+  // この基準値(self-test由来の既知の1件)を差し引いた差分で判定しなければ、
+  // self-testが成功するたびに必ず1件分「AI通信があった」という誤検知になる。
+  const deniedCallAttemptsBaselineAfterSelfTest = denyGuard.deniedCallAttempts.length;
+  if (!guardSelfTestPassed) {
+    // guard自体が機能していない状態でscenarioを進めると「AI呼出し無し」を
+    // 証明できないため、ここで即座に打ち切る。
+    denyGuard.restore();
+    console.log(`\n合計: ${passed} passed, ${failed} failed`);
+    console.log("失敗一覧:\n  - [非課金guard] AI network deny guardのpure self-testが機能する");
+    process.exitCode = 1;
+    return;
+  }
 
-  console.log("V5-M1-B3 Materialize service 受入証跡(AI呼出し無し・実DBのみ)");
+  const { db } = await import("../app/src/lib/db");
+  const {
+    recordCandidateDecision,
+    materializeFormationSession: materializeFormationSessionReal,
+    computeMaterializeRequestHash,
+  } = await import("../app/src/lib/formation/materialize");
+
+  // [B3.2新設・B32-01] post-commit Embedding配送をno-op stubへ差し替える
+  // (dependency injection)。既存の呼び出し箇所を書き換えずに済むよう、
+  // importした本来の関数をこのファイル内だけshadowする。stub呼出し回数を数え、
+  // 最後に「実際にMaterializeされた新規item数」と一致することをassertする
+  // (監査B32-01「stub呼出し回数をassertし、本来post-commit配送対象となった件数と
+  // 一致することも確認する」)。
+  let embedStubCallCount = 0;
+  const embedStub = async () => {
+    embedStubCallCount++;
+    return { ok: true as const };
+  };
+  function materializeFormationSession(
+    params: Parameters<typeof materializeFormationSessionReal>[0],
+  ): ReturnType<typeof materializeFormationSessionReal> {
+    return materializeFormationSessionReal(params, { embedAndStoreResponsibility: embedStub });
+  }
+
+  console.log("V5-M1-B3 Materialize service 受入証跡(AI呼出し無し・実DBのみ・DI stub + network deny guard)");
 
   // ---- 孤立テストデータの掃除 -------------------------------------------
+  const cleanupErrors: { step: string; error: unknown }[] = [];
   const orphans = await db.user.findMany({
     where: { email: { startsWith: EMAIL_PREFIX, endsWith: "@example.invalid" } },
     select: { id: true },
   });
   for (const o of orphans) {
-    await cleanupUser(db, o.id);
+    const result = await cleanupFormationVerifyUser(db, o.id);
+    cleanupErrors.push(...result.errors);
   }
 
   let userId: string | null = null;
   let workspaceId: string | null = null;
+  let materializedItemCountBeforeCleanup: number | null = null;
 
   try {
     // ---- テストfixture作成(HTTPを使わず直接Prisma、AI呼出し無し) --------
@@ -403,12 +450,55 @@ async function main(): Promise<void> {
       "DRAFT状態のSessionへの候補決定はINVALID_SESSION_STATE",
       !draftDecision.ok && draftDecision.error === "INVALID_SESSION_STATE",
     );
+
+    // [B3.2新設・B32-01] cleanupで消える前に、このworkspace配下で実際に生成された
+    // MaterializationReceiptItem数を記録しておく(stub呼出し回数との突合用)。
+    if (workspaceId) {
+      materializedItemCountBeforeCleanup = await db.materializationReceiptItem.count({ where: { workspaceId } });
+    }
   } finally {
     if (failed === 0 || !KEEP_ON_FAILURE) {
-      if (userId) await cleanupUser((await import("../app/src/lib/db")).db, userId);
+      if (userId) {
+        const result = await cleanupFormationVerifyUser((await import("../app/src/lib/db")).db, userId);
+        cleanupErrors.push(...result.errors);
+      }
     } else {
       console.log(`[KEEP_TEST_DATA_ON_FAILURE=1] userId=${userId} workspaceId=${workspaceId} を残します`);
     }
+  }
+
+  denyGuard.restore();
+
+  // [B3.2新設・B32-02] cleanup自体の例外を握りつぶさない。1件でもあれば最終結果FAIL。
+  ok(
+    "[cleanup] cleanup処理中に例外が0件である",
+    cleanupErrors.length === 0,
+    cleanupErrors.map((e) => e.step).join(","),
+  );
+
+  if (failed === 0 || !KEEP_ON_FAILURE) {
+    const leftover = await assertNoLeftoverFormationVerifyUsers(db, EMAIL_PREFIX);
+    ok("[cleanup] cleanup後、test prefixのUserが0件である", leftover.clean, leftover.remainingUserIds.join(","));
+  }
+
+  // [B3.2新設・B32-01] AI providerへの通信guardは終始deny件数0のはず(=本番と
+  // 同じ経路を辿った場合でも実通信は起きていない)。
+  ok(
+    "[非課金guard] scenario実行中、AI provider hostへの通信試行は0件(self-test自身の既知の1件を除く)",
+    denyGuard.deniedCallAttempts.length === deniedCallAttemptsBaselineAfterSelfTest,
+    `total=${denyGuard.deniedCallAttempts.length} baseline(self-test分)=${deniedCallAttemptsBaselineAfterSelfTest} attempts=${JSON.stringify(denyGuard.deniedCallAttempts)}`,
+  );
+
+  // [B3.2新設・B32-01] stub呼出し回数と、実際に新規Materializeされたitem数が
+  // 一致することを確認する(replayではstubを再呼出ししないことも間接的に検証する。
+  // replay含む全materializeFormationSession呼び出しの中で新規commitはこのRUNでは
+  // 1回だけなので、item数=1であればreplayではstubが呼ばれていないことになる)。
+  if (materializedItemCountBeforeCleanup !== null) {
+    ok(
+      "[DI] Embedding stub呼出し回数が実際のMaterialize item数と一致する",
+      embedStubCallCount === materializedItemCountBeforeCleanup,
+      `stub=${embedStubCallCount} items=${materializedItemCountBeforeCleanup}`,
+    );
   }
 
   console.log(`\n合計: ${passed} passed, ${failed} failed`);
@@ -519,58 +609,6 @@ async function seedSession(
   return { sessionId: session.id, candidates };
 }
 
-async function cleanupUser(db: typeof import("../app/src/lib/db")["db"], userId: string): Promise<void> {
-  const membership = await db.workspaceMember.findFirst({ where: { userId }, select: { workspaceId: true } });
-  const workspaceId = membership?.workspaceId ?? null;
-  if (workspaceId) {
-    const captures = await db.capture.findMany({ where: { workspaceId }, select: { id: true } }).catch(() => [] as { id: string }[]);
-    const captureIds = captures.map((c: { id: string }) => c.id);
-    const sessions = captureIds.length
-      ? await db.formationSession.findMany({ where: { captureId: { in: captureIds } }, select: { id: true } }).catch(() => [] as { id: string }[])
-      : [];
-    const sessionIds = sessions.map((s: { id: string }) => s.id);
-    if (sessionIds.length > 0) {
-      const identities = await db.formationCandidateIdentity.findMany({ where: { sessionId: { in: sessionIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-      const identityIds = identities.map((c: { id: string }) => c.id);
-      if (identityIds.length > 0) {
-        const revisions = await db.formationCandidateRevision.findMany({ where: { candidateId: { in: identityIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-        const revisionIds = revisions.map((r: { id: string }) => r.id);
-        if (revisionIds.length > 0) {
-          await db.formationSourceAnchor.deleteMany({ where: { revisionId: { in: revisionIds } } }).catch(() => null);
-        }
-        await db.materializationReceiptItem.deleteMany({ where: { candidateId: { in: identityIds } } }).catch(() => null);
-        await db.formationCandidateDecisionEvent.deleteMany({ where: { candidateId: { in: identityIds } } }).catch(() => null);
-        await db.formationCandidateRevision.deleteMany({ where: { candidateId: { in: identityIds } } }).catch(() => null);
-      }
-      await db.formationCandidateIdentity.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-      await db.materializationReceipt.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-      await db.formationSessionEvent.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-      await db.formationSession.deleteMany({ where: { id: { in: sessionIds } } }).catch(() => null);
-    }
-    const responsibilities = await db.responsibility.findMany({ where: { workspaceId, originCaptureId: { in: captureIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-    const responsibilityIds = responsibilities.map((r: { id: string }) => r.id);
-    if (responsibilityIds.length > 0) {
-      await db.eventLog.deleteMany({ where: { aggregateType: "Responsibility", aggregateId: { in: responsibilityIds } } }).catch(() => null);
-      await db.outboxEvent.deleteMany({ where: { aggregateId: { in: responsibilityIds } } }).catch(() => null);
-      // [2026-08-28修正・実障害] responsibility_embeddings.responsibility_idは
-      // schema.prismaで@db.Uuid注釈が無くPrisma String@idの既定(実カラム型はtext)。
-      // ::uuid[]キャストだと"operator does not exist: text = uuid"(42883)で失敗する
-      // (実行ログで確認済み。.catchで握りつぶされ他のcleanupには影響しないが、本来
-      // このDELETE自体は成功すべきなので正しいtext[]キャストに修正する)。
-      await db.$executeRawUnsafe(
-        `DELETE FROM responsibility_embeddings WHERE responsibility_id = ANY($1::text[])`,
-        responsibilityIds,
-      ).catch(() => null);
-    }
-    await db.responsibility.deleteMany({ where: { workspaceId, originCaptureId: { in: captureIds } } }).catch(() => null);
-    await db.eventLog.deleteMany({ where: { aggregateId: { in: captureIds } } }).catch(() => null);
-    await db.outboxEvent.deleteMany({ where: { aggregateId: { in: captureIds } } }).catch(() => null);
-    await db.capture.deleteMany({ where: { id: { in: captureIds } } }).catch(() => null);
-  }
-  await db.workspaceMember.deleteMany({ where: { userId } }).catch(() => null);
-  if (workspaceId) await db.workspace.deleteMany({ where: { id: workspaceId } }).catch(() => null);
-  await db.user.deleteMany({ where: { id: userId } }).catch(() => null);
-}
 
 main()
   .then(() => process.exit(process.exitCode ?? 0))

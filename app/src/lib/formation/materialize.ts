@@ -36,7 +36,7 @@ import {
  *     `CANDIDATE_ALREADY_MATERIALIZED`へ変換する(Responsibility/EventLog/
  *     Outbox/Receiptを含むtransaction全体はDBにより自動rollbackされるため、
  *     孤立行は残らない)。
- * - [B31-04][B31-06] 同一SessionへのDecision記録・Materializeが並行実行されると、
+ * - [B31-04][B31-04b] 同一SessionへのDecision記録・Materializeが並行実行されると、
  *   `(sessionId,sequence)`一意制約違反や、同一候補への相反decisionが両方成立する
  *   可能性があった。
  *   → `recordCandidateDecision`/`materializeFormationSession`の両方で、
@@ -49,6 +49,28 @@ import {
  * - `computeMaterializeRequestHash`の対象に`expectedVersion`を追加した(旧実装は
  *   `{sessionId,workspaceId}`のみでバージョンを含まず、client側が異なる前提状態
  *   から送った再送を同一payloadとみなしてしまう余地があった)。
+ *
+ * [B3.2是正・2026-08-29 監査「Gate M1-B3.2 非課金証跡保証・残存競合是正」]
+ * - [B32-05] `B31-06`という監査IDを、上記「相反decision競合」の意味へ後から
+ *   差し替えていたのを是正した。元の監査指示における`B31-06`は
+ *   「旧`/inferences/[id]/decision`routeとの機能・データ互換性不足
+ *   (AiInference.decision、originInferenceId、Tag、BLOCKS Relation、旧API
+ *   response等)」を指しており、本ファイルではこの意味のままOPENとして
+ *   下記スコープ注記(旧API互換field)にのみ残す。相反decision競合への多層防御には
+ *   新ID`B31-04b`を新設して置き換えた(過去監査IDの意味を後から変更しない、という
+ *   方針の徹底)。
+ * - [B32-01] Materialize commit後のEmbedding配送(`embedAndStoreResponsibility`)を
+ *   `materializeFormationSession`の第二引数`deps`経由でdependency injection可能にした。
+ *   production API route(materialize/route.ts)は第二引数を渡さないため常に実際の
+ *   Embedding providerを使う。受入スクリプト側だけがno-op stubを注入することで、
+ *   Workspace設定や環境変数(OPENAI_API_KEY等)の有無に関わらず外部AI通信を
+ *   確実に0件にできる。
+ * - [B32-03] P2002(一意制約違反)の判別を、`meta.target`のconstraint名文字列一致
+ *   から、実際のDB状態を値で再確認する方式へ変更した。Prisma/PostgreSQLの版・
+ *   実行環境によっては`meta.target`がconstraint名ではなくcolumn名配列で返る、
+ *   または欠落する場合があり、文字列一致に依存するとcross-session(異なる
+ *   FormationSession、したがってSession行lockが直接効かない)並行実行時の
+ *   P2002を正しく判別できない可能性があったため。
  *
  * [設計方針・スコープ(B3から継続)] このGate(M1-B3/B3.1)は、B1(shadowWrite.ts)が
  * 書き込んだFormationSession/CandidateIdentity/Revisionを対象に、新規API経由での
@@ -171,11 +193,11 @@ export function sessionEventTypeForDecision(decision: CandidateDecisionEventValu
   }
 }
 
-/** materialization_receipts_operation_uq(B31-02)、materialization_receipt_items_
- *  workspace_candidate_uq(B31-01/03)、formation_candidate_decision_events_
- *  workspace_candidate_uq(B31-04/06)のいずれか。 */
-const RECEIPT_OPERATION_UNIQUE_CONSTRAINT = "materialization_receipts_operation_uq";
-const RECEIPT_ITEM_CANDIDATE_UNIQUE_CONSTRAINT = "materialization_receipt_items_workspace_candidate_uq";
+/** formation_candidate_decision_events_workspace_candidate_uq(B31-04/B31-04b)。
+ *  materialization_receipts_operation_uq(B31-02)・materialization_receipt_items_
+ *  workspace_candidate_uq(B31-01/03)については、[B3.2是正・B32-03]により
+ *  constraint名文字列ではなくDB再クエリによる値判定へ切り替えたため、
+ *  ここでの名前定数は使わない(下の`isPrismaUniqueConstraintError`参照)。 */
 const DECISION_EVENT_CANDIDATE_UNIQUE_CONSTRAINT = "formation_candidate_decision_events_workspace_candidate_uq";
 
 /**
@@ -183,6 +205,11 @@ const DECISION_EVENT_CANDIDATE_UNIQUE_CONSTRAINT = "formation_candidate_decision
  * PrismaClientKnownRequestErrorをimportせずcode/metaを直接見るのは、
  * sandbox環境のPrisma client生成が制約される既知事情(KARKYONメモリ記載)を
  * 踏まえ、型import無しでも動く実装にするため。
+ * [B3.2是正・B32-03] `materializeFormationSession`のcatchではこの関数を使わず、
+ * 下の`isPrismaUniqueConstraintError`+DB再クエリによる値判定を使う
+ * (constraint名文字列/column配列/欠落のいずれでも正しく動くようにするため)。
+ * `recordCandidateDecision`のDecisionEvent一意制約判定はSession行lock配下の
+ * 深層防御(通常到達しない)であり、このGateの対象(B32-03)ではないため据え置く。
  */
 function isUniqueConstraintViolation(e: unknown, constraintName: string): boolean {
   if (typeof e !== "object" || e === null) return false;
@@ -197,6 +224,18 @@ function isUniqueConstraintViolation(e: unknown, constraintName: string): boolea
   // targetを判別できない場合は「不明なP2002」として上位のcatchに委ねる
   // (該当constraintと断定できないものを誤って握りつぶさない)。
   return false;
+}
+
+/**
+ * [B3.2新設・B32-03] Prismaの一意制約違反(P2002)かどうかだけを、code値のみで
+ * 判別する。`isUniqueConstraintViolation`と異なり`meta.target`の中身(constraint名
+ * 文字列/column配列/欠落)を一切問わない。`materializeFormationSession`のcatchでは
+ * この関数でP2002である事実だけを確認したうえで、どちらの一意制約に触れたかを
+ * 実際のDB状態への再クエリで値により判別する(target文字列一致より頑健)。
+ */
+function isPrismaUniqueConstraintError(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  return (e as { code?: unknown }).code === "P2002";
 }
 
 /** transaction内から即座に中断してエラー結果を返すための内部signal(B3から継続)。 */
@@ -223,7 +262,7 @@ export async function recordCandidateDecision(
 
   try {
     return await db.$transaction(async (tx: Prisma.TransactionClient) => {
-      // [B3.1是正・B31-04/B31-06] Session行をFOR UPDATEでlockし、同一Sessionへの
+      // [B3.1是正・B31-04/B31-04b] Session行をFOR UPDATEでlockし、同一Sessionへの
       // 並行Decision記録・Materializeを直列化する(DOC-03 6章「SELECT ... FOR UPDATE
       // 相当」)。以前はfindFirst(lock無し)だったため、同一Sessionの別候補を
       // 同時採否すると(sessionId,sequence)一意制約違反や、同一候補への相反
@@ -249,7 +288,7 @@ export async function recordCandidateDecision(
       }
 
       // Session行lock配下で直列化されているため、このSELECTは以後race無く
-      // 信頼できる(以前はここが「事前SELECTのみ」でDB制約が無かった、B31-06)。
+      // 信頼できる(以前はここが「事前SELECTのみ」でDB制約が無かった、B31-04b)。
       const existingDecision = await tx.formationCandidateDecisionEvent.findFirst({
         where: { candidateId: identity.id, workspaceId },
         orderBy: { occurredAt: "desc" },
@@ -330,7 +369,7 @@ export async function recordCandidateDecision(
       return { ok: true, decisionEventId: decisionEvent.id, sessionState } as const;
     });
   } catch (e: unknown) {
-    // [B3.1新設・B31-04/B31-06多層防御] Session行lockにより通常はここへ来ないが、
+    // [B3.1新設・B31-04/B31-04b多層防御] Session行lockにより通常はここへ来ないが、
     // 万一lockを経由しない経路や想定外のrace窓で一意制約違反が発生した場合、
     // 生の500ではなくALREADY_DECIDEDへ決定論的に変換する。
     if (isUniqueConstraintViolation(e, DECISION_EVENT_CANDIDATE_UNIQUE_CONSTRAINT)) {
@@ -368,10 +407,40 @@ function toReplayResult(receipt: ReceiptForReplay): MaterializeFormationSessionR
   };
 }
 
+/** [B3.2新設・B32-01] commit後にembedするResponsibilityの最小入力。 */
+export interface EmbedResponsibilityInput {
+  responsibilityId: string;
+  workspaceId: string;
+  domainId: string;
+  title: string;
+  description?: string | null;
+}
+
+export interface MaterializationPostCommitDeps {
+  /** [B3.2新設・B32-01] commit後のEmbedding配送を差し替え可能にする注入点。
+   *  デフォルト(`productionMaterializationDeps`)は実際に外部AI Embedding APIを
+   *  呼ぶ`embedAndStoreResponsibility`(本番と全く同じ挙動)。受入スクリプトだけが
+   *  この一点をno-op stubへ差し替えることで、Workspace設定や環境変数
+   *  (OPENAI_API_KEY等)の有無に関わらず外部AI通信を確実に0件にできる
+   *  (監査「Gate M1-B3.2」B32-01)。production HTTP requestからこのdepsを
+   *  選択できる入力field・headerは存在しない(server内部のtest codeだけに閉じる)。 */
+  embedAndStoreResponsibility: (input: EmbedResponsibilityInput) => Promise<{ ok: boolean; reason?: string }>;
+}
+
+const productionMaterializationDeps: MaterializationPostCommitDeps = {
+  embedAndStoreResponsibility,
+};
+
 export async function materializeFormationSession(
   params: MaterializeFormationSessionParams,
+  deps: MaterializationPostCommitDeps = productionMaterializationDeps,
 ): Promise<MaterializeFormationSessionResult> {
   const { sessionId, workspaceId, operationId, expectedVersion, actorUserId } = params;
+  // [B3.2新設・B32-03] Materialize transactionが実際にResponsibility化を試みた
+  // candidateのidentityId一覧。tx内でP2002が発生した場合、catch側でどのcandidateが
+  // 対象だったかをこの値から再確認する(tx callbackのlocal変数`acceptedTargets`は
+  // catchブロックから参照できないため)。
+  let attemptedCandidateIds: string[] = [];
   const requestHash = computeMaterializeRequestHash({ sessionId, workspaceId, expectedVersion });
 
   // 冪等性チェック(DOC-03 6章2「operationIdとrequestHashの冪等性を検証。
@@ -467,6 +536,9 @@ export async function materializeFormationSession(
       if (acceptedTargets.length === 0) {
         return { ok: false, error: "NO_ACCEPTED_CANDIDATES" } as const;
       }
+      // [B3.2新設・B32-03] 以降でP2002が起きた場合にcatch側で使うため、対象
+      // candidateId一覧を外側scopeへ記録しておく。
+      attemptedCandidateIds = acceptedTargets.map((t) => t.identityId);
 
       const items: MaterializedItem[] = [];
       for (const target of acceptedTargets) {
@@ -617,26 +689,51 @@ export async function materializeFormationSession(
   } catch (e: unknown) {
     if (e instanceof MaterializeAbort) {
       txResult = e.result;
-    } else if (isUniqueConstraintViolation(e, RECEIPT_OPERATION_UNIQUE_CONSTRAINT)) {
-      // [B3.1新設・B31-02] 同一operationIdの並行実行race。相手が先にcommitした。
-      // このtransaction自体はDBにより自動rollbackされている。勝者のReceiptを
-      // 再取得し、payloadが一致すればreplay、不一致ならIDEMPOTENCY_KEY_REUSEDへ
-      // 決定論的に変換する。
+    } else if (isPrismaUniqueConstraintError(e)) {
+      // [B3.2是正・B32-03] P2002の判別をconstraint名文字列一致からDB再クエリに
+      // よる値判定へ変更した(meta.targetがconstraint名/column配列/欠落のいずれで
+      // 返る環境でも正しく動く)。
+      //
+      // 1. まず(workspaceId,operationId)でReceiptを再取得する。見つかれば
+      //    materialization_receipts_operation_uq(B31-02)に触れたということ。
+      //    hash一致ならreplay、不一致ならIDEMPOTENCY_KEY_REUSED。
+      //    [B32-03新設] 同一Session内はSession行lockで直列化されるため、この
+      //    catchへ到達するのは実質cross-session(異なるFormationSession、
+      //    したがってSession行lockが直接効かない)同一operationId競合の場合のみ
+      //    (同一Session・同一operationIdの並行実行は、tx冒頭のlock獲得後の
+      //    `existingReceiptInTx`再確認で先にreplay判定されるため、通常この
+      //    catchまで来ない)。
       const winner = await db.materializationReceipt.findFirst({
         where: { workspaceId, operationId },
         include: { items: true },
       });
-      if (!winner) {
-        // 理論上到達しない(unique違反が起きた以上、誰かがcommitしているはず)。
-        // 万一のtransient状態なら、呼び出し元に単純な再試行を促す。
-        throw e;
+      if (winner) {
+        txResult = winner.requestHash === requestHash ? toReplayResult(winner) : { ok: false, error: "IDEMPOTENCY_KEY_REUSED" };
+      } else {
+        // 2. Receiptが見つからない場合のみ、今回のtransactionが対象にしていた
+        //    candidateについてglobal ReceiptItem(materialization_receipt_items_
+        //    workspace_candidate_uq、B31-01/03)を再確認する。同一Session内は
+        //    Session行lockで直列化されるため、通常はここへも到達しない
+        //    (先行transactionがcommit済みなら、後続transactionはtx冒頭の
+        //    `alreadyMaterializedCandidateIds`フィルタで対象候補自体を除外し、
+        //    P2002ではなくNO_ACCEPTED_CANDIDATESという別経路になる)。到達する
+        //    のはcross-sessionで同一candidateを異なるSessionが同時に対象にする
+        //    ような、さらに稀なraceのみ。
+        const clash =
+          attemptedCandidateIds.length > 0
+            ? await db.materializationReceiptItem.findFirst({
+                where: { workspaceId, candidateId: { in: attemptedCandidateIds } },
+              })
+            : null;
+        if (clash) {
+          txResult = { ok: false, error: "CANDIDATE_ALREADY_MATERIALIZED" };
+        } else {
+          // 3. どちらの値判定にも該当しない場合は、このMaterialize処理とは
+          //    無関係な一意制約違反(別バグ・別テーブル等)である可能性が高い。
+          //    誤って握りつぶさず、元の例外をそのまま再throwする。
+          throw e;
+        }
       }
-      txResult = winner.requestHash === requestHash ? toReplayResult(winner) : { ok: false, error: "IDEMPOTENCY_KEY_REUSED" };
-    } else if (isUniqueConstraintViolation(e, RECEIPT_ITEM_CANDIDATE_UNIQUE_CONSTRAINT)) {
-      // [B3.1新設・B31-01/B31-03] 異operationIdの並行Materializeが同一candidateを
-      // 先にmaterialize済みだった。このtransaction全体(今回分のResponsibility等)は
-      // DBにより自動rollbackされている。
-      txResult = { ok: false, error: "CANDIDATE_ALREADY_MATERIALIZED" };
     } else {
       throw e;
     }
@@ -653,7 +750,7 @@ export async function materializeFormationSession(
         select: { id: true, workspaceId: true, domainId: true, title: true, description: true },
       });
       if (!responsibility) continue;
-      await embedAndStoreResponsibility({
+      await deps.embedAndStoreResponsibility({
         responsibilityId: responsibility.id,
         workspaceId: responsibility.workspaceId,
         domainId: responsibility.domainId,
