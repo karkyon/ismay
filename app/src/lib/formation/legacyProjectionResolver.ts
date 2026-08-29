@@ -120,3 +120,21 @@ export async function resolveLegacyProjectionMap(
 
   return { aiRunId, byCandidateKey, unmatchedInferenceIds };
 }
+
+/**
+ * [B4.2新設・2026-08-29] 指定Capture(workspaceIdスコープ)に対応する
+ * FormationSessionが存在するかどうかだけを返す。旧`/inferences/[id]/decision`
+ * routeのcutover guard(B4.2受入項目7・8)が使う。scripts/配下のDB受入testが
+ * next/serverに依存せず検証できるよう、route本体から独立した関数として切り出す
+ * (Gate M1-B4.1で`next/server`をscripts/からimportできないことが判明した教訓を
+ * 踏まえた設計)。
+ */
+export async function findFormationSessionForCapture(
+  client: Prisma.TransactionClient,
+  params: { captureId: string; workspaceId: string },
+): Promise<{ id: string } | null> {
+  return client.formationSession.findFirst({
+    where: { captureId: params.captureId, workspaceId: params.workspaceId },
+    select: { id: true },
+  });
+}
