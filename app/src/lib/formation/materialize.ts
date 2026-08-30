@@ -192,6 +192,12 @@ export function computeMaterializeRequestHash(input: {
  * 「延期ではなく明確な非対象化」だが、既存3値のうち意味的に最も近いCANDIDATE_DEFERREDへ
  * 記録する。実際の決定値そのものはCandidateDecisionEvent.decisionに正確に残るため、
  * この対応は診断用timelineの表示上の丸めであり、正本データを失わない。
+ *
+ * [2026-08-30追加・M1-C] SPLIT/MERGEDも同じ理由でDOC-02 7.3節の16値には専用codeが無い
+ * (想像で新codeを発明しない方針を継続)。SPLIT/MERGEDは「元候補が単独では
+ * 採否対象でなくなる」という点でDEFERRED/DO_NOT_MATERIALIZEと同じ意味的近さを持つため、
+ * 同じCANDIDATE_DEFERREDバケットへ丸める。正確な決定値はCandidateDecisionEvent.decision
+ * (SPLIT/MERGED)に残るため、timeline表示の丸めのみで正本データは失わない。
  */
 export function sessionEventTypeForDecision(decision: CandidateDecisionEventValue): FormationEventType {
   switch (decision) {
@@ -201,6 +207,8 @@ export function sessionEventTypeForDecision(decision: CandidateDecisionEventValu
       return "CANDIDATE_REJECTED";
     case "DEFERRED":
     case "DO_NOT_MATERIALIZE":
+    case "SPLIT":
+    case "MERGED":
       return "CANDIDATE_DEFERRED";
   }
 }
@@ -269,6 +277,16 @@ export async function recordCandidateDecision(
   const { sessionId, workspaceId, candidateId, expectedRevision, decision, reasonCode, actorUserId } = params;
 
   if (!isValidCandidateDecisionEventValue(decision)) {
+    return { ok: false, error: "INVALID_DECISION_VALUE" };
+  }
+  // [2026-08-30追加・M1-C是正] SPLIT/MERGEDはCANDIDATE_DECISION_EVENT_VALUESとしては
+  // 有効だが、この汎用decide経路では受理しない。SPLITは新しい子候補群を同一
+  // transaction内で作る専用service(splitCorrection.ts)を必ず経由しなければならず、
+  // この経路から直接SPLITを記録できてしまうと「決定はSPLITと記録されたのに
+  // 子候補が1件も作られない」という壊れた状態を作れてしまう(§11.4「同一
+  // transactionで作る」という不変条件に違反する)。MERGEDも同様(transaction本体は
+  // 未実装だが、将来のMERGE serviceでも同じ理由で専用経路必須にする設計を先取りする)。
+  if (decision === "SPLIT" || decision === "MERGED") {
     return { ok: false, error: "INVALID_DECISION_VALUE" };
   }
 

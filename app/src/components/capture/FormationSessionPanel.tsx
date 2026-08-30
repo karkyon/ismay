@@ -138,6 +138,13 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
   // [2026-08-30新設・M1-B5a CLARIFYING UI]
   const [answeringId, setAnsweringId] = useState<string | null>(null);
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
+  // [2026-08-30新設・M1-C Split Correction]
+  const [splittingId, setSplittingId] = useState<string | null>(null);
+  const [splitParts, setSplitParts] = useState<Array<{ type: string; title: string }>>([
+    { type: "TASK", title: "" },
+    { type: "TASK", title: "" },
+  ]);
+  const [splitBusy, setSplitBusy] = useState(false);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -311,6 +318,51 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
       onChanged?.();
     } finally {
       setAnsweringId(null);
+    }
+  }
+
+  /** [2026-08-30新設・M1-C §11.4] 分解フォームを開始する(初期2行)。 */
+  function startSplit(candidateId: string) {
+    setSplittingId(candidateId);
+    setSplitParts([
+      { type: "TASK", title: "" },
+      { type: "TASK", title: "" },
+    ]);
+    setError("");
+  }
+
+  function cancelSplit() {
+    setSplittingId(null);
+  }
+
+  async function submitSplit(candidate: ProjectionCandidate) {
+    if (!candidate.currentRevision) return;
+    const trimmedParts = splitParts.map((p) => ({ type: p.type, title: p.title.trim() }));
+    if (trimmedParts.length < 2 || trimmedParts.some((p) => !p.title)) {
+      setError("分解には2件以上、すべてtitleを入力した部分が必要です");
+      return;
+    }
+    setSplitBusy(true);
+    setError("");
+    debugLog.event("FormationSessionPanel", "submitSplit", { candidateId: candidate.identityId, partCount: trimmedParts.length });
+    try {
+      const res = await apiFetch(
+        `/api/v1/formation-sessions/${sessionId}/candidates/${candidate.identityId}/split`,
+        {
+          method: "POST",
+          body: JSON.stringify({ revision: candidate.currentRevision.revision, parts: trimmedParts }),
+        },
+      );
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(body?.error?.message ?? "分解処理に失敗しました");
+        return;
+      }
+      setSplittingId(null);
+      await load(true);
+      onChanged?.();
+    } finally {
+      setSplitBusy(false);
     }
   }
 
@@ -502,7 +554,7 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
                         {rev && <span className="text-[10px] text-faint">確度 {rev.confidence.toFixed(2)}</span>}
                         {!isPending && c.formationDecision && (
                           <span className="text-[10px] text-faint">
-                            ({c.formationDecision.decision === "ACCEPTED" ? "採用済み" : c.formationDecision.decision === "REJECTED" ? "却下済み" : c.formationDecision.decision})
+                            ({c.formationDecision.decision === "ACCEPTED" ? "採用済み" : c.formationDecision.decision === "REJECTED" ? "却下済み" : c.formationDecision.decision === "SPLIT" ? "分解済み" : c.formationDecision.decision})
                           </span>
                         )}
                         {c.materialization && <span className="text-[10px] text-safe">✓ 責任として作成済み</span>}
@@ -580,9 +632,80 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
                       >
                         却下
                       </button>
+                      <button
+                        onClick={() => startSplit(c.identityId)}
+                        disabled={isBusy}
+                        className="text-[11px] bg-canvas border border-line text-muted rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-line/40 transition"
+                      >
+                        分解する
+                      </button>
                     </div>
                   )}
                 </div>
+                {/* [2026-08-30新設・M1-C §11.4] 分解フォーム。本人が2件以上の部分を
+                    入力し確定した場合のみSPLIT Correctionを記録する(§11.3
+                    「Assessmentは…責任を自動分割しない」、あくまで本人操作が起点)。 */}
+                {splittingId === c.identityId && (
+                  <div className="mt-2 rounded-lg border border-line bg-canvas p-3 space-y-2">
+                    <p className="text-[11px] text-muted">
+                      「{rev?.title}」を2件以上の独立した作業に分解します。各部分の種別とtitleを入力してください。
+                    </p>
+                    {splitParts.map((part, i) => (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <select
+                          value={part.type}
+                          onChange={(e) =>
+                            setSplitParts((prev) => prev.map((p, idx) => (idx === i ? { ...p, type: e.target.value } : p)))
+                          }
+                          className="text-[11px] rounded border border-line px-1.5 py-1.5"
+                        >
+                          {Object.entries(CANDIDATE_TYPE_LABEL).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="text"
+                          value={part.title}
+                          onChange={(e) =>
+                            setSplitParts((prev) => prev.map((p, idx) => (idx === i ? { ...p, title: e.target.value } : p)))
+                          }
+                          placeholder={`部分${i + 1}のtitle`}
+                          className="flex-1 min-w-0 text-sm rounded border border-line px-2 py-1.5"
+                        />
+                        {splitParts.length > 2 && (
+                          <button
+                            onClick={() => setSplitParts((prev) => prev.filter((_, idx) => idx !== i))}
+                            className="text-[10px] text-faint underline shrink-0"
+                          >
+                            削除
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        onClick={() => setSplitParts((prev) => [...prev, { type: "TASK", title: "" }])}
+                        className="text-[10px] text-faint underline"
+                      >
+                        + 部分を追加
+                      </button>
+                      <div className="flex gap-1.5">
+                        <button onClick={cancelSplit} className="text-[11px] text-faint px-2 py-1.5">
+                          キャンセル
+                        </button>
+                        <button
+                          onClick={() => submitSplit(c)}
+                          disabled={splitBusy}
+                          className="text-[11px] bg-ink text-white rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-black transition"
+                        >
+                          {splitBusy ? "処理中..." : "分解を確定"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </li>
             );
           })}

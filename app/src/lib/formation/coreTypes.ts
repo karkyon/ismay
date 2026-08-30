@@ -43,6 +43,15 @@
  * この語彙差分は次のGate(CandidateDecisionEvent正規化、M1-B5a本体着手前に実施予定)で
  * 独立して扱う。想像で先送りしているのではなく、明示的にscope外としている。
  *
+ * [2026-08-30更新・M1-C] 上記の「MERGE/SPLITはAtomicity Assessment未実装に依存」
+ * という前提は、Atomicity Assessment実装(M1-C 前半Patch)により解消した。この
+ * ファイル後段の`CANDIDATE_DECISION_EVENT_VALUES`へ`SPLIT`/`MERGED`を追加し、
+ * `splitCorrection.ts`でSPLIT transactionを実装した(§11.4)。ただし
+ * `ACCEPTED/REJECTED/DEFERRED/DO_NOT_MATERIALIZE`の動詞形への全面改名は
+ * このGateでも引き続き行っていない(理由は上記のまま有効。blast radius最小化の
+ * ため「新規追加」と「既存rename」を混在させない)。MERGE(複数候補の統合)は
+ * transaction本体を未実装のまま値のみ予約している(後段コメント参照)。
+ *
  * db.ts を import しないこと(tsxのdb非依存test runnerで検証できるようにするため。
  * 既存 pem/coreTypes.ts・projectContext/coreTypes.ts と同じパターンを踏襲)。
  */
@@ -170,17 +179,44 @@ export function isValidFormationAnswerKind(value: string): value is FormationAns
 }
 
 /**
- * CandidateDecision(DOC-02 6章由来、このPatchでは意図的に未変更)。
- * [scope外の明記] 統合正本§6.6は`ACCEPT/EDIT/REJECT/MERGE/SPLIT/DEFER`を定義しているが、
- * このファイル冒頭コメントに記載の理由により、このPatchでは現行語彙を維持する。
+ * CandidateDecision(DOC-02 6章由来)。
+ * [2026-08-30部分是正・M1-C] 統合正本§6.6は`ACCEPT/EDIT/REJECT/MERGE/SPLIT/DEFER`を
+ * 定義している。このGate(M1-C)で`SPLIT`/`MERGE`を実際に追加した(§11.4「Split/Merge
+ * Correction」の実装に必須のため)。
+ *
+ * [scope外として残した部分の明記] 既存4値(ACCEPTED/REJECTED/DEFERRED/
+ * DO_NOT_MATERIALIZE)を正本の動詞形(ACCEPT/REJECT/DEFER)へ全面改名することは、
+ * このGateでは行っていない。理由は元のコメントのまま維持する:
+ *   - 現行の`ACCEPTED/REJECTED/DEFERRED/DO_NOT_MATERIALIZE`は`materialize.ts`
+ *     (1000行超)・2本の決定API route・bulk-decisions route・
+ *     `FormationSessionPanel.tsx`・9本の既存回帰script(合計240件超のassertion、
+ *     Gate M1-B3〜M1-B5aで既にPASS実績あり)に広く実使用されている「生きた」語彙。
+ *   - 全面改名はサンドボックスでの実DB検証ができない前提下では、動作中の
+ *     機能を壊すリスクが実装内容そのものより大きい(このPatchはSPLIT機能という
+ *     「新規に安全な追加」であり、「広範囲・高リスクなrename」ではない、という
+ *     既存のblast radius最小化方針を踏襲する)。
+ *   - `EDIT`は既存の「候補内容を訂正して採用する」動作に相当する概念が
+ *     Answer→Candidate Revision機構(M1-B5a)で既に別形で実現されているため、
+ *     このGateでは追加しない(想像で重複概念を作らない)。
+ * この差分改名は、既存語彙を安全に移行できる十分な回帰網羅ができた次のGateで
+ * 独立して扱う。
+ *
  * PENDINGは「未決定」を表す既定Projection値であり、CandidateDecisionEventとしては
- * 記録しない(schema.prisma該当modelコメント参照)。このためEvent用の許容値集合は
- * PENDINGを除いた4値。
+ * 記録しない(schema.prisma該当modelコメント参照)。
  */
-export const CANDIDATE_DECISION_STATES = ["PENDING", "ACCEPTED", "REJECTED", "DEFERRED", "DO_NOT_MATERIALIZE"] as const;
+export const CANDIDATE_DECISION_STATES = ["PENDING", "ACCEPTED", "REJECTED", "DEFERRED", "DO_NOT_MATERIALIZE", "SPLIT", "MERGED"] as const;
 export type CandidateDecisionState = (typeof CANDIDATE_DECISION_STATES)[number];
 
-export const CANDIDATE_DECISION_EVENT_VALUES = ["ACCEPTED", "REJECTED", "DEFERRED", "DO_NOT_MATERIALIZE"] as const;
+/// [2026-08-30追加・M1-C] SPLIT: §11.4「本人が承認した場合のみ…SPLIT Correctionを
+/// 追記し、新しいResponsibility群とRelationを同一transactionで作る」の実装
+/// (splitCorrection.ts)で使う。MERGED: 統合正本語彙は動詞形`MERGE`(操作名)だが、
+/// 決定Event自体は「マージされた側」の終端状態を表すため過去分詞`MERGED`とする
+/// (SPLITは「分解する」という操作と「分解された」という結果が同一語で表現
+/// できるため据え置き、MERGEDのみ非対称に扱う)。[このGateでのscope] MERGE操作
+/// 本体(複数候補の統合transaction)は未実装。値の予約のみ行い、実際に
+/// この値を書き込む経路は存在しない(想像で実装を先取りしない、既存の
+/// ATOMICITY_ASSESSMENTSのCONTEXT_LIKE等と同じ「先行定義」パターン)。
+export const CANDIDATE_DECISION_EVENT_VALUES = ["ACCEPTED", "REJECTED", "DEFERRED", "DO_NOT_MATERIALIZE", "SPLIT", "MERGED"] as const;
 export type CandidateDecisionEventValue = (typeof CANDIDATE_DECISION_EVENT_VALUES)[number];
 
 export function isValidCandidateDecisionEventValue(value: string): value is CandidateDecisionEventValue {

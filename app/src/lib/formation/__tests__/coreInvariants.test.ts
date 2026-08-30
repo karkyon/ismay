@@ -188,12 +188,14 @@ ok("FREE_TEXTは有効なanswerKind", isValidFormationAnswerKind("FREE_TEXT"));
 ok("旧DOC-03語彙ANSWEREDはもはや無効(統合正本移行の確認)", !isValidFormationAnswerKind("ANSWERED"));
 ok("未知のanswerKindは無効", !isValidFormationAnswerKind("MAYBE"));
 
-ok("CANDIDATE_DECISION_STATESは5値(PENDING含む)ちょうど", CANDIDATE_DECISION_STATES.length === 5);
+ok("CANDIDATE_DECISION_STATESは7値(PENDING含む、M1-CでSPLIT/MERGED追加)ちょうど", CANDIDATE_DECISION_STATES.length === 7);
 ok(
-  "CANDIDATE_DECISION_EVENT_VALUESはPENDINGを含まない4値ちょうど(このPatchではscope外・現行語彙を維持)",
-  CANDIDATE_DECISION_EVENT_VALUES.length === 4 && !(CANDIDATE_DECISION_EVENT_VALUES as readonly string[]).includes("PENDING"),
+  "CANDIDATE_DECISION_EVENT_VALUESはPENDINGを含まない6値ちょうど(M1-CでSPLIT/MERGED追加、既存4値のrenameは引き続きscope外)",
+  CANDIDATE_DECISION_EVENT_VALUES.length === 6 && !(CANDIDATE_DECISION_EVENT_VALUES as readonly string[]).includes("PENDING"),
 );
 ok("ACCEPTEDは有効なdecision event値", isValidCandidateDecisionEventValue("ACCEPTED"));
+ok("SPLITは有効なdecision event値(M1-C新設)", isValidCandidateDecisionEventValue("SPLIT"));
+ok("MERGEDは有効なdecision event値(M1-C新設・値の予約のみ、transaction未実装)", isValidCandidateDecisionEventValue("MERGED"));
 ok("PENDINGはdecision event値として無効(既定Projection値でEvent化しない)", !isValidCandidateDecisionEventValue("PENDING"));
 
 // -------------------------------------------------------------------

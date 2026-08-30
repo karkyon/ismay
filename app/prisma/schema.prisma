@@ -1843,9 +1843,13 @@ model FormationCandidateDecisionEvent {
   /// EV-F-003「承認Revisionが暗黙更新されない」)。
   revisionId  String                     @map("revision_id")
   revision    FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
-  /// ACCEPTED/REJECTED/DEFERRED/DO_NOT_MATERIALIZE(DOC-02 6章CandidateDecisionの
-  /// うちPENDINGを除く。PENDINGは「未決定」を表す既定状態でありEventとしては
-  /// 記録しない、という設計判断)。
+  /// ACCEPTED/REJECTED/DEFERRED/DO_NOT_MATERIALIZE/SPLIT/MERGED(DOC-02 6章
+  /// CandidateDecisionのうちPENDINGを除く。PENDINGは「未決定」を表す既定状態であり
+  /// Eventとしては記録しない、という設計判断)。[2026-08-30追加・M1-C]
+  /// SPLIT/MERGEDは統合正本§6.6・§11.4対応で追加(migration
+  /// 20260830040000_formation_split_decision_vocabulary)。SPLITは
+  /// splitCorrection.ts専用、MERGEDは値のみ予約(transaction本体は未実装、
+  /// coreTypes.ts CANDIDATE_DECISION_EVENT_VALUESコメント参照)。
   decision    String
   reasonCode  String?                    @map("reason_code")
   /// DOC-03 4章では単一必須field(本人承認なしのResponsibility生成0件、という
