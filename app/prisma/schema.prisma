@@ -1774,6 +1774,21 @@ model FormationQuestion {
   ordinal       Int
   questionCode  String                      @map("question_code")
   promptVersion String                      @map("prompt_version")
+  /// [2026-08-30新設・M1-B5a §3.2] 統合正本§6.6「質問本文」。questionCode+promptVersionは
+  /// テンプレートの識別key、promptTextはask時点でcandidate情報等を埋め込んで確定した
+  /// 実際の表示文そのもののsnapshot(再現可能性のため、後からテンプレートを差し替えても
+  /// 過去のQuestionの表示文は不変)。
+  promptText    String                      @map("prompt_text")
+  /// [2026-08-30新設・M1-B5a §3.1] P0/P1/P2(統合正本§6.4優先順位)。
+  priority      String
+  /// [2026-08-30新設・M1-B5a §3.1] このQuestionが選ばれた理由を示す短いcode
+  /// (CandidateDecisionEvent.reasonCode等、既存の「code、詳細文はUI側」方式を踏襲)。
+  reasonCode    String                      @map("reason_code")
+  /// [2026-08-30新設・M1-B5a §3.1] 統合正本§6.4
+  /// 「ambiguity × downstreamImpact × errorRisk - answerCost」の算出値そのもの
+  /// (score算出の各成分はQuestion Policy関数側でtestする。ここではaudit・tie-break
+  /// 根拠として最終scoreだけを保持する)。
+  scoreValue    Decimal                     @map("score_value") @db.Decimal(7, 4)
   askedEventId  String?                     @map("asked_event_id")
   askedEvent    FormationSessionEvent?      @relation(fields: [askedEventId], references: [id])
   createdAt     DateTime                    @default(now()) @map("created_at")
@@ -1806,7 +1821,13 @@ model FormationAnswerEvent {
   revisionOfId String?                @map("revision_of_id")
   revisionOf   FormationAnswerEvent?  @relation("FormationAnswerCorrection", fields: [revisionOfId], references: [id])
   corrections  FormationAnswerEvent[] @relation("FormationAnswerCorrection")
+  /// [2026-08-30新設・M1-B5a §3.2] POST /:id/answers の冪等性key
+  /// (統合正本DOC-03 §7「POST /:id/answers | 回答Event追加 | clientEventId unique」)。
+  /// (workspaceId, actorUserId, clientEventId)でtenant+本人scopeの一意性を持たせる
+  /// (既存captures.clientDraftIdの(workspaceId, createdById, clientDraftId)パターンを踏襲)。
+  clientEventId String                @map("client_event_id")
 
+  @@unique([workspaceId, actorUserId, clientEventId], map: "formation_answer_events_workspace_actor_client_event_uq")
   @@index([workspaceId, questionId])
   @@map("formation_answer_events")
 }
