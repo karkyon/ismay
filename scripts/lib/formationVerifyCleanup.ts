@@ -85,6 +85,26 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
     const sessionIds = sessions.map((s) => s.id);
 
     if (sessionIds.length > 0) {
+      // [2026-08-30新設・M1-B5a是正] FormationQuestion/FormationAnswerEventが
+      // このcleanupに組み込まれていなかった(M1-B5a §3.2でtable新設時に追随漏れ)。
+      // FormationAnswerEvent.questionId(必須FK)→FormationQuestion、
+      // FormationQuestion.candidateId(nullable FK)→FormationCandidateIdentity、
+      // FormationQuestion.askedEventId(nullable FK)→FormationSessionEventの依存が
+      // あるため、下のformationCandidateIdentity.deleteMany/formationSessionEvent.
+      // deleteManyより先に、必ずこのブロックで削除しておく(そうしないとFK違反で
+      // cleanup全体が中断し、test用行が残る)。
+      const questions = await step(
+        errors,
+        "formationQuestion.findMany",
+        () => db.formationQuestion.findMany({ where: { sessionId: { in: sessionIds } }, select: { id: true } }),
+        [] as { id: string }[],
+      );
+      const questionIds = questions.map((q) => q.id);
+      if (questionIds.length > 0) {
+        await step(errors, "formationAnswerEvent.deleteMany", () => db.formationAnswerEvent.deleteMany({ where: { questionId: { in: questionIds } } }), { count: 0 });
+      }
+      await step(errors, "formationQuestion.deleteMany", () => db.formationQuestion.deleteMany({ where: { sessionId: { in: sessionIds } } }), { count: 0 });
+
       const identities = await step(
         errors,
         "formationCandidateIdentity.findMany",

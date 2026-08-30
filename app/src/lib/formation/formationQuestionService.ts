@@ -70,13 +70,32 @@ export async function applyQuestionPolicyAndTransition(
 
   const priorQuestions = await tx.formationQuestion.findMany({
     where: { sessionId, workspaceId },
-    select: { candidateId: true, questionCode: true },
+    select: { id: true, candidateId: true, questionCode: true },
   });
   const alreadyAsked = new Set<string>(
     priorQuestions
       .filter((q: { candidateId: string | null }) => q.candidateId !== null)
       .map((q: { candidateId: string | null; questionCode: string }) => `${q.candidateId}::${q.questionCode}`),
   );
+
+  // [2026-08-30新設・実装不備の是正] 指示書§4.3「再評価後、残QuestionがあればCLARIFYING、
+  // なければREVIEW_READY」の「残Question」は、既に質問済みだがまだ回答されていない
+  // Questionを指す。当初の実装は「新規に生成すべき質問があるか」だけを見ており、
+  // 既存の未回答Question(例: 2問同時提示のうち1問だけ回答された場合の残り1問)を
+  // 見落としてREVIEW_READYへ誤って進んでしまうbugがあった(Answer API実装時の
+  // シナリオ検討で発覚)。既存Question全件のうち、FormationAnswerEventが
+  // 1件も無いものが残っていればCLARIFYINGを維持する。
+  const priorQuestionIds = priorQuestions.map((q: { id: string }) => q.id);
+  let hasUnansweredPriorQuestion = false;
+  if (priorQuestionIds.length > 0) {
+    const answeredRows = await tx.formationAnswerEvent.findMany({
+      where: { workspaceId, questionId: { in: priorQuestionIds } },
+      select: { questionId: true },
+      distinct: ["questionId"],
+    });
+    const answeredQuestionIds = new Set(answeredRows.map((a: { questionId: string }) => a.questionId));
+    hasUnansweredPriorQuestion = priorQuestionIds.some((id: string) => !answeredQuestionIds.has(id));
+  }
 
   const sessionCandidateInputs: SessionCandidateInput[] = candidates.map((c) => ({
     candidateRef: c.identityId,
@@ -92,7 +111,7 @@ export async function applyQuestionPolicyAndTransition(
   });
   let nextSequence = (lastSessionEvent?.sequence ?? 0) + 1;
 
-  if (selected.length === 0) {
+  if (selected.length === 0 && !hasUnansweredPriorQuestion) {
     const toReviewReady = resolveFormationSessionTransition("ANALYZING", "NO_QUESTIONS_NEEDED");
     if (!toReviewReady) {
       throw new Error("coreTypes不整合: ANALYZING--NO_QUESTIONS_NEEDED-->の遷移が定義されていません");
@@ -105,6 +124,13 @@ export async function applyQuestionPolicyAndTransition(
     return { newState: "REVIEW_READY", questionsAskedCount: 0, newQuestionCount: questionCountBefore };
   }
 
+  // [設計判断・2026-08-30] coreTypes.tsの遷移guard文言は「Question Policyが質問を生成」
+  // だが、ここは「新規質問生成」と「既存未回答質問の維持」の両方でCLARIFYINGへ
+  // 遷移させる(統合正本§6.3の状態自体はCLARIFYING/REVIEW_READYの2値のみで、
+  // 「未回答質問が残っているか」という粒度の別状態は無いため、同じ操作名
+  // QUESTIONS_READYを再利用する。新しい操作名を追加するとFORMATION_SESSION_
+  // OPERATIONS/既存pure testへの変更が必要になり、この是正の本質的なscopeを
+  // 超えるため、既存語彙の範囲内で対応する)。
   const toClarifying = resolveFormationSessionTransition("ANALYZING", "QUESTIONS_READY");
   if (!toClarifying) {
     throw new Error("coreTypes不整合: ANALYZING--QUESTIONS_READY-->の遷移が定義されていません");
