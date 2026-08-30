@@ -1,18 +1,53 @@
 /**
- * V5-M1-B1 Formation Session: 共通enum・状態機械・語彙定義。
- * 出典: ISMAY-V5-DOC-03(Formation Session仕様書) 3章(状態機械)・4章(論理データ契約)・
- *       5章(Atomicity Assessment)、ISMAY-V5-DOC-02(用語・状態・EventCode定義書)
- *       6章(Formation・Context・Pattern状態)・7.3節(Formation Event Catalog)。
+ * V5-M1-B1/B5 Formation Session: 共通enum・状態機械・語彙定義。
  *
- * 既存 app/src/lib/projectContext/coreTypes.ts と同じ「as const + type + validator」方式。
+ * [2026-08-30是正・契約正規化] 出典を`ISMAY-V5-DOC-03`から`ISMAY_統合正本仕様書_v5_0.md`
+ * §6(Formation Session)・§11.1(Atomicity Assessment)へ切り替えた。
+ *
+ * 正本規則(統合正本§0.2): 「統合正本の状態遷移・データ契約 > v5分冊の承認済み仕様 > … >
+ * 現行コード」。DOC-03(v5分冊)はこのファイルの旧版の出典だったが、統合正本と食い違う
+ * 箇所が複数見つかったため、監査(2026-08-30 M1-B5a指示書)に基づき統合正本を正として
+ * 全面是正した。「現行コードに存在することだけではv5仕様への適合を意味しない」
+ * (統合正本§0.2)という明記に従い、旧DOC-03語彙をそのまま延命しない。
+ *
+ * [是正した3項目]
+ *   1. FormationSession状態機械(§6.3): 操作語彙を`ANALYZE/ANSWER/ANSWER_ENOUGH/COMMIT`等の
+ *      DOC-03語彙から、`START_ANALYSIS/QUESTIONS_READY/ANSWER_SUBMITTED/CONFIRM_ALL`等の
+ *      統合正本語彙へ全面置換した。最大の意味変化は「CLARIFYING --ANSWER_SUBMITTED--> ANALYZING」
+ *      (回答のたびに一旦ANALYZINGへ戻り、Question Policyを再評価してから次の質問または
+ *      REVIEW_READYへ進む)。DOC-03は「CLARIFYING --answer--> CLARIFYING」
+ *      (CLARIFYING内で完結)だったが、これは統合正本と矛盾するため置換した。
+ *   2. QuestionAnswer種別(§6.4): `ANSWERED/UNKNOWN/DEFERRED/DO_NOT_MATERIALIZE`から
+ *      `SELECTED/FREE_TEXT/UNKNOWN/DEFERRED/DO_NOT_MATERIALIZE`へ拡張した
+ *      (選択式回答と自由文回答を区別する)。
+ *   3. AtomicityAssessment判定値(§11.1): `ATOMIC/NEEDS_SPLIT/NEEDS_CLARIFICATION/
+ *      TOO_FINE/NOT_ACTIONABLE`(DOC-03語彙、実際にはこのDOC-03語彙自体が統合正本とは
+ *      別物だった)から`ATOMIC/PROBABLY_ATOMIC/NEEDS_CLARIFICATION/SHOULD_DECOMPOSE/
+ *      CONTEXT_LIKE`(統合正本§11.1の実際の語彙)へ置換した。
+ *
+ * [このPatchでは変更しなかったもの・理由] `CandidateDecisionEvent`の語彙
+ * (`ACCEPTED/REJECTED/DEFERRED/DO_NOT_MATERIALIZE`)は、統合正本§6.6では
+ * `ACCEPT/EDIT/REJECT/MERGE/SPLIT/DEFER`(動詞形、EDIT/MERGE/SPLIT追加)と
+ * 定義されているが、このPatchでは意図的に変更していない。理由:
+ *   - 現行の`ACCEPTED/REJECTED/DEFERRED/DO_NOT_MATERIALIZE`は`materialize.ts`
+ *     (931行)・2本の決定API route・bulk-decisions route・`FormationSessionPanel.tsx`・
+ *     8本の既存回帰script(合計164件のassertion、Gate M1-B3〜B4.3で既にPASS実績あり)に
+ *     広く実使用されている「生きた」語彙であり、今回是正した3項目(state機械・
+ *     answer種別・atomicity)とは異なり、まだ一切使われていない「休眠」語彙ではない。
+ *   - `MERGE/SPLIT`はAtomicity Assessment(M1-C、このリポジトリでは未実装)に
+ *     依存する概念であり、対応する分解/統合transactionが存在しない状態で
+ *     語彙だけ追加しても実体が伴わない。
+ *   - 1つのPatchで「新規に安全な語彙変更」と「広範囲・高リスクなrename」を混在させず、
+ *     blast radiusを最小化する既存の運用方針(B4→B4.1→B4.2→B4.2b→B4.3の細分と同じ
+ *     考え方)に従う。
+ * この語彙差分は次のGate(CandidateDecisionEvent正規化、M1-B5a本体着手前に実施予定)で
+ * 独立して扱う。想像で先送りしているのではなく、明示的にscope外としている。
+ *
  * db.ts を import しないこと(tsxのdb非依存test runnerで検証できるようにするため。
  * 既存 pem/coreTypes.ts・projectContext/coreTypes.ts と同じパターンを踏襲)。
- *
- * このファイルはM1-B1(shadow Session生成のみ)のdomain基盤であり、API/UI/実際の
- * Capture・AI抽出フローへの配線(CHG-010〜012)は含まない。
  */
 
-/** FormationSession状態(DOC-02 6章、DOC-03 3章)。 */
+/** FormationSession状態(統合正本§6.2)。DOC-03と同一9値のため変更なし。 */
 export const FORMATION_SESSION_STATES = [
   "DRAFT",
   "ANALYZING",
@@ -31,97 +66,103 @@ export function isValidFormationSessionState(value: string): value is FormationS
 }
 
 /**
- * FormationSessionの操作(DOC-03 3章「操作」列)。
- * (from, operation) の組が一意にtoを決める(下記FORMATION_SESSION_TRANSITIONS参照)。
+ * FormationSessionの操作(統合正本§6.3「許可遷移」action列)。
+ * [2026-08-30是正] DOC-03語彙(ANALYZE/ANSWER/ANSWER_ENOUGH/PARTIAL_DECISIONS/COMMIT等)から
+ * 統合正本語彙へ全面置換。
  */
 export const FORMATION_SESSION_OPERATIONS = [
-  "ANALYZE",
-  "ANALYSIS_SUCCESS_NO_QUESTION",
-  "ANALYSIS_SUCCESS_QUESTION",
-  "ANALYSIS_FAILURE",
-  "ANSWER",
-  "ANSWER_ENOUGH",
-  "PARTIAL_DECISIONS",
-  "COMMIT",
-  "DEFER",
-  "DISMISS",
+  "START_ANALYSIS",
+  "QUESTIONS_READY",
+  "NO_QUESTIONS_NEEDED",
+  "ANALYSIS_FAILED",
+  "ANSWER_SUBMITTED",
+  "DEFER_SESSION",
+  "CONFIRM_ALL",
+  "CONFIRM_SOME",
+  "DISMISS_ALL",
+  "RESOLVE_REMAINING",
+  "DEFER_REMAINING",
+  "RESUME",
   "RETRY",
 ] as const;
 export type FormationSessionOperation = (typeof FORMATION_SESSION_OPERATIONS)[number];
 
 /**
- * DOC-03 3章の状態機械表をそのまま正本化したもの。
- * 「任意非終端からdefer/dismiss可能」は、終端でない各状態
- * (DRAFT/ANALYZING/CLARIFYING/REVIEW_READY/PARTIALLY_CONFIRMED/FAILED)ごとに
- * 明示的な行として展開する(暗黙のワイルドカード規則を作らず、全遷移をテーブル駆動で
- * 検証可能にするため。既存coreTypesの設計方針を踏襲)。
- * 真の終端(以降どの操作でも遷移しない)は CONFIRMED / DISMISSED / DEFERRED の3つ。
+ * 統合正本§6.3の表をそのまま正本化したもの。
+ *
+ * [多終端操作について] `RESOLVE_REMAINING`(PARTIALLY_CONFIRMED起点)と`RESUME`
+ * (DEFERRED起点)は、統合正本の表自体が「to」列に複数値を「/」区切りで記載しており
+ * (例: 「CONFIRMED / DISMISSED」)、(from, operation)の組だけでは遷移先が一意に
+ * 決まらない。これは想像で単純化せず、複数行として忠実にテーブル化する
+ * (`resolveFormationSessionTransition`は単一解決可能な操作のみを解決し、
+ * 多終端操作は`isValidFormationSessionTransitionTriple`で個別に検証する設計)。
  */
-const NON_TERMINAL_STATES_FOR_DEFER_DISMISS: readonly FormationSessionState[] = [
-  "DRAFT",
-  "ANALYZING",
-  "CLARIFYING",
-  "REVIEW_READY",
-  "PARTIALLY_CONFIRMED",
-  "FAILED",
-];
-
 export const FORMATION_SESSION_TRANSITIONS: ReadonlyArray<{
   from: FormationSessionState;
   operation: FormationSessionOperation;
   to: FormationSessionState;
   guard: string;
 }> = [
-  { from: "DRAFT", operation: "ANALYZE", to: "ANALYZING", guard: "Capture存在・scope一致" },
-  { from: "ANALYZING", operation: "ANALYSIS_SUCCESS_NO_QUESTION", to: "REVIEW_READY", guard: "Candidate>=1" },
-  { from: "ANALYZING", operation: "ANALYSIS_SUCCESS_QUESTION", to: "CLARIFYING", guard: "questionCount<=3" },
-  { from: "ANALYZING", operation: "ANALYSIS_FAILURE", to: "FAILED", guard: "error記録済み" },
-  { from: "CLARIFYING", operation: "ANSWER", to: "CLARIFYING", guard: "未回答あり、上限内" },
-  { from: "CLARIFYING", operation: "ANSWER_ENOUGH", to: "REVIEW_READY", guard: "未解決必須項目なし" },
-  { from: "REVIEW_READY", operation: "PARTIAL_DECISIONS", to: "PARTIALLY_CONFIRMED", guard: "acceptedとpending混在" },
-  { from: "REVIEW_READY", operation: "COMMIT", to: "CONFIRMED", guard: "accepted>=1、atomicity解決" },
-  { from: "PARTIALLY_CONFIRMED", operation: "COMMIT", to: "CONFIRMED", guard: "accepted>=1、atomicity解決" },
+  { from: "DRAFT", operation: "START_ANALYSIS", to: "ANALYZING", guard: "Capture存在・scope一致" },
+  { from: "ANALYZING", operation: "QUESTIONS_READY", to: "CLARIFYING", guard: "Question Policyが質問を生成" },
+  { from: "ANALYZING", operation: "NO_QUESTIONS_NEEDED", to: "REVIEW_READY", guard: "Candidate>=1、質問なし" },
+  { from: "ANALYZING", operation: "ANALYSIS_FAILED", to: "FAILED", guard: "error記録済み" },
+  { from: "CLARIFYING", operation: "ANSWER_SUBMITTED", to: "ANALYZING", guard: "回答Event追記済み(再評価のためANALYZINGへ戻る)" },
+  { from: "CLARIFYING", operation: "DEFER_SESSION", to: "DEFERRED", guard: "理由任意" },
+  { from: "REVIEW_READY", operation: "CONFIRM_ALL", to: "CONFIRMED", guard: "accepted>=1、pending=0" },
+  { from: "REVIEW_READY", operation: "CONFIRM_SOME", to: "PARTIALLY_CONFIRMED", guard: "acceptedとpending混在" },
+  { from: "REVIEW_READY", operation: "DISMISS_ALL", to: "DISMISSED", guard: "候補を責任化しない" },
+  { from: "REVIEW_READY", operation: "DEFER_SESSION", to: "DEFERRED", guard: "理由任意" },
+  { from: "PARTIALLY_CONFIRMED", operation: "RESOLVE_REMAINING", to: "CONFIRMED", guard: "残りpendingがaccepted側で解決" },
+  { from: "PARTIALLY_CONFIRMED", operation: "RESOLVE_REMAINING", to: "DISMISSED", guard: "残りpendingがdismiss側で解決" },
+  { from: "PARTIALLY_CONFIRMED", operation: "DEFER_REMAINING", to: "DEFERRED", guard: "理由任意" },
+  { from: "DEFERRED", operation: "RESUME", to: "ANALYZING", guard: "defer前がANALYZING相当" },
+  { from: "DEFERRED", operation: "RESUME", to: "CLARIFYING", guard: "defer前がCLARIFYING" },
+  { from: "DEFERRED", operation: "RESUME", to: "REVIEW_READY", guard: "defer前がREVIEW_READY/PARTIALLY_CONFIRMED" },
   { from: "FAILED", operation: "RETRY", to: "ANALYZING", guard: "新AiRun、同じSession" },
-  ...NON_TERMINAL_STATES_FOR_DEFER_DISMISS.map((from) => ({
-    from,
-    operation: "DEFER" as const,
-    to: "DEFERRED" as const,
-    guard: "理由任意",
-  })),
-  ...NON_TERMINAL_STATES_FOR_DEFER_DISMISS.map((from) => ({
-    from,
-    operation: "DISMISS" as const,
-    to: "DISMISSED" as const,
-    guard: "候補を責任化しない",
-  })),
 ];
 
 /**
- * (from, operation)から遷移先stateを引く純粋関数。該当行が無ければundefined
- * (=不正な遷移)。DOC-03 3章「終端CONFIRMED/DISMISSEDから直接戻さない」は、
- * これらのstateをfromに持つ行が表に存在しないことで自然に保証される。
+ * (from, operation)から遷移先stateを引く純粋関数。該当行が無ければ、または複数行が
+ * マッチする(多終端操作)場合はundefinedを返す(=単純解決不能。多終端操作は
+ * `isValidFormationSessionTransitionTriple`で呼び出し元が文脈から決めた`to`を
+ * 個別に検証すること)。
  */
 export function resolveFormationSessionTransition(
   from: string,
   operation: string,
 ): FormationSessionState | undefined {
-  return FORMATION_SESSION_TRANSITIONS.find((t) => t.from === from && t.operation === operation)?.to;
+  const matches = FORMATION_SESSION_TRANSITIONS.filter((t) => t.from === from && t.operation === operation);
+  if (matches.length !== 1) return undefined;
+  return matches[0].to;
 }
 
 export function isValidFormationSessionTransition(from: string, operation: string): boolean {
   return resolveFormationSessionTransition(from, operation) !== undefined;
 }
 
-/** Question上限(DOC-03 2章UX契約3「最大3件」、3章Guard「questionCount<=3」)。 */
+/**
+ * [2026-08-30新設] 多終端操作(RESOLVE_REMAINING/RESUME)向け。(from, operation, to)の
+ * 三つ組が表に実在するかどうかだけを判定する(遷移先の決定はcaller側の業務ロジックに
+ * 委ね、ここでは「その決定が表と矛盾していないか」だけを機械的に検証する)。
+ */
+export function isValidFormationSessionTransitionTriple(from: string, operation: string, to: string): boolean {
+  return FORMATION_SESSION_TRANSITIONS.some((t) => t.from === from && t.operation === operation && t.to === to);
+}
+
+/** Question上限(統合正本§6.4「最大3問/Session」)。 */
 export const FORMATION_MAX_QUESTIONS = 3;
 
 export function isValidFormationQuestionOrdinal(ordinal: number): boolean {
   return Number.isInteger(ordinal) && ordinal >= 1 && ordinal <= FORMATION_MAX_QUESTIONS;
 }
 
-/** QuestionAnswer種別(DOC-02 6章)。自由文の場合はANSWEREDを用いる(既存PEMの
- * ReasonPromptStateEventと同じ「ANSWERED/SKIPPED的分離」設計を踏襲)。 */
-export const FORMATION_ANSWER_KINDS = ["ANSWERED", "UNKNOWN", "DEFERRED", "DO_NOT_MATERIALIZE"] as const;
+/**
+ * QuestionAnswer種別(統合正本§6.4)。
+ * [2026-08-30是正] DOC-03語彙(`ANSWERED`のみで自由文・選択式を区別しなかった)から、
+ * 統合正本語彙(`SELECTED`=選択肢回答、`FREE_TEXT`=自由文回答、を区別する5値)へ拡張。
+ */
+export const FORMATION_ANSWER_KINDS = ["SELECTED", "FREE_TEXT", "UNKNOWN", "DEFERRED", "DO_NOT_MATERIALIZE"] as const;
 export type FormationAnswerKind = (typeof FORMATION_ANSWER_KINDS)[number];
 
 export function isValidFormationAnswerKind(value: string): value is FormationAnswerKind {
@@ -129,9 +170,12 @@ export function isValidFormationAnswerKind(value: string): value is FormationAns
 }
 
 /**
- * CandidateDecision(DOC-02 6章)。PENDINGは「未決定」を表す既定Projection値であり、
- * CandidateDecisionEventとしては記録しない(schema.prisma該当modelコメント参照)。
- * このためEvent用の許容値集合はPENDINGを除いた4値。
+ * CandidateDecision(DOC-02 6章由来、このPatchでは意図的に未変更)。
+ * [scope外の明記] 統合正本§6.6は`ACCEPT/EDIT/REJECT/MERGE/SPLIT/DEFER`を定義しているが、
+ * このファイル冒頭コメントに記載の理由により、このPatchでは現行語彙を維持する。
+ * PENDINGは「未決定」を表す既定Projection値であり、CandidateDecisionEventとしては
+ * 記録しない(schema.prisma該当modelコメント参照)。このためEvent用の許容値集合は
+ * PENDINGを除いた4値。
  */
 export const CANDIDATE_DECISION_STATES = ["PENDING", "ACCEPTED", "REJECTED", "DEFERRED", "DO_NOT_MATERIALIZE"] as const;
 export type CandidateDecisionState = (typeof CANDIDATE_DECISION_STATES)[number];
@@ -143,13 +187,20 @@ export function isValidCandidateDecisionEventValue(value: string): value is Cand
   return (CANDIDATE_DECISION_EVENT_VALUES as readonly string[]).includes(value);
 }
 
-/** Atomicity Assessment判定値(DOC-03 5章)。 */
+/**
+ * Atomicity Assessment判定値(統合正本§11.1)。
+ * [2026-08-30是正] 旧語彙(`ATOMIC/NEEDS_SPLIT/NEEDS_CLARIFICATION/TOO_FINE/
+ * NOT_ACTIONABLE`)はDOC-03由来だが、これ自体が統合正本§11.1とは別物だったため、
+ * 統合正本の実際の語彙(`ATOMIC/PROBABLY_ATOMIC/NEEDS_CLARIFICATION/SHOULD_DECOMPOSE/
+ * CONTEXT_LIKE`)へ置換した。M1-C(Atomicity Assessment本体)未実装のため、この定数は
+ * 現時点ではどこからも参照されていない(coreTypes.ts内の定義とpure testのみ)。
+ */
 export const ATOMICITY_ASSESSMENTS = [
   "ATOMIC",
-  "NEEDS_SPLIT",
+  "PROBABLY_ATOMIC",
   "NEEDS_CLARIFICATION",
-  "TOO_FINE",
-  "NOT_ACTIONABLE",
+  "SHOULD_DECOMPOSE",
+  "CONTEXT_LIKE",
 ] as const;
 export type AtomicityAssessment = (typeof ATOMICITY_ASSESSMENTS)[number];
 
@@ -161,6 +212,7 @@ export function isValidAtomicityAssessment(value: string): value is AtomicityAss
  * Formation Event Catalog(DOC-02 7.3節、v5追加・16種)。FormationSessionEvent.eventType
  * の許容値集合(schema.prisma側にDB CHECKとしても追加する。SourceAnchorはEvent化しない
  * 独立tableのためSOURCE_ANCHOR_ATTACHEDのみEvent Catalogとして存在する点に注意)。
+ * このPatchでは変更なし(統合正本§6.6のEntity一覧とも矛盾しないため)。
  */
 export const FORMATION_EVENT_TYPES = [
   "FORMATION_CREATED",
@@ -189,6 +241,7 @@ export function isValidFormationEventType(value: string): value is FormationEven
 /**
  * FormationSourceAnchor.sourceKind(M1-LOCの4 Adapter種別、HANDOFF v1 M1
  * 「Text offset、音声timecode、会議speaker、画像page/bbox Adapter」に対応)。
+ * このPatchでは変更なし。
  */
 export const FORMATION_SOURCE_ANCHOR_KINDS = [
   "TEXT_OFFSET",

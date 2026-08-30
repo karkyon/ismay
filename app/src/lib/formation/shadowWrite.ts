@@ -86,11 +86,13 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
 
       await emit("FORMATION_CREATED", { captureId: capture.id });
 
-      // DRAFT --analyze--> ANALYZING。coreTypes.tsの状態機械を実際に参照することで、
+      // DRAFT --START_ANALYSIS--> ANALYZING。coreTypes.tsの状態機械を実際に参照することで、
       // 正本の遷移表とshadow書込みの整合を機械的に保つ(遷移表を書き換えたときに
       // ここが追随漏れしないよう、遷移先を直接この関数がハードコードしない)。
-      const toAnalyzing = resolveFormationSessionTransition("DRAFT", "ANALYZE");
-      if (!toAnalyzing) throw new Error("coreTypes不整合: DRAFT--analyze-->の遷移が定義されていません");
+      // [2026-08-30是正] 操作名をDOC-03語彙"ANALYZE"から統合正本§6.3語彙
+      // "START_ANALYSIS"へ置換。
+      const toAnalyzing = resolveFormationSessionTransition("DRAFT", "START_ANALYSIS");
+      if (!toAnalyzing) throw new Error("coreTypes不整合: DRAFT--START_ANALYSIS-->の遷移が定義されていません");
       await tx.formationSession.update({
         where: { id: session.id },
         data: { state: toAnalyzing, version: { increment: 1 } },
@@ -102,18 +104,23 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
       // [DEC-010] Question Policy(質問生成)はこのGateでは未接続のため、
       // success/question分岐(CLARIFYING)は使わない(質問を生成する主体が
       // まだ存在しない。想像でCLARIFYINGへ遷移させない)。
+      // [2026-08-30是正] 操作名をDOC-03語彙"ANALYSIS_SUCCESS_NO_QUESTION"から
+      // 統合正本§6.3語彙"NO_QUESTIONS_NEEDED"へ置換。
       if (candidates.length > 0) {
         await emit("ANALYSIS_SUCCEEDED", { candidateCount: candidates.length, captureSummary: captureSummary ?? null });
-        const toReviewReady = resolveFormationSessionTransition("ANALYZING", "ANALYSIS_SUCCESS_NO_QUESTION");
-        if (!toReviewReady) throw new Error("coreTypes不整合: ANALYZING--success/no question-->の遷移が定義されていません");
+        const toReviewReady = resolveFormationSessionTransition("ANALYZING", "NO_QUESTIONS_NEEDED");
+        if (!toReviewReady) throw new Error("coreTypes不整合: ANALYZING--NO_QUESTIONS_NEEDED-->の遷移が定義されていません");
         await tx.formationSession.update({
           where: { id: session.id },
           data: { state: toReviewReady, version: { increment: 1 } },
         });
       } else {
         await emit("ANALYSIS_FAILED", { reason: "候補0件" });
-        const toFailed = resolveFormationSessionTransition("ANALYZING", "ANALYSIS_FAILURE");
-        if (!toFailed) throw new Error("coreTypes不整合: ANALYZING--failure-->の遷移が定義されていません");
+        // [2026-08-30是正] 操作名をDOC-03語彙"ANALYSIS_FAILURE"から統合正本§6.3語彙
+        // "ANALYSIS_FAILED"へ置換(FormationEventType側の"ANALYSIS_FAILED"とは別の
+        // 名前空間=coreTypes.tsの操作enumであることに注意。EventTypeは変更なし)。
+        const toFailed = resolveFormationSessionTransition("ANALYZING", "ANALYSIS_FAILED");
+        if (!toFailed) throw new Error("coreTypes不整合: ANALYZING--ANALYSIS_FAILED-->の遷移が定義されていません");
         await tx.formationSession.update({
           where: { id: session.id },
           data: { state: toFailed, version: { increment: 1 } },

@@ -8,6 +8,7 @@ import { createResponsibilityWithLinks } from "@/lib/formation/responsibilityMat
 import { resolveLegacyProjectionMap } from "@/lib/formation/legacyProjectionResolver";
 import {
   resolveFormationSessionTransition,
+  isValidFormationSessionTransitionTriple,
   isValidCandidateDecisionEventValue,
   type CandidateDecisionEventValue,
   type FormationEventType,
@@ -395,7 +396,9 @@ export async function recordCandidateDecision(
         const hasAccepted = decision === "ACCEPTED";
         const hasPending = allIdentities.some((c: { id: string }) => !decidedCandidateIds.has(c.id));
         if (hasAccepted && hasPending) {
-          const toPartial = resolveFormationSessionTransition("REVIEW_READY", "PARTIAL_DECISIONS");
+          // [2026-08-30是正] 操作名をDOC-03語彙"PARTIAL_DECISIONS"から統合正本§6.3語彙
+          // "CONFIRM_SOME"へ置換。
+          const toPartial = resolveFormationSessionTransition("REVIEW_READY", "CONFIRM_SOME");
           if (toPartial) {
             await tx.formationSession.update({
               where: { id: sessionId },
@@ -839,9 +842,11 @@ export async function materializeFormationSession(
       let sessionState: string;
       if (pendingCount > 0) {
         if (session.state === "REVIEW_READY") {
-          const toPartial = resolveFormationSessionTransition("REVIEW_READY", "PARTIAL_DECISIONS");
+          // [2026-08-30是正] 操作名をDOC-03語彙"PARTIAL_DECISIONS"から統合正本§6.3語彙
+          // "CONFIRM_SOME"へ置換。
+          const toPartial = resolveFormationSessionTransition("REVIEW_READY", "CONFIRM_SOME");
           if (!toPartial) {
-            throw new Error("coreTypes不整合: REVIEW_READY--PARTIAL_DECISIONS-->の遷移が定義されていません");
+            throw new Error("coreTypes不整合: REVIEW_READY--CONFIRM_SOME-->の遷移が定義されていません");
           }
           await tx.formationSession.update({
             where: { id: sessionId },
@@ -868,12 +873,25 @@ export async function materializeFormationSession(
         return { ok: true, receiptId: receipt.id, operationId, items, replay: false } as const;
       }
 
-      // pendingCount === 0: REVIEW_READY/PARTIALLY_CONFIRMED --commit--> CONFIRMED
-      // (DOC-03 3章)。atomicity Assessmentは未実装のため常に「解決済み」として扱う
+      // pendingCount === 0: REVIEW_READY/PARTIALLY_CONFIRMED --confirm--> CONFIRMED
+      // (統合正本§6.3)。atomicity Assessmentは未実装のため常に「解決済み」として扱う
       // (このファイル冒頭コメントのスコープ注記を参照)。
-      const toConfirmed = resolveFormationSessionTransition(session.state, "COMMIT");
+      // [2026-08-30是正] DOC-03語彙の単一操作"COMMIT"は統合正本§6.3には存在しない。
+      // REVIEW_READY起点は"CONFIRM_ALL"(単一終端、resolveFormationSessionTransitionで
+      // 解決可能)、PARTIALLY_CONFIRMED起点は"RESOLVE_REMAINING"(CONFIRMED/DISMISSEDの
+      // 多終端操作)であり、このMaterialize経路は常にCONFIRMED行きなので
+      // isValidFormationSessionTransitionTripleで(from, RESOLVE_REMAINING, CONFIRMED)が
+      // 表に実在することだけを検証する。
+      let toConfirmed: string | undefined;
+      if (session.state === "REVIEW_READY") {
+        toConfirmed = resolveFormationSessionTransition("REVIEW_READY", "CONFIRM_ALL");
+      } else if (session.state === "PARTIALLY_CONFIRMED") {
+        toConfirmed = isValidFormationSessionTransitionTriple("PARTIALLY_CONFIRMED", "RESOLVE_REMAINING", "CONFIRMED")
+          ? "CONFIRMED"
+          : undefined;
+      }
       if (!toConfirmed) {
-        throw new Error("coreTypes不整合: " + session.state + "--commit-->の遷移が定義されていません");
+        throw new Error("coreTypes不整合: " + session.state + "からCONFIRMEDへの遷移が定義されていません");
       }
       await tx.formationSession.update({
         where: { id: sessionId },

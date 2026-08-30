@@ -1791,7 +1791,10 @@ model FormationAnswerEvent {
   workspaceId  String                 @map("workspace_id")
   questionId   String                 @map("question_id")
   question     FormationQuestion      @relation(fields: [questionId, workspaceId], references: [id, workspaceId])
-  /// ANSWERED/UNKNOWN/DEFERRED/DO_NOT_MATERIALIZE(DOC-02 6章QuestionAnswer)。
+  /// SELECTED/FREE_TEXT/UNKNOWN/DEFERRED/DO_NOT_MATERIALIZE(統合正本v5.0 §6.4)。
+  /// [2026-08-30是正] 旧DOC-02語彙のANSWERED(選択式・自由文を区別しなかった)から、
+  /// 統合正本§6.4のSELECTED/FREE_TEXT分離語彙へ移行(migration
+  /// 20260830010000_formation_question_answer_v5_contract_normalization)。
   answerKind   String                 @map("answer_kind")
   valueJson    Json?                  @map("value_json")
   /// DOC-03 4章では単一必須fieldとして定義(質問への回答は常に本人。
