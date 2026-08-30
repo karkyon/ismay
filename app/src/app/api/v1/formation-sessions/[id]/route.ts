@@ -85,6 +85,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
         })
       : [];
 
+    // [2026-08-30追加・M1-C] Atomicity Assessment(統合正本§11)。
+    // Revision作成時に1回だけ算出済みのため単純にfindFirstで取得する
+    // (無ければnull、UI側は「未評価」として表示する)。
+    const atomicityAssessment = currentRevision
+      ? await db.formationAtomicityAssessment.findFirst({
+          where: { revisionId: currentRevision.id, workspaceId },
+        })
+      : null;
+
     const decisionEvent = await db.formationCandidateDecisionEvent.findFirst({
       where: { candidateId: identity.id, workspaceId },
       orderBy: { occurredAt: "desc" },
@@ -113,6 +122,16 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
           }
         : null,
       sourceAnchors,
+      // [2026-08-30追加・M1-C] Observationとして提示するのみ(自動分割しない、§11.3)。
+      atomicityAssessment: atomicityAssessment
+        ? {
+            assessment: atomicityAssessment.assessment,
+            reasonCode: atomicityAssessment.reasonCode,
+            evidence: atomicityAssessment.evidence,
+            confidence: Number(atomicityAssessment.confidence),
+            algorithmVersion: atomicityAssessment.algorithmVersion,
+          }
+        : null,
       formationDecision: decisionEvent
         ? { decision: decisionEvent.decision, revisionId: decisionEvent.revisionId, occurredAt: decisionEvent.occurredAt.toISOString() }
         : null,

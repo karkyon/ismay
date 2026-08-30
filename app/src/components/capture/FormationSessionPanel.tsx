@@ -41,6 +41,13 @@ interface ProjectionCandidate {
     description: string | null;
     confidence: number;
   } | null;
+  atomicityAssessment: {
+    assessment: string;
+    reasonCode: string;
+    evidence: unknown;
+    confidence: number;
+    algorithmVersion: string;
+  } | null;
   formationDecision: { decision: string; occurredAt: string } | null;
   materialization: { responsibilityId: string; committedAt: string } | null;
   legacyProjection: {
@@ -106,7 +113,14 @@ const LEGACY_DECISION_LABEL: Record<string, string> = {
   HELD: "保留",
 };
 
-/** [2026-08-30新設・M1-B5a CLARIFYING UI] Question優先度の表示ラベル。 */
+/** [2026-08-30新設・M1-C] Atomicity Assessmentの表示ラベル。 */
+const ATOMICITY_ASSESSMENT_LABEL: Record<string, string> = {
+  ATOMIC: "単一処理可能",
+  PROBABLY_ATOMIC: "おそらく単一処理可能",
+  NEEDS_CLARIFICATION: "要確認",
+  SHOULD_DECOMPOSE: "分解を推奨",
+  CONTEXT_LIKE: "プロジェクト的",
+};
 const QUESTION_PRIORITY_LABEL: Record<string, string> = {
   P0: "重要",
   P1: "確認",
@@ -492,6 +506,14 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
                           </span>
                         )}
                         {c.materialization && <span className="text-[10px] text-safe">✓ 責任として作成済み</span>}
+                        {c.atomicityAssessment &&
+                          (c.atomicityAssessment.assessment === "SHOULD_DECOMPOSE" ||
+                            c.atomicityAssessment.assessment === "NEEDS_CLARIFICATION" ||
+                            c.atomicityAssessment.assessment === "CONTEXT_LIKE") && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-amber-50 text-amber-700">
+                              {ATOMICITY_ASSESSMENT_LABEL[c.atomicityAssessment.assessment] ?? c.atomicityAssessment.assessment}
+                            </span>
+                          )}
                         {conflictCode === "LEGACY_PROJECTION_CONFLICT" && (
                           <span className="text-[10px] text-warn">⚠ 旧経路データ不整合</span>
                         )}
@@ -503,6 +525,23 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
                         {rev?.title ?? "(候補データなし)"}
                       </p>
                       {rev?.description && <p className="text-[11px] text-muted mt-0.5">{rev.description}</p>}
+                      {/* [2026-08-30新設・M1-C §11.3「理由、使用Evidence…を表示する」]
+                          分解を推奨/要確認/プロジェクト的の場合のみ理由を明示する
+                          (通常のATOMIC/PROBABLY_ATOMICは表示ノイズになるため出さない)。
+                          Observationの提示のみで、自動分割は一切行わない。 */}
+                      {c.atomicityAssessment &&
+                        (c.atomicityAssessment.assessment === "SHOULD_DECOMPOSE" ||
+                          c.atomicityAssessment.assessment === "NEEDS_CLARIFICATION" ||
+                          c.atomicityAssessment.assessment === "CONTEXT_LIKE") && (
+                          <div className="mt-1.5 rounded bg-amber-50 px-2 py-1.5 text-[10px] text-amber-800">
+                            {Array.isArray(c.atomicityAssessment.evidence)
+                              ? (c.atomicityAssessment.evidence as Array<{ detail?: string }>)
+                                  .map((e) => e.detail)
+                                  .filter(Boolean)
+                                  .join(" / ")
+                              : null}
+                          </div>
+                        )}
                       {conflictCode && c.legacyProjection && (
                         <div className="mt-1.5 rounded bg-warn-50 px-2 py-1.5 text-[10px] text-warn">
                           {conflictCode === "DECISION_MISMATCH" ? (

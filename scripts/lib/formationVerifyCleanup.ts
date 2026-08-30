@@ -124,6 +124,13 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
 
         if (revisionIds.length > 0) {
           await step(errors, "formationSourceAnchor.deleteMany", () => db.formationSourceAnchor.deleteMany({ where: { revisionId: { in: revisionIds } } }), { count: 0 });
+          // [2026-08-30新設・M1-C是正] formation_atomicity_assessmentsは
+          // formation_candidate_revisionsへの複合FK(revision_id, workspace_id)を
+          // 持つため、formationCandidateRevision.deleteManyより先に削除しないと
+          // FK違反でcleanup全体が中断する(M1-B5aのFormationQuestion/
+          // FormationAnswerEventで踏んだのと同種の追随漏れ、今回はテーブル
+          // 新設時に発見・即時是正)。
+          await step(errors, "formationAtomicityAssessment.deleteMany", () => db.formationAtomicityAssessment.deleteMany({ where: { revisionId: { in: revisionIds } } }), { count: 0 });
         }
         await step(errors, "materializationReceiptItem.deleteMany", () => db.materializationReceiptItem.deleteMany({ where: { candidateId: { in: identityIds } } }), { count: 0 });
         await step(errors, "formationCandidateDecisionEvent.deleteMany", () => db.formationCandidateDecisionEvent.deleteMany({ where: { candidateId: { in: identityIds } } }), { count: 0 });

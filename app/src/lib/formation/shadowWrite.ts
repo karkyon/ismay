@@ -5,6 +5,7 @@ import { debugServer } from "@/lib/debugServer";
 import type { ResponsibilityCandidate } from "@/lib/ai/schema";
 import { resolveFormationSessionTransition, isValidTextOffsetRange, type FormationEventType } from "@/lib/formation/coreTypes";
 import { applyQuestionPolicyAndTransition, type CandidateForQuestionPolicy } from "@/lib/formation/formationQuestionService";
+import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
 
 /**
  * V5-M1-B2 Formation Session shadow書込み。
@@ -157,6 +158,24 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
         await tx.formationCandidateIdentity.update({
           where: { id: identity.id },
           data: { currentRevision: 1 },
+        });
+
+        // [2026-08-30新設・M1-C] Atomicity Assessment(統合正本§11)。
+        // Revisionはimmutableなので、作成直後に1回だけ算出して保存する
+        // (このファイルの他の観測記録=SourceAnchorと同じパターン)。
+        // §11.3「AssessmentはObservationであり、責任を自動分割しない」に
+        // 従い、ここでは記録のみでSession状態やCandidateへの副作用は起こさない。
+        const assessment = assessAtomicity(candidate);
+        await tx.formationAtomicityAssessment.create({
+          data: {
+            workspaceId: capture.workspaceId,
+            revisionId: revision.id,
+            assessment: assessment.assessment,
+            reasonCode: assessment.reasonCode,
+            evidence: assessment.evidence as unknown as object,
+            confidence: assessment.confidence,
+            algorithmVersion: assessment.algorithmVersion,
+          },
         });
 
         await emit("CANDIDATE_CREATED", { candidateKey: candidate.candidateId, revisionId: revision.id, type: candidate.type });

@@ -10,6 +10,7 @@ import {
 } from "@/lib/formation/coreTypes";
 import { applyAnswerToCandidate, isValidQuestionCode, type QuestionCode } from "@/lib/formation/questionPolicy";
 import { applyQuestionPolicyAndTransition, type CandidateForQuestionPolicy } from "@/lib/formation/formationQuestionService";
+import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
 
 /**
  * V5-M1-B5a: POST /formation-sessions/{id}/answers service。
@@ -237,6 +238,22 @@ export async function recordFormationAnswer(params: RecordFormationAnswerParams)
             await tx.formationCandidateIdentity.update({
               where: { id: identity.id },
               data: { currentRevision: newRevisionNumber },
+            });
+            // [2026-08-30新設・M1-C] 回答で新Revisionが作られた際も、
+            // 新しい内容に対してAtomicity Assessmentを再算出する
+            // (shadowWrite.tsの初回Revisionと同じパターン。回答で
+            // completionCondition等が埋まったことで判定が変わりうるため)。
+            const revisedAssessment = assessAtomicity(updatedCandidate);
+            await tx.formationAtomicityAssessment.create({
+              data: {
+                workspaceId,
+                revisionId: newRevisionRow.id,
+                assessment: revisedAssessment.assessment,
+                reasonCode: revisedAssessment.reasonCode,
+                evidence: revisedAssessment.evidence as unknown as object,
+                confidence: revisedAssessment.confidence,
+                algorithmVersion: revisedAssessment.algorithmVersion,
+              },
             });
             await tx.formationSessionEvent.create({
               data: {

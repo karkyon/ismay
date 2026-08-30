@@ -1729,6 +1729,7 @@ model FormationCandidateRevision {
   sourceAnchors  FormationSourceAnchor[]
   decisionEvents FormationCandidateDecisionEvent[]
   receiptItems   MaterializationReceiptItem[]
+  atomicityAssessments FormationAtomicityAssessment[]
 
   @@unique([candidateId, revision], map: "formation_candidate_revisions_candidate_revision_uq")
   @@unique([id, workspaceId], map: "formation_candidate_revisions_id_workspace_uq")
@@ -1905,4 +1906,45 @@ model MaterializationReceiptItem {
   @@unique([receiptId, candidateId], map: "materialization_receipt_items_receipt_candidate_uq")
   @@unique([workspaceId, candidateId], map: "materialization_receipt_items_workspace_candidate_uq")
   @@map("materialization_receipt_items")
+}
+
+// =====================================================================
+// V5-M1-C Atomicity Assessment
+// 出典: ISMAY_統合正本仕様書_v5_0.md §11(Atomicity Assessmentと分解提案)。
+// DOC-10(DB物理設計書) 3.3節は物理table名`atomicity_assessments`のみを
+// 列挙しており(「DESIGNED、DB/API/Worker/UIなし」)、列定義はこのGateで
+// 新規に設計する。
+//
+// [設計方針] §11.3「AssessmentはObservationであり、責任を自動分割しない」
+// に従い、この table はCandidate Revisionに対する観測結果を append-only で
+// 記録するのみで、他テーブルへの副作用や自動遷移は起こさない
+// (FormationSourceAnchorと同じ「Revisionに対する派生観測」パターン)。
+// =====================================================================
+
+/// V5-M1-C TBL: formation_atomicity_assessments(Revisionに対する粒度観測。
+/// Revisionはimmutableであり、この観測結果もRevision作成時に1回だけ算出する
+/// 1:1の派生値として扱う。algorithm versionが将来上がった場合の再評価は
+/// このGateのscope外とする(想像で再評価運用を先取りしない)。)
+model FormationAtomicityAssessment {
+  id            String                     @id @default(uuid())
+  workspaceId   String                     @map("workspace_id")
+  revisionId    String                     @map("revision_id")
+  revision      FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  /// ATOMIC/PROBABLY_ATOMIC/NEEDS_CLARIFICATION/SHOULD_DECOMPOSE/CONTEXT_LIKE
+  /// (統合正本§11.1、coreTypes.ts ATOMICITY_ASSESSMENTSと同じ5値)。
+  assessment    String
+  /// 判定に至った主理由の短いcode(既存reasonCode方式を踏襲)。
+  reasonCode    String                     @map("reason_code")
+  /// §11.3「使用Evidence」。{code, detail}の配列。
+  evidence      Json
+  /// アルゴリズム自身の判定に対する確信度(0〜1、候補のAI抽出confidenceとは別物)。
+  confidence    Decimal                    @db.Decimal(5, 4)
+  /// atomicityAssessment.tsのATOMICITY_ALGORITHM_VERSION。再現性のため
+  /// (§11.3「algorithm version」)、算出時のversionをsnapshotする。
+  algorithmVersion String                  @map("algorithm_version")
+  createdAt     DateTime                   @default(now()) @map("created_at")
+
+  @@unique([revisionId], map: "formation_atomicity_assessments_revision_uq")
+  @@index([workspaceId, revisionId])
+  @@map("formation_atomicity_assessments")
 }
