@@ -2169,10 +2169,7 @@ function CalendarView({
       map.set(String(key), arr);
     }
     return map;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- year/monthはcursorから毎回導出される値のため、
-    // cursorのみを依存に含めれば十分(year/monthを含めるとReact CompilerがpreserveManualMemoizationで
-    // 誤検知するため、意図的にcursorのみとする)。
-  }, [items, cursor]);
+  }, [items, cursor]); // eslint-disable-line react-hooks/exhaustive-deps -- year/monthはcursorから毎回導出される値のため、cursorのみを依存に含めれば十分(year/monthを含めるとReact CompilerがpreserveManualMemoizationで誤検知するため、意図的にcursorのみとする)。
 
   const cells: (number | null)[] = [...Array(firstDow).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
 

@@ -17,7 +17,6 @@ function timestamp(): string {
 
 function safeLog(...args: unknown[]): void {
   try {
-    // eslint-disable-next-line no-console
     console.log(...args);
   } catch {
     /* ログ出力自体が失敗しても本処理を止めない */

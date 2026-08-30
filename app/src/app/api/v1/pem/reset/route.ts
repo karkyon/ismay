@@ -6,7 +6,6 @@ import { debugServer } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { verifyPassword } from "@/lib/auth/password";
 import { apiOk, apiError } from "@/lib/auth/response";
-import { recordEvidenceDeletionEvents } from "@/lib/pem/evidenceDeletion";
 import { propagateEvidenceDeletion } from "@/lib/pem/evidenceDeletionCascade";
 
 /**

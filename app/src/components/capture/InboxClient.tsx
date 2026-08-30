@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, startTransition } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { isTypingTarget } from "@/lib/keyboard";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
@@ -369,7 +369,6 @@ export function InboxClient() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleCaptures, selectedId]);
 
   async function requestAnalyze() {
