@@ -169,6 +169,11 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
  * 呼び出し元(worker/batchPollJob.ts)は、Job.payloadに保存しておいたcaptureIdと
  * resultsUrlを渡す。Capture.versionのCAS等はrunExtractionForCapture側で既に
  * PROCESSINGへ遷移済みのため、ここでは行わない(processingVersionを直接渡してもらう)。
+ *
+ * [2026-08-30更新・M1-B5a §4.2] DEC-009「Batch経路はshadow書込み対象外」は解消した。
+ * REALTIME経路(runExtractionForCapture)と同じ`persistSuccess`のshadowContext引数を
+ * 渡すようにし、Batch完了時もFormation Session shadow構造(→Question Policy評価→
+ * CLARIFYING/REVIEW_READY)が作られるようにした。
  */
 export async function finalizeBatchExtraction(
   captureId: string,
@@ -207,9 +212,30 @@ export async function finalizeBatchExtraction(
     });
   }
 
-  // [DEC-009] Batch経路はこのGate(M1-B2)ではFormation shadow書込みの対象外のため、
-  // shadowContext(第7引数)は渡さない(persistSuccess側でundefinedなら自動スキップされる)。
-  const inferenceCount = await persistSuccess(capture.id, processingVersion, ai, parsed, outcome.usage, true);
+  // [DEC-009解消・2026-08-30 M1-B5a §4.2] Batch経路もshadow書込み対象とする。
+  // 対象captureは`runExtractionForCapture`側で既にrawText有無チェック済みで
+  // Batch投入されているため、通常はrawTextが存在するはずだが、投入からここに
+  // 至るまでの間にCaptureが変更される可能性を排除できないため、念のため
+  // rawText有無を再確認し、無ければ(shadowWrite自体がdomainId欠落時と同じ
+  // 「静かにスキップ」方針を取っているのに合わせ)shadowContextを渡さず
+  // shadow書込み自体をスキップする(想像で本体のBatch結果確定処理を止めない)。
+  const inferenceCount = await persistSuccess(
+    capture.id,
+    processingVersion,
+    ai,
+    parsed,
+    outcome.usage,
+    true,
+    capture.rawText
+      ? {
+          id: capture.id,
+          workspaceId: capture.workspaceId,
+          domainId: capture.domainId,
+          createdById: capture.createdById,
+          rawText: capture.rawText,
+        }
+      : undefined,
+  );
   return { status: "READY", inferenceCount };
 }
 
@@ -255,9 +281,11 @@ async function persistSuccess(
   usage: AiExtractionUsage,
   batch = false,
   /**
-   * [V5-M1-B2・DEC-009] REALTIME経路(runExtractionForCapture)のみ渡される。
-   * Batch経路(finalizeBatchExtraction)はこのGateではshadow書込み対象外のため
-   * undefinedのまま呼ばれ、その場合は下記でshadow書込み自体をスキップする。
+   * [V5-M1-B2] REALTIME経路(runExtractionForCapture)、および
+   * [2026-08-30更新・M1-B5a §4.2] Batch経路(finalizeBatchExtraction)の両方から
+   * 渡される。rawTextが取得できない稀なケース(Batch完了までの間にCaptureが
+   * 変更された等)のみundefinedで呼ばれ、その場合は下記でshadow書込み自体を
+   * スキップする。
    */
   shadowContext?: ShadowSourceCaptureContext,
 ): Promise<number> {

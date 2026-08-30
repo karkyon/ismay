@@ -11,6 +11,8 @@ import {
   buildQuestionCandidatesForCandidate,
   selectSessionQuestions,
   applyAnswerToCandidate,
+  getAnswerKindForQuestionCode,
+  getStaticQuestionOptions,
   type SessionCandidateInput,
 } from "../questionPolicy";
 
@@ -238,6 +240,23 @@ ok("QUESTION_POLICY_VERSIONがv1", QUESTION_POLICY_VERSION === "v1");
   const c = baseCandidate({ type: "COMMITMENT", counterparty: undefined });
   const updated = applyAnswerToCandidate(c, "COMMITMENT_COUNTERPARTY_MISSING", "FREE_TEXT", "   ");
   ok("空白のみのFREE_TEXTは反映しない", updated.counterparty === undefined);
+}
+
+// --- (18) getAnswerKindForQuestionCode: CLARIFYING UI用のRegistry参照export ---
+{
+  ok("getAnswerKindForQuestionCode: COMMITMENT_COUNTERPARTY_MISSINGはFREE_TEXT",
+    getAnswerKindForQuestionCode("COMMITMENT_COUNTERPARTY_MISSING") === "FREE_TEXT");
+  ok("getAnswerKindForQuestionCode: HARD_DEADLINE_LOW_CONFIDENCEはSELECTED",
+    getAnswerKindForQuestionCode("HARD_DEADLINE_LOW_CONFIDENCE") === "SELECTED");
+}
+
+// --- (19) getStaticQuestionOptions: SELECTED質問のみoptionsを持つ ---
+{
+  const hardDeadlineOptions = getStaticQuestionOptions("HARD_DEADLINE_LOW_CONFIDENCE");
+  ok("getStaticQuestionOptions: HARD_DEADLINE_LOW_CONFIDENCEは2件のoptions",
+    hardDeadlineOptions?.length === 2, JSON.stringify(hardDeadlineOptions));
+  ok("getStaticQuestionOptions: FREE_TEXT質問(COMMITMENT_COUNTERPARTY_MISSING)はundefined",
+    getStaticQuestionOptions("COMMITMENT_COUNTERPARTY_MISSING") === undefined);
 }
 
 console.log(`\n=== 結果: ${passed} passed, ${failed} failed ===`);

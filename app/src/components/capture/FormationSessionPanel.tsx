@@ -51,10 +51,26 @@ interface ProjectionCandidate {
   } | null;
 }
 
+interface ProjectionQuestion {
+  id: string;
+  ordinal: number;
+  candidateId: string | null;
+  questionCode: string;
+  priority: string;
+  reasonCode: string;
+  promptText: string;
+  promptVersion: string;
+  scoreValue: number;
+  answerKind: "SELECTED" | "FREE_TEXT";
+  options: Array<{ id: string; label: string }> | null;
+  latestAnswer: { id: string; answerKind: string; value: unknown; occurredAt: string; revisionOfId: string | null } | null;
+}
+
 interface ProjectionResponse {
   session: { id: string; state: string; version: number };
   candidates: ProjectionCandidate[];
-  allowedActions: { decide: boolean; materialize: boolean; finalize: boolean };
+  questions: ProjectionQuestion[];
+  allowedActions: { decide: boolean; materialize: boolean; finalize: boolean; answer: boolean };
 }
 
 const SESSION_STATE_LABEL: Record<string, string> = {
@@ -90,6 +106,13 @@ const LEGACY_DECISION_LABEL: Record<string, string> = {
   HELD: "保留",
 };
 
+/** [2026-08-30新設・M1-B5a CLARIFYING UI] Question優先度の表示ラベル。 */
+const QUESTION_PRIORITY_LABEL: Record<string, string> = {
+  P0: "重要",
+  P1: "確認",
+  P2: "任意",
+};
+
 export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: string; onChanged?: () => void }) {
   const [data, setData] = useState<ProjectionResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -98,6 +121,9 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
   const [materializing, setMaterializing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  // [2026-08-30新設・M1-B5a CLARIFYING UI]
+  const [answeringId, setAnsweringId] = useState<string | null>(null);
+  const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -234,6 +260,48 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
     }
   }
 
+  /** [2026-08-30新設・M1-B5a §4.4] CLARIFYING質問への回答を送信する。
+   *  clientEventIdはボタン押下ごとに新規生成する(既存decide/bulkDecideと同じく
+   *  `busy`フラグでの二重送信防止に統一し、より複雑なDraft単位の再送保持は
+   *  次Gateの課題とする)。 */
+  async function submitAnswer(
+    question: ProjectionQuestion,
+    answerKind: "SELECTED" | "FREE_TEXT" | "UNKNOWN" | "DEFERRED" | "DO_NOT_MATERIALIZE",
+    value?: string,
+  ) {
+    setAnsweringId(question.id);
+    setError("");
+    debugLog.event("FormationSessionPanel", "submitAnswer", { questionId: question.id, answerKind });
+    try {
+      const res = await apiFetch(`/api/v1/formation-sessions/${sessionId}/answers`, {
+        method: "POST",
+        body: JSON.stringify({
+          questionId: question.id,
+          clientEventId: `ui-answer-${question.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          answerKind,
+          ...(value !== undefined ? { value } : {}),
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(body?.error?.message ?? "回答の送信に失敗しました");
+        return;
+      }
+      setAnswerDrafts((prev) => {
+        if (!(question.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[question.id];
+        return next;
+      });
+      await load(true);
+      onChanged?.();
+    } finally {
+      setAnsweringId(null);
+    }
+  }
+
+  const sessionActive = data ? data.session.state === "REVIEW_READY" || data.session.state === "PARTIALLY_CONFIRMED" : false;
+
   if (loading) {
     return <div className="border-t border-line bg-canvas/60 px-5 py-4 text-xs text-faint">Session Reviewを読み込み中...</div>;
   }
@@ -250,6 +318,9 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
   const selectablePending = pendingCandidates.filter((c) => c.currentRevision);
   const selectedCount = selectablePending.filter((c) => selectedIds.has(c.identityId)).length;
   const allSelected = selectablePending.length > 0 && selectedCount === selectablePending.length;
+  const unansweredQuestions = data.questions
+    .filter((q) => !q.latestAnswer)
+    .sort((a, b) => a.ordinal - b.ordinal);
 
   return (
     <div className="border-t border-line bg-canvas/60 px-5 py-4">
@@ -281,6 +352,76 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
           </button>
         )}
       </div>
+
+      {data.allowedActions.answer && unansweredQuestions.length > 0 && (
+        <div className="mt-3 space-y-2">
+          <p className="text-[11px] text-muted">
+            回答が必要な質問があります({unansweredQuestions.length}件)。回答後、続きの候補確認へ進みます。
+          </p>
+          {unansweredQuestions.map((q) => (
+            <div key={q.id} className="rounded-lg border border-brand-200 bg-brand-50/40 p-3">
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-brand-100 text-brand-700">
+                  {QUESTION_PRIORITY_LABEL[q.priority] ?? q.priority}
+                </span>
+                <span className="text-[10px] text-faint">質問 {q.ordinal}</span>
+              </div>
+              <p className="text-sm text-ink mb-2 break-words">{q.promptText}</p>
+              {q.answerKind === "SELECTED" && q.options ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {q.options.map((opt) => (
+                    <button
+                      key={opt.id}
+                      onClick={() => submitAnswer(q, "SELECTED", opt.id)}
+                      disabled={answeringId === q.id}
+                      className="text-[11px] bg-ink text-white rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-black transition"
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={answerDrafts[q.id] ?? ""}
+                    onChange={(e) => setAnswerDrafts((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                    disabled={answeringId === q.id}
+                    placeholder="回答を入力"
+                    className="flex-1 min-w-0 text-sm rounded border border-line px-2 py-1.5 disabled:opacity-40"
+                  />
+                  <button
+                    onClick={() => {
+                      const v = (answerDrafts[q.id] ?? "").trim();
+                      if (v) submitAnswer(q, "FREE_TEXT", v);
+                    }}
+                    disabled={answeringId === q.id || !(answerDrafts[q.id] ?? "").trim()}
+                    className="shrink-0 text-[11px] bg-ink text-white rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-black transition"
+                  >
+                    回答する
+                  </button>
+                </div>
+              )}
+              <div className="flex gap-2 mt-1.5">
+                <button
+                  onClick={() => submitAnswer(q, "UNKNOWN")}
+                  disabled={answeringId === q.id}
+                  className="text-[10px] text-faint underline disabled:opacity-40"
+                >
+                  わからない
+                </button>
+                <button
+                  onClick={() => submitAnswer(q, "DEFERRED")}
+                  disabled={answeringId === q.id}
+                  className="text-[10px] text-faint underline disabled:opacity-40"
+                >
+                  あとで答える
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {selectablePending.length > 1 && (
         <div className="flex items-center justify-between gap-2 mt-3 rounded-lg border border-line bg-canvas px-3 py-2">
@@ -319,7 +460,12 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
             const rev = c.currentRevision;
             const isPending = !c.formationDecision;
             const isBusy = decidingId === c.identityId;
-            const isSelectable = isPending && !!rev;
+            // [2026-08-30是正・M1-B5a CLARIFYING UI] 従来はsession.stateを見ずに
+            // isPending&&revだけで採否ボタンを描画しており、CLARIFYING中でも
+            // ボタンが表示されてクリックするとバックエンドでINVALID_SESSION_STATEに
+            // なる紛らわしい状態だった。sessionActive(REVIEW_READY/PARTIALLY_CONFIRMED)
+            // でもガードする。
+            const isSelectable = isPending && !!rev && sessionActive;
             const conflictCode = c.legacyProjection?.conflictCode ?? null;
             return (
               <li key={c.identityId} className="rounded-lg p-3 bg-ai-50">
@@ -379,7 +525,7 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
                       )}
                     </div>
                   </div>
-                  {isPending && rev && (
+                  {isSelectable && (
                     <div className="shrink-0 flex gap-1.5">
                       <button
                         onClick={() => decide(c, "ACCEPTED")}

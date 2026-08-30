@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { resolveLegacyProjectionMap, computeCandidateConflict } from "@/lib/formation/legacyProjectionResolver";
+import { isValidQuestionCode, getAnswerKindForQuestionCode, getStaticQuestionOptions } from "@/lib/formation/questionPolicy";
 
 /**
  * V5-M1-B4.1: GET /formation-sessions/{id} 正式Projection API。
@@ -163,6 +164,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   }
   const questions = questionRows.map((q) => {
     const latestAnswer = latestAnswerByQuestionId.get(q.id) ?? null;
+    // [2026-08-30追加・CLARIFYING UI対応] answerKind/optionsはDBカラムに無いため、
+    // Question Code Registry(questionPolicy.ts)を唯一の正本としてlookupする。
+    // 未知のquestionCode(将来のバージョン間ズレ等)の場合は安全側としてFREE_TEXT
+    // 扱いにし、UIが自由入力フォームへfallbackできるようにする(想像で
+    // クラッシュさせない)。
+    const validQuestionCode = isValidQuestionCode(q.questionCode) ? q.questionCode : null;
     return {
       id: q.id,
       ordinal: q.ordinal,
@@ -173,6 +180,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       promptText: q.promptText,
       promptVersion: q.promptVersion,
       scoreValue: Number(q.scoreValue),
+      answerKind: validQuestionCode ? getAnswerKindForQuestionCode(validQuestionCode) : "FREE_TEXT",
+      options: validQuestionCode ? (getStaticQuestionOptions(validQuestionCode) ?? null) : null,
       latestAnswer: latestAnswer
         ? {
             id: latestAnswer.id,

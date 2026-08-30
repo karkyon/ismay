@@ -168,6 +168,12 @@ function hardDeadlineLowConfidence(candidate: ResponsibilityCandidate) {
   );
 }
 
+const HARD_DEADLINE_CONFIRM_OPTIONS = [
+  { id: "CONFIRM_HARD_DEADLINE", label: "はい、締切です" },
+  { id: "NOT_A_DEADLINE", label: "いいえ、締切ではありません" },
+];
+const IMPORTANCE_SELECT_OPTIONS = [1, 2, 3, 4, 5].map((n) => ({ id: String(n), label: `${n}` }));
+
 const QUESTION_CODE_REGISTRY: QuestionCodeDefinition[] = [
   {
     code: "COMMITMENT_COUNTERPARTY_MISSING",
@@ -210,10 +216,7 @@ const QUESTION_CODE_REGISTRY: QuestionCodeDefinition[] = [
       const m = hardDeadlineLowConfidence(c);
       return `「${c.title}」の期限として「${m?.rawExpression ?? "(不明)"}」を検出しましたが確信が持てません。これは締切ですか？`;
     },
-    options: () => [
-      { id: "CONFIRM_HARD_DEADLINE", label: "はい、締切です" },
-      { id: "NOT_A_DEADLINE", label: "いいえ、締切ではありません" },
-    ],
+    options: () => HARD_DEADLINE_CONFIRM_OPTIONS,
     scoreComponents: (c) => {
       const m = hardDeadlineLowConfidence(c);
       const confidence = m?.confidence ?? 0;
@@ -244,7 +247,7 @@ const QUESTION_CODE_REGISTRY: QuestionCodeDefinition[] = [
     condition: () => false,
     reasonCode: "IMPORTANCE_SIGNAL_UNAVAILABLE",
     promptText: (c) => `「${c.title}」の重要度を教えてください。`,
-    options: () => [1, 2, 3, 4, 5].map((n) => ({ id: String(n), label: `${n}` })),
+    options: () => IMPORTANCE_SELECT_OPTIONS,
     scoreComponents: () => ({ ambiguity: 0.3, downstreamImpact: 0.3, errorRisk: 0.2, answerCost: 0.1 }),
   },
   {
@@ -268,6 +271,43 @@ const QUESTION_CODE_REGISTRY: QuestionCodeDefinition[] = [
     scoreComponents: () => ({ ambiguity: 0.25, downstreamImpact: 0.25, errorRisk: 0.15, answerCost: 0.2 }),
   },
 ];
+
+/**
+ * [2026-08-30新設・CLARIFYING UI対応] `FormationQuestion`テーブルには
+ * questionCode/priority/reasonCode/promptText等は永続化されるが、`answerKind`
+ * (SELECTED/FREE_TEXT)と`options`(SELECTED時の選択肢)はQuestion Code Registry
+ * 側にのみ存在し、DBカラムとしては保存していない(schema.prisma参照、
+ * M1-B5a §3.2で追加した列にこの2つは含まれない)。UI(FormationSessionPanel.tsx)は
+ * 回答フォームを描画するためにこれらを知る必要があるため、Registryを唯一の
+ * 正本としてlookupするexport関数を用意する(UI側で別途ハードコードして
+ * 二重管理・drift させない)。
+ */
+export function getAnswerKindForQuestionCode(
+  questionCode: QuestionCode,
+): Extract<FormationAnswerKind, "SELECTED" | "FREE_TEXT"> {
+  const def = QUESTION_CODE_REGISTRY.find((d) => d.code === questionCode);
+  return def?.answerKind ?? "FREE_TEXT";
+}
+
+/**
+ * SELECTED質問の選択肢一覧を返す(FREE_TEXT質問、またはoptionsが候補データに
+ * 依存する定義の場合はundefinedを返す)。[2026-08-30時点]全SELECTED質問の
+ * optionsは候補データに依存しない静的な値のため、questionCodeのみから
+ * 一意に決まる(将来、候補依存のoptionsを持つquestionCodeを追加する場合は、
+ * この関数のシグネチャ自体を候補入力ありに変更する必要がある)。
+ */
+export function getStaticQuestionOptions(
+  questionCode: QuestionCode,
+): Array<{ id: string; label: string }> | undefined {
+  switch (questionCode) {
+    case "HARD_DEADLINE_LOW_CONFIDENCE":
+      return HARD_DEADLINE_CONFIRM_OPTIONS;
+    case "IMPORTANCE_MISSING":
+      return IMPORTANCE_SELECT_OPTIONS;
+    default:
+      return undefined;
+  }
+}
 
 /** この候補1件について、生成しうる質問候補一覧(閾値未満は既にここで除外)を返す。 */
 export function buildQuestionCandidatesForCandidate(candidate: ResponsibilityCandidate): QuestionCandidate[] {
