@@ -75,6 +75,8 @@ model User {
   formationSessionEventsAsActor      FormationSessionEvent[]
   formationAnswerEventsAsActor       FormationAnswerEvent[]
   formationCandidateDecisionsAsActor FormationCandidateDecisionEvent[]
+  /// [2026-08-30新設・M1-C2A] FormationAtomicityOverride.actorUserId逆参照。
+  formationAtomicityOverridesAsActor FormationAtomicityOverride[]
   /// [V5-M1-A1新設] Context作成者としての逆relation。
   projectContextsCreated             ProjectContext[]                  @relation("ProjectContextCreatedBy")
 
@@ -1730,6 +1732,9 @@ model FormationCandidateRevision {
   decisionEvents FormationCandidateDecisionEvent[]
   receiptItems   MaterializationReceiptItem[]
   atomicityAssessments FormationAtomicityAssessment[]
+  /// [2026-08-30新設・M1-C2A] SHOULD_DECOMPOSE/CONTEXT_LIKEなRevisionに対する
+  /// 本人の明示override(Materialize Guardの解除)。
+  atomicityOverrides   FormationAtomicityOverride[]
 
   @@unique([candidateId, revision], map: "formation_candidate_revisions_candidate_revision_uq")
   @@unique([id, workspaceId], map: "formation_candidate_revisions_id_workspace_uq")
@@ -1952,3 +1957,35 @@ model FormationAtomicityAssessment {
   @@index([workspaceId, revisionId])
   @@map("formation_atomicity_assessments")
 }
+
+// =====================================================================
+// V5-M1-C2A Atomicity Materialize Guard override
+// 出典: 2026-08-30確定指示書 Gate M1-C2A「SHOULD_DECOMPOSE/CONTEXT_LIKEは、
+// 本人の明示override EventまたはSplit/Merge/Editで解決したRevisionがない限り
+// 拒否する。overrideは本人操作、対象Revision固定、reason、occurredAt、
+// idempotencyを持つ。無回答や画面離脱をoverride扱いしない。」
+// =====================================================================
+
+/// V5-M1-C2A TBL: formation_atomicity_overrides(Revision単位・本人操作のみ)
+model FormationAtomicityOverride {
+  id          String                     @id @default(uuid())
+  workspaceId String                     @map("workspace_id")
+  revisionId  String                     @map("revision_id")
+  revision    FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  /// override理由の短いcode(既存reasonCode方式を踏襲。本人入力の自由文は
+  /// このGateのscopeでは持たない=UIで詳細説明を求めるかは次のGateで検討)。
+  reasonCode  String                     @map("reason_code")
+  /// DOC-03 4章と同じ「単一必須field」方針。SYSTEM/AIによる自動overrideは
+  /// 許容しない(「無回答や画面離脱をoverride扱いしない」という明記の裏返し)。
+  actorUserId String                     @map("actor_user_id")
+  actorUser   User                       @relation(fields: [actorUserId], references: [id])
+  occurredAt  DateTime                   @default(now()) @map("occurred_at")
+
+  /// 1 Revisionにつきoverrideは高々1件(idempotency)。同一Revisionへの
+  /// 再override試行はこの一意制約により既存行の再利用として扱われる
+  /// (service層でP2002をcatchしatomicityOverride.tsのRESULT型へ変換する)。
+  @@unique([revisionId], map: "formation_atomicity_overrides_revision_uq")
+  @@index([workspaceId, revisionId])
+  @@map("formation_atomicity_overrides")
+}
+

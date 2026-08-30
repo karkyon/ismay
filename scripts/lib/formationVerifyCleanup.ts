@@ -131,6 +131,10 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
           // FormationAnswerEventで踏んだのと同種の追随漏れ、今回はテーブル
           // 新設時に発見・即時是正)。
           await step(errors, "formationAtomicityAssessment.deleteMany", () => db.formationAtomicityAssessment.deleteMany({ where: { revisionId: { in: revisionIds } } }), { count: 0 });
+          // [2026-08-30新設・M1-C2A是正] formation_atomicity_overridesも同じ複合FKを
+          // 持つため、同じ理由でformationCandidateRevision.deleteManyより先に削除する
+          // (formationAtomicityAssessmentと全く同じ教訓、今回は実装と同一工程で対応)。
+          await step(errors, "formationAtomicityOverride.deleteMany", () => db.formationAtomicityOverride.deleteMany({ where: { revisionId: { in: revisionIds } } }), { count: 0 });
         }
         await step(errors, "materializationReceiptItem.deleteMany", () => db.materializationReceiptItem.deleteMany({ where: { candidateId: { in: identityIds } } }), { count: 0 });
         await step(errors, "formationCandidateDecisionEvent.deleteMany", () => db.formationCandidateDecisionEvent.deleteMany({ where: { candidateId: { in: identityIds } } }), { count: 0 });

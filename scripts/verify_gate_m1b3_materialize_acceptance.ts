@@ -19,8 +19,9 @@
  * 検証内容(実DB、EV-F-*相当):
  *   1. recordCandidateDecision: 正しいrevisionでACCEPT成功、REJECT成功。
  *      古いrevisionを渡すとREVISION_CONFLICT。既に決定済みの候補への再決定は
- *      ALREADY_DECIDED。REVIEW_READY→PARTIALLY_CONFIRMEDの遷移が
- *      「acceptedとpending混在」の条件でのみ発火すること。
+ *      ALREADY_DECIDED。[2026-08-30是正・M1-C2A・DEC-STATE-001] Decision記録
+ *      単体ではSession状態を変更しない(REVIEW_READYのまま)。PARTIALLY_CONFIRMED/
+ *      CONFIRMEDへの遷移はmaterializeFormationSession内でのみ発火する。
  *   2. materializeFormationSession: version不一致でVERSION_CONFLICT。
  *      ACCEPTED候補が無いSessionはNO_ACCEPTED_CANDIDATES。DRAFT状態の
  *      SessionはINVALID_SESSION_STATE。
@@ -222,8 +223,8 @@ async function main(): Promise<void> {
     ok("c1のACCEPTが成功する", acceptC1.ok === true);
     if (acceptC1.ok) {
       ok(
-        "c1 ACCEPT後、Session状態はPARTIALLY_CONFIRMED(acceptedとpending混在)",
-        acceptC1.sessionState === "PARTIALLY_CONFIRMED",
+        "[2026-08-30是正・M1-C2A・DEC-STATE-001] c1 ACCEPT後もSession状態はREVIEW_READYのまま(Decision記録だけではSession状態を変えない。旧: PARTIALLY_CONFIRMEDへ即座に遷移していた)",
+        acceptC1.sessionState === "REVIEW_READY",
         acceptC1.sessionState,
       );
     }

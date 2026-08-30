@@ -78,6 +78,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         return apiError("VERSION_CONFLICT", "この候補は別の操作により既にMaterialize済みです。最新の状態を取得してください", {
           retryable: true,
         });
+      case "ATOMICITY_BLOCKED":
+        // [2026-08-30新設・M1-C2A] Atomicity Materialize Guard。
+        return apiError(
+          "VALIDATION_FAILED",
+          `候補の粒度評価(${result.assessment})により、そのままではMaterializeできません。分解・統合・編集のいずれかで解決するか、明示的にoverrideしてください`,
+          { retryable: false, extra: { candidateId: result.candidateId, assessment: result.assessment, reasonCode: result.reasonCode } },
+        );
     }
   }
 

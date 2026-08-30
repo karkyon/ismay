@@ -6,6 +6,7 @@ import { ResponsibilityCandidateSchema } from "@/lib/ai/schema";
 import { embedAndStoreResponsibility } from "@/lib/ai/relatedResponsibilities";
 import { createResponsibilityWithLinks } from "@/lib/formation/responsibilityMaterializationCore";
 import { resolveLegacyProjectionMap } from "@/lib/formation/legacyProjectionResolver";
+import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
 import {
   resolveFormationSessionTransition,
   isValidFormationSessionTransitionTriple,
@@ -82,10 +83,11 @@ import {
  * - 既存`/inferences/[id]/decision`route.tsの変更(CHG-011のFeature Flag委譲は
  *   B4のスコープ。監査B31-05が指摘する通り、この2関数を単純に順番へ呼ぶだけの
  *   委譲は非原子的であり、B4では別途共通transaction化が必要)。
- * - Atomicity Assessment(DOC-03 5章 ATOMIC/NEEDS_SPLIT等)の実装。AIが
- *   atomicityAssessmentを出力する経路自体がまだ存在しない(ResponsibilityCandidateSchema
- *   に該当fieldが無い)ため、COMMITのguard「atomicity解決」は現状「常に解決済み扱い」
- *   とする(想像でAssessment値を作らない、という既存方針の踏襲)。
+ * - [2026-08-30更新・M1-C2A是正] Atomicity Assessment(統合正本§11.1)は
+ *   atomicityAssessment.ts(M1-C)で実装済みであり、このファイルのMaterialize
+ *   Guardへ接続済み(SHOULD_DECOMPOSE/CONTEXT_LIKEはoverrideが無い限り拒否、
+ *   NEEDS_CLARIFICATIONは未解決質問がある限り拒否)。この行の記述は
+ *   「B3時点ではまだ未実装だった」という当時の状況説明として残す。
  * - Question Policy/CLARIFYING経路との統合(DEC-010を継続。REVIEW_READY到達済みの
  *   Sessionのみを対象とする)。
  * - Context LinkとRelation候補の自動生成、Tag自動付与、旧API互換field
@@ -153,7 +155,12 @@ export type MaterializeFormationSessionResult =
   /** [B3.1新設・B31-01/B31-03] 異operationIdの並行実行が同一candidateを先に
    *  materialize済みだった場合。呼び出し元はSessionを再取得し、まだ未決定・
    *  未materializeの候補が残っていれば新しいoperationIdで再試行できる。 */
-  | { ok: false; error: "CANDIDATE_ALREADY_MATERIALIZED" };
+  | { ok: false; error: "CANDIDATE_ALREADY_MATERIALIZED" }
+  /** [2026-08-30新設・M1-C2A] Atomicity Materialize Guard(統合正本§11.3、
+   *  2026-08-30確定指示書Gate M1-C2A)。決定Revisionの最新Atomicity Assessmentが
+   *  SHOULD_DECOMPOSE/CONTEXT_LIKEで、かつ本人による明示overrideが無い場合に
+   *  拒否する。 */
+  | { ok: false; error: "ATOMICITY_BLOCKED"; candidateId: string; assessment: string; reasonCode: string };
 
 // ---------------------------------------------------------------------------
 // 純粋関数(db非依存、__tests__/coreInvariants.test.tsから直接検証できるようにする)
@@ -395,37 +402,18 @@ export async function recordCandidateDecision(
         },
       });
 
-      // REVIEW_READY --partial decisions--> PARTIALLY_CONFIRMED(DOC-03 3章
-      // 「acceptedとpending混在」)。acceptedが1件以上あり、かつ未決定の候補が
-      // まだ残っている場合にのみ遷移する。全候補決定済みでも自動COMMITはしない
-      // (COMMITは別APIの明示操作、DOC-03 3章「REVIEW_READY/PARTIALLY_CONFIRMED --commit--> CONFIRMED」)。
-      let sessionState: string = session.state;
-      if (session.state === "REVIEW_READY") {
-        const allIdentities = await tx.formationCandidateIdentity.findMany({
-          where: { sessionId, workspaceId },
-          select: { id: true },
-        });
-        const decidedRows = await tx.formationCandidateDecisionEvent.findMany({
-          where: { workspaceId, candidateId: { in: allIdentities.map((c: { id: string }) => c.id) } },
-          select: { candidateId: true },
-          distinct: ["candidateId"],
-        });
-        const decidedCandidateIds = new Set(decidedRows.map((d: { candidateId: string }) => d.candidateId));
-        const hasAccepted = decision === "ACCEPTED";
-        const hasPending = allIdentities.some((c: { id: string }) => !decidedCandidateIds.has(c.id));
-        if (hasAccepted && hasPending) {
-          // [2026-08-30是正] 操作名をDOC-03語彙"PARTIAL_DECISIONS"から統合正本§6.3語彙
-          // "CONFIRM_SOME"へ置換。
-          const toPartial = resolveFormationSessionTransition("REVIEW_READY", "CONFIRM_SOME");
-          if (toPartial) {
-            await tx.formationSession.update({
-              where: { id: sessionId },
-              data: { state: toPartial, version: { increment: 1 } },
-            });
-            sessionState = toPartial;
-          }
-        }
-      }
+      // [2026-08-30是正・M1-C2A・DEC-STATE-001] 統合正本§6.3の操作名
+      // "CONFIRM_SOME"/"CONFIRM_ALL"は「確定(=Materialize)」を意味する操作であり、
+      // 単なる候補の採否記録(このrecordCandidateDecision自体)ではSession状態を
+      // 変更しない。以前はACCEPTED+pending混在の時点でCONFIRM_SOME遷移を
+      // ここで発火していたが、これは§6.8「本人の確定要求は…Decision Event、
+      // Responsibility及び種別Detail作成、…Materialization Receipt作成…を
+      // 同一transactionで行う」の"確定要求"とDecision記録単体を混同していた
+      // (2026-08-30確定指示書 DEC-STATE-001)。Session状態はmaterializeFormationSession
+      // 内でのみ、実際にResponsibility/Receiptが作られた結果として遷移する。
+      // 候補ごとの見た目(採用済み/却下済み)はCandidate Decision Projection
+      // (FormationCandidateDecisionEvent自体)で表現し、Session状態とは独立させる。
+      const sessionState: string = session.state;
 
       debugServer.event("formation/materialize", "CANDIDATE_DECISION_RECORDED", {
         sessionId,
@@ -739,6 +727,88 @@ export async function materializeFormationSession(
         }
         const candidate = candidateParsed.data;
 
+        // [2026-08-30新設・M1-C2A] Atomicity Materialize Guard。
+        // [自己修復方針] 決定Revisionに対するAssessment行が既に存在すればそれを
+        // 使う(shadowWrite.ts/answerService.ts/splitCorrection.tsは候補作成時に
+        // 必ず算出・保存している)。存在しない場合(このRevisionがそれらの経路を
+        // 経ずに作られた古いデータ等)は、想像で「未評価だから素通し」にはせず、
+        // その場でassessAtomicity()を算出し、監査証跡として保存してから判定に
+        // 使う(未評価を「解決済み」とみなさない、という確定指示書の要求に対応)。
+        let assessmentRow = await tx.formationAtomicityAssessment.findFirst({
+          where: { revisionId: revision.id, workspaceId },
+        });
+        if (!assessmentRow) {
+          const computed = assessAtomicity(candidate);
+          assessmentRow = await tx.formationAtomicityAssessment.create({
+            data: {
+              workspaceId,
+              revisionId: revision.id,
+              assessment: computed.assessment,
+              reasonCode: computed.reasonCode,
+              evidence: computed.evidence as unknown as object,
+              confidence: computed.confidence,
+              algorithmVersion: computed.algorithmVersion,
+            },
+          });
+        }
+
+        if (assessmentRow.assessment === "SHOULD_DECOMPOSE" || assessmentRow.assessment === "CONTEXT_LIKE") {
+          // [確定指示書Gate M1-C2A] 「本人の明示override Eventが無い限り拒否」。
+          // Split/Merge/Editで解決した場合、その結果生まれる新Revision自体が
+          // 別途assessAtomicityで再評価され(shadowWrite.ts/answerService.ts/
+          // splitCorrection.tsと同じ経路)、多くの場合ATOMIC/PROBABLY_ATOMICへ
+          // 変わるため、ここではoverride行の有無だけを機械的に確認すればよい
+          // (「Split/Merge/Editで解決した」という事実そのものは、解決後の
+          // 新しいRevisionのAssessmentが変わることで自動的に反映される)。
+          const override = await tx.formationAtomicityOverride.findFirst({
+            where: { revisionId: revision.id, workspaceId },
+          });
+          if (!override) {
+            throw new MaterializeAbort({
+              ok: false,
+              error: "ATOMICITY_BLOCKED",
+              candidateId: target.identityId,
+              assessment: assessmentRow.assessment,
+              reasonCode: assessmentRow.reasonCode,
+            });
+          }
+        } else if (assessmentRow.assessment === "NEEDS_CLARIFICATION") {
+          // [確定指示書Gate M1-C2A] 「未解決質問がある限り拒否」。Session状態が
+          // REVIEW_READY/PARTIALLY_CONFIRMEDへ到達している時点で、そのSession内の
+          // FormationQuestionは設計上すべて回答済みのはずだが(CLARIFYING状態を
+          // 経由しないとREVIEW_READYへ進めないため)、想像でこの前提を信頼せず、
+          // 実データを見て機械的に確認する。
+          const questionsForCandidate = await tx.formationQuestion.findMany({
+            where: { workspaceId, candidateId: target.identityId },
+            select: { id: true },
+          });
+          if (questionsForCandidate.length > 0) {
+            const answeredQuestionIds = new Set(
+              (
+                await tx.formationAnswerEvent.findMany({
+                  where: { workspaceId, questionId: { in: questionsForCandidate.map((q) => q.id) } },
+                  select: { questionId: true },
+                  distinct: ["questionId"],
+                })
+              ).map((a) => a.questionId),
+            );
+            const hasUnresolvedQuestion = questionsForCandidate.some((q) => !answeredQuestionIds.has(q.id));
+            if (hasUnresolvedQuestion) {
+              throw new MaterializeAbort({
+                ok: false,
+                error: "ATOMICITY_BLOCKED",
+                candidateId: target.identityId,
+                assessment: assessmentRow.assessment,
+                reasonCode: assessmentRow.reasonCode,
+              });
+            }
+          }
+          // 未解決質問が無ければ(このSessionの設計上は通常このケース)、
+          // NEEDS_CLARIFICATIONのままでもMaterializeを許可する(確定指示書の
+          // 文言どおり「未解決質問がある限り拒否」の裏返し)。
+        }
+        // ATOMIC/PROBABLY_ATOMICは常に許可。
+
         const hardDeadlineAt = candidate.dateMentions.find((d) => d.meaning === "HARD_DEADLINE")?.normalizedAt;
         const targetAt = candidate.dateMentions.find((d) => d.meaning === "SOFT_TARGET")?.normalizedAt;
 
@@ -892,8 +962,11 @@ export async function materializeFormationSession(
       }
 
       // pendingCount === 0: REVIEW_READY/PARTIALLY_CONFIRMED --confirm--> CONFIRMED
-      // (統合正本§6.3)。atomicity Assessmentは未実装のため常に「解決済み」として扱う
-      // (このファイル冒頭コメントのスコープ注記を参照)。
+      // (統合正本§6.3)。[2026-08-30更新・M1-C2A是正] Atomicity Assessmentは
+      // 上のacceptedTargetsループ内(Guard)で候補ごとに検査済みであり、ここへ
+      // 到達している時点で全acceptedTargetsはATOMIC/PROBABLY_ATOMIC、または
+      // override済み、または未解決質問の無いNEEDS_CLARIFICATIONのいずれかで
+      // ある(guard未通過ならMaterializeAbortで既にtransaction全体が中断している)。
       // [2026-08-30是正] DOC-03語彙の単一操作"COMMIT"は統合正本§6.3には存在しない。
       // REVIEW_READY起点は"CONFIRM_ALL"(単一終端、resolveFormationSessionTransitionで
       // 解決可能)、PARTIALLY_CONFIRMED起点は"RESOLVE_REMAINING"(CONFIRMED/DISMISSEDの
