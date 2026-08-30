@@ -13,6 +13,13 @@
  *   3. REVISION_CONFLICT・ALREADY_DECIDED・INVALID_SESSION_STATE。
  *   4. recordCandidateDecision(通常decide経路)がSPLIT/MERGEDを拒否すること
  *      (materialize.ts是正の回帰確認)。
+ *   5. [2026-08-30追加・M1-C2C] formation_candidate_lineagesへの記録、実
+ *      Source Anchorの子候補への継承。
+ *   6. [2026-08-30追加・M1-C2C] 破損proposedFieldsはCORRUPTED_CANDIDATE_DATAで
+ *      明示的に失敗すること(旧: 架空[0,1]のevidenceSpansで握りつぶしていた。
+ *      さらに初回実装ではparseチェックの位置がdecisionEvent書き込みの後にあり、
+ *      「失敗を返したのにdecisionEventだけcommitされる」不整合を実機検証で
+ *      検出・是正した)。
  *   5. 分解後、子候補は通常のACCEPT/REJECTの対象として扱えること
  *      (Question Policy再評価を経由しない設計の確認)。
  *
@@ -346,6 +353,126 @@ async function main(): Promise<void> {
 
       const decisionEventCount = await db.formationCandidateDecisionEvent.count({ where: { candidateId: identity.id, workspaceId: fx.workspaceId } });
       ok("[M1C.16] guardで拒否された結果、Decision Eventは0件のまま", decisionEventCount === 0, String(decisionEventCount));
+    }
+
+    // ============================================================
+    // 5. [2026-08-30新設・M1-C2C] Splitの正本整合
+    //    (formation_candidate_lineages記録、実Source Anchor継承、
+    //    架空evidenceSpans fallback廃止)
+    // ============================================================
+    {
+      const fx = await makeFixture("s5lineageanchor");
+      const cap = await makeCapture(fx, "見積書を作って送付する作業");
+      const session = await seedReviewReadySession(fx, cap.id, "s5");
+      const identity = await seedCandidate(fx, session.id, "c1", "見積書を作って送付する");
+
+      // 親candidateへ実Source Anchorを1件付与する(既存seedCandidateは
+      // Anchorを作らないため、この検証用に追加で作成する)。
+      const parentRevision = await db.formationCandidateRevision.findFirstOrThrow({
+        where: { candidateId: identity.id, workspaceId: fx.workspaceId, revision: 1 },
+      });
+      const { createHash } = await import("node:crypto");
+      await db.formationSourceAnchor.create({
+        data: {
+          workspaceId: fx.workspaceId,
+          revisionId: parentRevision.id,
+          sourceKind: "TEXT_OFFSET",
+          captureId: cap.id,
+          startOffset: 0,
+          endOffset: 8,
+          excerptHash: createHash("sha256").update("見積書を作って送付する").digest("hex"),
+          piiClassification: "NONE",
+        },
+      });
+
+      const result = await splitFormationCandidate({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        candidateId: identity.id,
+        expectedRevision: 1,
+        parts: [
+          { type: "TASK", title: "見積書を作る" },
+          { type: "TASK", title: "見積書を送付する" },
+        ],
+        actorUserId: fx.userId,
+      });
+      ok("[M1C2C.1] Anchor有り親候補の分解が成功する", result.ok === true, JSON.stringify(result));
+
+      if (result.ok) {
+        const lineageRows = await db.formationCandidateLineage.findMany({
+          where: { parentIdentityId: identity.id, workspaceId: fx.workspaceId },
+        });
+        ok("[M1C2C.2・DBで照会可能なlineage] formation_candidate_lineagesに子2件分が記録される", lineageRows.length === 2, String(lineageRows.length));
+        ok("[M1C2C.3] lineageのcorrectionKindはSPLIT", lineageRows.every((l) => l.correctionKind === "SPLIT"));
+        ok(
+          "[M1C2C.4] lineageのparentRevisionIdが分解時点の親Revisionを指す",
+          lineageRows.every((l) => l.parentRevisionId === parentRevision.id),
+        );
+
+        for (const child of result.newCandidates) {
+          const childAnchors = await db.formationSourceAnchor.findMany({
+            where: { revisionId: child.revisionId, workspaceId: fx.workspaceId },
+          });
+          ok(`[M1C2C.5・${child.candidateKey}] 子候補が親の実Source Anchorを継承する(1件)`, childAnchors.length === 1, String(childAnchors.length));
+        }
+      }
+    }
+
+    // ============================================================
+    // 6. [2026-08-30新設・M1-C2C] 破損proposedFieldsはCORRUPTED_CANDIDATE_DATA
+    //    (架空evidenceSpans fallbackで握りつぶさない。かつdecisionEventが
+    //    一切commitされないこと=正しいtransaction順序の確認)
+    // ============================================================
+    {
+      const fx = await makeFixture("s6corrupted");
+      const cap = await makeCapture(fx, "破損データ検証");
+      const session = await seedReviewReadySession(fx, cap.id, "s6");
+      const identity = await db.formationCandidateIdentity.create({
+        data: { workspaceId: fx.workspaceId, sessionId: session.id, candidateKey: "c1", currentRevision: 1 },
+      });
+      // 意図的にResponsibilityCandidateSchemaへparseできない壊れたproposedFieldsを
+      // 直接書き込む(evidenceSpans自体が欠落している)。
+      await db.formationCandidateRevision.create({
+        data: {
+          workspaceId: fx.workspaceId,
+          candidateId: identity.id,
+          revision: 1,
+          type: "TASK",
+          title: "破損データの候補",
+          proposedFields: { candidateId: "c1", type: "TASK", title: "破損データの候補" },
+          confidence: 0.9,
+          schemaVersion: "1.0",
+        },
+      });
+
+      const result = await splitFormationCandidate({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        candidateId: identity.id,
+        expectedRevision: 1,
+        parts: [
+          { type: "TASK", title: "A" },
+          { type: "TASK", title: "B" },
+        ],
+        actorUserId: fx.userId,
+      });
+      ok(
+        "[M1C2C.6・重要な是正確認] 破損proposedFieldsはCORRUPTED_CANDIDATE_DATAで明示的に失敗する(旧: 架空[0,1]で握りつぶしていた)",
+        result.ok === false && (result as { error: string }).error === "CORRUPTED_CANDIDATE_DATA",
+        JSON.stringify(result),
+      );
+
+      const childCount = await db.formationCandidateIdentity.count({
+        where: { sessionId: session.id, workspaceId: fx.workspaceId, candidateKey: { startsWith: "c1-split-" } },
+      });
+      ok("[M1C2C.7] CORRUPTED_CANDIDATE_DATA後、子候補は作られていない", childCount === 0, String(childCount));
+
+      const decisionEventCount = await db.formationCandidateDecisionEvent.count({ where: { candidateId: identity.id, workspaceId: fx.workspaceId } });
+      ok(
+        "[M1C2C.8・transaction順序是正の確認] CORRUPTED_CANDIDATE_DATA後、元候補にもSPLIT decisionは記録されていない(parseチェックを書き込み前へ移動した是正の裏付け)",
+        decisionEventCount === 0,
+        String(decisionEventCount),
+      );
     }
 
     ok(

@@ -33,6 +33,19 @@ import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
  * 「どの候補群を対象にするか」「統合後の内容を誰がどう決めるか」の入力形が
  * SPLITと非対称で、UI設計も含め別途検討が必要なため、このPatchでは
  * coreTypes.tsへの値の予約(`MERGED`)のみ行い、実装は次のGateへ持ち越す。
+ * [2026-08-30更新・M1-C2B] MERGE本体はmergeCorrection.tsで実装済み。このコメントは
+ * 元々このファイルが書かれた時点の状況説明として残す。
+ *
+ * [2026-08-30是正・M1-C2C] `formation_candidate_lineages`(mergeCorrection.tsが
+ * 使うのと同じtable)への記録、実Source Anchor行の子候補への複製、
+ * proposedFields parse失敗時の架空evidenceSpans fallback廃止(CORRUPTED_
+ * CANDIDATE_DATAとして明示的に失敗させる)を追加した。DEC-MERGE-001「根拠が
+ * 無い場合は空/UNKNOWNとして表し、offsetを捏造しない」をSplitにも適用する。
+ * [重要な教訓] このparseチェックは書き込み開始前(decisionEvent作成前)に
+ * 置かなければならない。Prismaの`$transaction`はcallbackが`return`で
+ * 終わっても書き込み済みの内容をそのままcommitするため、書き込み後に
+ * 検証すると「decisionEventだけ作られてSPLIT全体は失敗扱い」という
+ * 不整合を起こす(初回実装時に実機検証で検出・是正した順序ミス)。
  *
  * db.ts を直接importして良い(このファイルはmaterialize.ts等と同じくAPI route
  * から呼ばれるservice層であり、db非依存pure testの対象ではないため)。
@@ -75,7 +88,18 @@ export type SplitCandidateResult =
   | { ok: false; error: "INVALID_SPLIT_PARTS"; reason: string }
   | { ok: false; error: "ALREADY_MATERIALIZED_BY_LEGACY"; legacyInferenceId: string; legacyDecision: string }
   | { ok: false; error: "ALREADY_DECIDED_BY_LEGACY"; legacyInferenceId: string; legacyDecision: string }
-  | { ok: false; error: "LEGACY_PROJECTION_CONFLICT"; legacyInferenceId: string; legacyDecision: string };
+  | { ok: false; error: "LEGACY_PROJECTION_CONFLICT"; legacyInferenceId: string; legacyDecision: string }
+  /** [2026-08-30新設・M1-C2C是正] 親candidateのproposedFieldsがResponsibilityCandidateSchema
+   *  へparseできない(破損データ)場合。旧実装はここで架空の`[{start:0,end:1}]`を
+   *  fallbackとして使い、SPLIT自体を握りつぶして成功させていた
+   *  (DEC-MERGE-001「根拠が無い場合は空/UNKNOWNとして表し、offsetを捏造しない」
+   *  の精神に反する)。materialize.tsのCORRUPTED_CANDIDATE_DATAと同じ考え方で、
+   *  破損データを検知したら明示的に失敗させる。[重要] このcheckは必ず
+   *  transaction内のどの書き込みよりも前に置くこと。Prismaの`$transaction`は
+   *  callbackがreturnで終わっても(throwしない限り)それまでの書き込みを
+   *  そのままcommitするため、書き込み後に検証するとpartial commitの
+   *  不整合を起こす(初回実装でこの順序ミスを実機検証で検出・是正した)。 */
+  | { ok: false; error: "CORRUPTED_CANDIDATE_DATA" };
 
 const RESPONSIBILITY_TYPE_SET = new Set<string>(RESPONSIBILITY_TYPES);
 
@@ -168,8 +192,35 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
     });
     if (!revision) return { ok: false, error: "NOT_FOUND" } as const;
 
-    // [§11.4「SPLIT Correctionを追記」] 元候補にSPLIT決定を記録する
-    // (recordCandidateDecisionと同じCandidateDecisionEvent機構を使う。
+    // [2026-08-30是正・M1-C2C DEC-MERGE-001準拠、かつtransaction順序の重要な教訓]
+    // このcheckは必ずどの書き込みよりも前に置く。Prismaの
+    // `$transaction(async (tx) => {...})`は、callbackが`return`で終わっても
+    // (throwしない限り)それまでの書き込みをそのままcommitしてしまう。旧実装は
+    // このparseチェックをdecisionEvent作成の*後*に置いており、parse失敗時に
+    // 「decisionEventだけ作られ、SPLIT自体は失敗として返る」という不整合な
+    // commitを起こしていた(初回実装時の実機検証で実際に踏んだ回帰: 元候補への
+    // SPLIT decisionEventが残ってしまいALREADY_DECIDED状態のまま取り残される)。
+    // 全ての判定・検証を先に完了させてから書き込みを開始する、という既存の
+    // 他guard(NOT_FOUND/REVISION_CONFLICT/ALREADY_DECIDED等)と同じ順序原則に
+    // 揃える(旧実装ではこの原則がevidenceSpans検証部分だけ破られていた)。
+    const parsedParent = ResponsibilityCandidateSchema.safeParse(revision.proposedFields);
+    if (!parsedParent.success) {
+      return { ok: false, error: "CORRUPTED_CANDIDATE_DATA" } as const;
+    }
+    const parentEvidenceSpans = parsedParent.data.evidenceSpans;
+
+    // [2026-08-30新設・M1-C2C是正] mergeCorrection.tsと同じく、実際の
+    // FormationSourceAnchor行を継承する準備として、書き込み開始前に親の
+    // Anchorを取得しておく(旧実装はproposedFields.evidenceSpansをJSONに
+    // コピーするだけで、DBで照会可能なAnchor行を子候補へ一切作っていなかった)。
+    // Split(1親→N子)はMerge(N親→1子)と異なり複数の子それぞれが親の全根拠を
+    // 参照しうるため、重複排除は不要(各子へ親の全Anchorをそのまま複製する)。
+    const parentAnchors = await tx.formationSourceAnchor.findMany({
+      where: { revisionId: revision.id, workspaceId },
+    });
+
+    // [§11.4「SPLIT Correctionを追記」] ここから書き込み開始。元候補にSPLIT決定を
+    // 記録する(recordCandidateDecisionと同じCandidateDecisionEvent機構を使う。
     // ただしSPLITはこの専用serviceからしか作れない、materialize.ts側で防御済み)。
     const decisionEvent = await tx.formationCandidateDecisionEvent.create({
       data: {
@@ -205,20 +256,6 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
         } as object,
       },
     });
-
-    // [§11.4「新しい…群とRelationを同一transactionで作る」] 元候補のevidenceSpansを
-    // 各子候補が参照(inherit)する。子候補自体は本人がSPLIT操作で入力した新しい
-    // 内容であり、AI抽出のような原文中の新しい根拠位置は存在しないため、
-    // 「元候補が根拠としていた原文範囲」をそのまま引き継ぐことが最も忠実な
-    // Source Anchorの扱いだと判断した([設計判断]。原文の別範囲を子候補ごとに
-    // 個別指定させるUIは、このGateのscopeでは未実装)。
-    const parsedParent = ResponsibilityCandidateSchema.safeParse(revision.proposedFields);
-    const parentEvidenceSpans = parsedParent.success
-      ? parsedParent.data.evidenceSpans
-      : [{ start: 0, end: 1 }]; // [保守的fallback] 親candidateのproposedFieldsが壊れていた場合でも
-    // SPLIT自体(本人の明示操作)を失敗させない。子候補のevidenceSpansはschema上
-    // 必須(min 1)のため、既知の妥当な最小値で埋める(実データの根拠が無いことは
-    // 子候補には実質的な影響を与えない。SourceAnchorそのものは作らないため)。
 
     const newCandidates: SplitCandidateNewCandidate[] = [];
     for (let i = 0; i < parts.length; i++) {
@@ -265,6 +302,38 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
       await tx.formationCandidateIdentity.update({
         where: { id: childIdentity.id },
         data: { currentRevision: 1 },
+      });
+
+      // [2026-08-30新設・M1-C2C是正] 親のSource Anchorを子へ複製する
+      // (DBで照会可能な実Anchor行。mergeCorrection.tsと対になる実装)。
+      for (const anchor of parentAnchors) {
+        await tx.formationSourceAnchor.create({
+          data: {
+            workspaceId,
+            revisionId: childRevision.id,
+            sourceKind: anchor.sourceKind,
+            captureId: anchor.captureId,
+            startOffset: anchor.startOffset,
+            endOffset: anchor.endOffset,
+            imageRegion: anchor.imageRegion ?? undefined,
+            excerptHash: anchor.excerptHash,
+            piiClassification: anchor.piiClassification,
+          },
+        });
+      }
+
+      // [2026-08-30新設・M1-C2C是正] formation_candidate_lineagesへも記録する
+      // (mergeCorrection.tsと統一。従来はFormationSessionEvent.payload内の
+      // splitFromCandidateId/splitFromCandidateKeyのみで、DBで直接照会
+      // できるlineage tableへは書き込んでいなかった)。
+      await tx.formationCandidateLineage.create({
+        data: {
+          workspaceId,
+          childRevisionId: childRevision.id,
+          parentIdentityId: identity.id,
+          parentRevisionId: revision.id,
+          correctionKind: "SPLIT",
+        },
       });
 
       // [M1-C是正・formationVerifyCleanup.tsの教訓を踏まえ、実装と同じPatch内で
