@@ -77,6 +77,8 @@ model User {
   formationCandidateDecisionsAsActor FormationCandidateDecisionEvent[]
   /// [2026-08-30新設・M1-C2A] FormationAtomicityOverride.actorUserId逆参照。
   formationAtomicityOverridesAsActor FormationAtomicityOverride[]
+  /// [2026-08-30新設・M1-C2B] FormationCandidateMergeEvent.actorUserId逆参照。
+  formationCandidateMergeEventsAsActor FormationCandidateMergeEvent[]
   /// [V5-M1-A1新設] Context作成者としての逆relation。
   projectContextsCreated             ProjectContext[]                  @relation("ProjectContextCreatedBy")
 
@@ -1703,6 +1705,10 @@ model FormationCandidateIdentity {
   questions      FormationQuestion[]
   receiptItems   MaterializationReceiptItem[]
   decisionEvents FormationCandidateDecisionEvent[]
+  /// [2026-08-30新設・M1-C2B] このIdentityが親としてMerge/Splitのlineageに現れる場合。
+  lineageAsParent FormationCandidateLineage[] @relation("LineageParentIdentity")
+  /// [2026-08-30新設・M1-C2B] このIdentityがMerge操作の結果として作られた場合。
+  mergeEventAsNewCandidate FormationCandidateMergeEvent[] @relation("MergeEventNewCandidate")
 
   @@unique([sessionId, candidateKey], map: "formation_candidate_identities_session_key_uq")
   @@unique([id, workspaceId], map: "formation_candidate_identities_id_workspace_uq")
@@ -1735,6 +1741,10 @@ model FormationCandidateRevision {
   /// [2026-08-30新設・M1-C2A] SHOULD_DECOMPOSE/CONTEXT_LIKEなRevisionに対する
   /// 本人の明示override(Materialize Guardの解除)。
   atomicityOverrides   FormationAtomicityOverride[]
+  /// [2026-08-30新設・M1-C2B] このRevisionが子(Merge/Split結果)である場合のlineage。
+  lineageAsChild       FormationCandidateLineage[] @relation("LineageChildRevision")
+  /// [2026-08-30新設・M1-C2B] このRevisionが親の決定時点Revisionとしてlineageに現れる場合。
+  lineageAsParentRevision FormationCandidateLineage[] @relation("LineageParentRevision")
 
   @@unique([candidateId, revision], map: "formation_candidate_revisions_candidate_revision_uq")
   @@unique([id, workspaceId], map: "formation_candidate_revisions_id_workspace_uq")
@@ -1988,4 +1998,61 @@ model FormationAtomicityOverride {
   @@index([workspaceId, revisionId])
   @@map("formation_atomicity_overrides")
 }
+
+// =====================================================================
+// V5-M1-C2B Candidate MERGE Correction
+// 出典: 2026-08-30確定指示書 DEC-MERGE-001「元候補は削除・上書きせず、各候補へ
+// MERGED Correction/Decision Eventをappendし、新しいCandidate Identity/
+// Revisionを同一transactionで作る。新候補は全親Source Anchorを重複排除して
+// 継承し、親candidate/revisionのlineageをDBで照会可能にする。」
+// =====================================================================
+
+/// V5-M1-C2B TBL: formation_candidate_lineages(Merge/Split結果の親子関係、
+/// DBで照会可能にする。correctionKindは"MERGE"(このGateで実装)/"SPLIT"
+/// (M1-C2CでsplitCorrection.tsのevent payloadのみlineageから、この table
+/// へ揃える予定、現時点ではSPLIT側はまだこのtableへ書き込んでいない)。
+model FormationCandidateLineage {
+  id               String                     @id @default(uuid())
+  workspaceId      String                     @map("workspace_id")
+  childRevisionId  String                     @map("child_revision_id")
+  childRevision    FormationCandidateRevision @relation("LineageChildRevision", fields: [childRevisionId, workspaceId], references: [id, workspaceId])
+  parentIdentityId String                     @map("parent_identity_id")
+  parentIdentity   FormationCandidateIdentity @relation("LineageParentIdentity", fields: [parentIdentityId, workspaceId], references: [id, workspaceId])
+  /// 親candidateの「その訂正の対象になった時点のRevision」を固定する
+  /// (recordCandidateDecisionの決定Revision固定と同じ設計原則)。
+  parentRevisionId String                     @map("parent_revision_id")
+  parentRevision   FormationCandidateRevision @relation("LineageParentRevision", fields: [parentRevisionId, workspaceId], references: [id, workspaceId])
+  /// "MERGE" | "SPLIT"(想像で他の値を追加しない。この2値のみが正本§11.4の
+  /// 対象操作)。
+  correctionKind   String                     @map("correction_kind")
+  createdAt        DateTime                   @default(now()) @map("created_at")
+
+  @@unique([childRevisionId, parentIdentityId], map: "formation_candidate_lineages_child_parent_uq")
+  @@index([workspaceId, childRevisionId])
+  @@index([workspaceId, parentIdentityId])
+  @@map("formation_candidate_lineages")
+}
+
+/// V5-M1-C2B TBL: formation_candidate_merge_events(Merge操作そのものの
+/// idempotency記録。DEC-MERGE-001「idempotency key + request hash…同一
+/// idempotency再送は同じ結果、同一key異payloadは409」)。CandidateDecisionEvent
+/// (各親candidateへのMERGED記録)とは別に、「このMerge操作全体」を1行で
+/// 表す(materializationReceipt.operationIdと同じ設計思想)。
+model FormationCandidateMergeEvent {
+  id             String                     @id @default(uuid())
+  workspaceId    String                     @map("workspace_id")
+  sessionId      String                     @map("session_id")
+  clientEventId  String                     @map("client_event_id")
+  requestHash    String                     @map("request_hash")
+  newCandidateId String                     @map("new_candidate_id")
+  newCandidate   FormationCandidateIdentity @relation("MergeEventNewCandidate", fields: [newCandidateId, workspaceId], references: [id, workspaceId])
+  actorUserId    String                     @map("actor_user_id")
+  actorUser      User                       @relation(fields: [actorUserId], references: [id])
+  occurredAt     DateTime                   @default(now()) @map("occurred_at")
+
+  @@unique([workspaceId, clientEventId], map: "formation_candidate_merge_events_workspace_client_uq")
+  @@index([workspaceId, sessionId])
+  @@map("formation_candidate_merge_events")
+}
+
 

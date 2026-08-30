@@ -123,6 +123,23 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
         const revisionIds = revisions.map((r) => r.id);
 
         if (revisionIds.length > 0) {
+          // [2026-08-30新設・M1-C2B是正] formation_candidate_lineagesは
+          // child_revision_id(このSessionのRevision)とparent_identity_id
+          // (このSessionのIdentity)の両方への複合FKを持つ。lineageは
+          // Merge/Split操作で「他候補」を親として参照することもあるため、
+          // Session内revisionIds/identityIdsのどちらか一方でも一致すれば
+          // 削除対象に含める(OR条件)。formationCandidateRevision/
+          // formationCandidateIdentityのどちらのdeleteManyより先に
+          // 実行する必要がある。
+          await step(
+            errors,
+            "formationCandidateLineage.deleteMany",
+            () =>
+              db.formationCandidateLineage.deleteMany({
+                where: { OR: [{ childRevisionId: { in: revisionIds } }, { parentIdentityId: { in: identityIds } }] },
+              }),
+            { count: 0 },
+          );
           await step(errors, "formationSourceAnchor.deleteMany", () => db.formationSourceAnchor.deleteMany({ where: { revisionId: { in: revisionIds } } }), { count: 0 });
           // [2026-08-30新設・M1-C是正] formation_atomicity_assessmentsは
           // formation_candidate_revisionsへの複合FK(revision_id, workspace_id)を
@@ -136,6 +153,10 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
           // (formationAtomicityAssessmentと全く同じ教訓、今回は実装と同一工程で対応)。
           await step(errors, "formationAtomicityOverride.deleteMany", () => db.formationAtomicityOverride.deleteMany({ where: { revisionId: { in: revisionIds } } }), { count: 0 });
         }
+        // [2026-08-30新設・M1-C2B是正] formation_candidate_merge_eventsは
+        // new_candidate_idを通じてformation_candidate_identitiesへの複合FKを
+        // 持つため、formationCandidateIdentity.deleteManyより先に削除する。
+        await step(errors, "formationCandidateMergeEvent.deleteMany", () => db.formationCandidateMergeEvent.deleteMany({ where: { newCandidateId: { in: identityIds } } }), { count: 0 });
         await step(errors, "materializationReceiptItem.deleteMany", () => db.materializationReceiptItem.deleteMany({ where: { candidateId: { in: identityIds } } }), { count: 0 });
         await step(errors, "formationCandidateDecisionEvent.deleteMany", () => db.formationCandidateDecisionEvent.deleteMany({ where: { candidateId: { in: identityIds } } }), { count: 0 });
         await step(errors, "formationCandidateRevision.deleteMany", () => db.formationCandidateRevision.deleteMany({ where: { candidateId: { in: identityIds } } }), { count: 0 });

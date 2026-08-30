@@ -145,6 +145,10 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
     { type: "TASK", title: "" },
   ]);
   const [splitBusy, setSplitBusy] = useState(false);
+  // [2026-08-30新設・M1-C2B Merge Correction]
+  const [mergingOpen, setMergingOpen] = useState(false);
+  const [mergeDraft, setMergeDraft] = useState({ type: "TASK", title: "", description: "", completionCondition: "" });
+  const [mergeBusy, setMergeBusy] = useState(false);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -366,6 +370,62 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
     }
   }
 
+  /** [2026-08-30新設・M1-C2B DEC-MERGE-001] 統合フォームを開始する。 */
+  function startMerge() {
+    setMergingOpen(true);
+    setMergeDraft({ type: "TASK", title: "", description: "", completionCondition: "" });
+    setError("");
+  }
+
+  function cancelMerge() {
+    setMergingOpen(false);
+  }
+
+  async function submitMerge() {
+    if (!data) return;
+    const title = mergeDraft.title.trim();
+    if (!title) {
+      setError("統合後のtitleを入力してください");
+      return;
+    }
+    const parents = data.candidates
+      .filter((c) => selectedIds.has(c.identityId) && c.currentRevision)
+      .map((c) => ({ candidateId: c.identityId, revision: c.currentRevision!.revision }));
+    if (parents.length < 2) {
+      setError("統合には2件以上の候補選択が必要です");
+      return;
+    }
+    setMergeBusy(true);
+    setError("");
+    debugLog.event("FormationSessionPanel", "submitMerge", { parentCount: parents.length });
+    try {
+      const res = await apiFetch(`/api/v1/formation-sessions/${sessionId}/candidates/merge`, {
+        method: "POST",
+        body: JSON.stringify({
+          clientEventId: `ui-merge-${sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          parents,
+          merged: {
+            type: mergeDraft.type,
+            title,
+            description: mergeDraft.description.trim() || undefined,
+            completionCondition: mergeDraft.completionCondition.trim() || undefined,
+          },
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(body?.error?.message ?? "統合処理に失敗しました");
+        return;
+      }
+      setMergingOpen(false);
+      setSelectedIds(new Set());
+      await load(true);
+      onChanged?.();
+    } finally {
+      setMergeBusy(false);
+    }
+  }
+
   const sessionActive = data ? data.session.state === "REVIEW_READY" || data.session.state === "PARTIALLY_CONFIRMED" : false;
 
   if (loading) {
@@ -515,6 +575,72 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
               className="text-[11px] bg-canvas border border-line text-muted rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-line/40 transition"
             >
               まとめて却下
+            </button>
+            {/* [2026-08-30新設・M1-C2B DEC-MERGE-001] 既存の複数選択(selectedIds)を
+                流用し、2件以上選択時のみ「統合する」を出す。 */}
+            <button
+              onClick={startMerge}
+              disabled={selectedCount < 2 || bulkBusy || mergeBusy}
+              className="text-[11px] bg-canvas border border-line text-muted rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-line/40 transition"
+            >
+              統合する
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* [2026-08-30新設・M1-C2B] 統合フォーム。選択済み候補群(selectedIds)を
+          親としてMergeする。本人が統合後の内容を明示入力するまでMergeは
+          実行されない(DEC-MERGE-001「AIに統合内容を勝手に決めさせない」)。 */}
+      {mergingOpen && (
+        <div className="mt-3 rounded-lg border border-line bg-canvas p-3 space-y-2">
+          <p className="text-[11px] text-muted">
+            選択した{selectedCount}件の候補を1件に統合します。統合後の内容を入力してください(元候補の履歴は削除されません)。
+          </p>
+          <div className="flex items-center gap-1.5">
+            <select
+              value={mergeDraft.type}
+              onChange={(e) => setMergeDraft((prev) => ({ ...prev, type: e.target.value }))}
+              className="text-[11px] rounded border border-line px-1.5 py-1.5"
+            >
+              {Object.entries(CANDIDATE_TYPE_LABEL).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <input
+              type="text"
+              value={mergeDraft.title}
+              onChange={(e) => setMergeDraft((prev) => ({ ...prev, title: e.target.value }))}
+              placeholder="統合後のtitle"
+              className="flex-1 min-w-0 text-sm rounded border border-line px-2 py-1.5"
+            />
+          </div>
+          <textarea
+            value={mergeDraft.description}
+            onChange={(e) => setMergeDraft((prev) => ({ ...prev, description: e.target.value }))}
+            placeholder="説明(任意)"
+            rows={2}
+            className="w-full text-sm rounded border border-line px-2 py-1.5"
+          />
+          <input
+            type="text"
+            value={mergeDraft.completionCondition}
+            onChange={(e) => setMergeDraft((prev) => ({ ...prev, completionCondition: e.target.value }))}
+            placeholder="完了条件(任意)"
+            className="w-full text-sm rounded border border-line px-2 py-1.5"
+          />
+          <div className="flex justify-end gap-1.5">
+            <button onClick={cancelMerge} className="text-[11px] text-faint px-2 py-1.5">
+              キャンセル
+            </button>
+            <button
+              onClick={submitMerge}
+              disabled={mergeBusy || !mergeDraft.title.trim()}
+              className="text-[11px] bg-ink text-white rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-black transition"
+            >
+              {mergeBusy ? "処理中..." : "統合を確定"}
             </button>
           </div>
         </div>
