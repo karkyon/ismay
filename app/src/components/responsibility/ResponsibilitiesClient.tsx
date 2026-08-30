@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, startTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
@@ -528,23 +528,32 @@ export function ResponsibilitiesClient() {
     }
   }, []);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    loadList();
-    loadTags();
+    startTransition(() => {
+      loadList();
+      loadTags();
+    });
   }, [loadList, loadTags]);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    if (selectedId) loadDetail(selectedId);
-    setEditing(false);
+    startTransition(() => {
+      if (selectedId) loadDetail(selectedId);
+      setEditing(false);
+    });
   }, [selectedId, loadDetail]);
 
   // [2026-08-20追加] /relationsの関係図からノードをクリックした際、「今後TOPに
   // 移動するだけで該当項目が分からない」という不備を修正する。?focus=IDを見て
   // 自動選択し、該当行までスクロールする。
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
     const focus = searchParams.get("focus");
     if (focus) {
-      setSelectedId(focus);
+      startTransition(() => {
+        setSelectedId(focus);
+      });
       requestAnimationFrame(() => {
         document.getElementById(`resp-row-${focus}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
       });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, startTransition } from "react";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { microsToUsd, formatUsd } from "@/lib/ai/pricing";
@@ -237,8 +237,12 @@ export function AiProvidersAdminClient() {
     setLoading(false);
   }, []);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応。InboxClient.tsx(B4.2b)と同じ
+  // 標準的な回避策(startTransitionで包む)。挙動・タイミングは変えない。
   useEffect(() => {
-    load();
+    startTransition(() => {
+      load();
+    });
   }, [load]);
 
   async function handleSwitch(capability: string, providerKey: string, modelName?: string) {

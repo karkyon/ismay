@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, startTransition } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
@@ -120,19 +120,29 @@ export function RelationGraphClient() {
     setLoadingGraph(false);
   }, []);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    loadGroups();
+    startTransition(() => {
+      loadGroups();
+    });
   }, [loadGroups]);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    setExtraNodeIds([]);
-    loadGraph(selectedCaptureId);
+    startTransition(() => {
+      setExtraNodeIds([]);
+      loadGraph(selectedCaptureId);
+    });
   }, [selectedCaptureId, loadGraph]);
 
   const [extraNodes, setExtraNodes] = useState<GraphNode[]>([]);
   useEffect(() => {
     if (extraNodeIds.length === 0) {
-      setExtraNodes([]);
+      // [Gate Q0是正] react-hooks/set-state-in-effect対応。フラグされた同期setStateだけを
+      // 最小範囲でstartTransitionへ包む(この分岐にcleanup returnは無い)。
+      startTransition(() => {
+        setExtraNodes([]);
+      });
       return;
     }
     (async () => {
@@ -226,6 +236,7 @@ export function RelationGraphClient() {
     return map;
   }, [displayNodes]);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
     const next = new Map<string, { x: number; y: number }>();
     for (const n of displayNodes) {
@@ -235,7 +246,9 @@ export function RelationGraphClient() {
         next.set(n.id, autoLayout.get(n.id) ?? { x: PADDING, y: PADDING });
       }
     }
-    setPositions(next);
+    startTransition(() => {
+      setPositions(next);
+    });
   }, [displayNodes, autoLayout]);
 
   const canvasSize = useMemo(() => {

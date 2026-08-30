@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, startTransition } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
@@ -88,8 +88,12 @@ export function NotificationBell() {
     setLoaded(true);
   }, []);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応。setIntervalのcleanup returnは
+  // startTransitionの外側に維持する(effect自体のcleanup契約を変えない)。
   useEffect(() => {
-    load();
+    startTransition(() => {
+      load();
+    });
     const interval = setInterval(load, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [load]);

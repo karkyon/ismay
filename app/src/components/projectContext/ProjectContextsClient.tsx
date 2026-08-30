@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, startTransition } from "react";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 import { formatRelativeTime } from "@/lib/format";
@@ -169,8 +169,11 @@ export function ProjectContextsClient() {
     setLoadingList(false);
   }, []);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    loadList(lifecycleFilter);
+    startTransition(() => {
+      loadList(lifecycleFilter);
+    });
   }, [loadList, lifecycleFilter]);
 
   const loadDetail = useCallback(async (id: string) => {
@@ -188,15 +191,18 @@ export function ProjectContextsClient() {
     setLoadingDetail(false);
   }, []);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    if (selectedId) {
-      loadDetail(selectedId);
-      setLinkFormOpen(false);
-      setRefFormOpen(false);
-      setEditOpen(false);
-    } else {
-      setDetail(null);
-    }
+    startTransition(() => {
+      if (selectedId) {
+        loadDetail(selectedId);
+        setLinkFormOpen(false);
+        setRefFormOpen(false);
+        setEditOpen(false);
+      } else {
+        setDetail(null);
+      }
+    });
   }, [selectedId, loadDetail]);
 
   async function createContext(e: React.FormEvent) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, startTransition } from "react";
 import Link from "next/link";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
@@ -213,12 +213,15 @@ export function TodayClient() {
     loadPemOnboardingStatus();
   }, [load, loadPlanning, loadSummary, loadCycle, loadPemOnboardingStatus]);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    load();
-    loadPlanning();
-    loadSummary();
-    loadCycle();
-    loadPemOnboardingStatus();
+    startTransition(() => {
+      load();
+      loadPlanning();
+      loadSummary();
+      loadCycle();
+      loadPemOnboardingStatus();
+    });
   }, [load, loadPlanning, loadSummary, loadCycle, loadPemOnboardingStatus]);
 
   /** ピン留め切替(FN-WK-03、最大3件はAPI側で強制)。versionを都度取得してから送る。 */
@@ -287,11 +290,19 @@ export function TodayClient() {
     if (!pickerOpen) return;
     const q = pickerQuery.trim();
     if (!q) {
-      setSearchResults(null);
-      setSearching(false);
+      // [Gate Q0是正] react-hooks/set-state-in-effect対応。このeffectは
+      // `return () => clearTimeout(timer)` というcleanup契約を持つため、effect全体を
+      // startTransitionで包むことはできない(cleanup関数はReactへ直接returnする必要が
+      // あるため)。フラグされた同期setStateの2件だけを最小範囲で包む。
+      startTransition(() => {
+        setSearchResults(null);
+        setSearching(false);
+      });
       return;
     }
-    setSearching(true);
+    startTransition(() => {
+      setSearching(true);
+    });
     const timer = setTimeout(async () => {
       const res = await apiFetch(`/api/v1/search?q=${encodeURIComponent(q)}&mode=keyword`);
       if (res.ok) {

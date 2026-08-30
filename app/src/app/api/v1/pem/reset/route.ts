@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import type { Prisma } from "@/generated/prisma/client";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
@@ -73,7 +74,9 @@ export async function POST(req: NextRequest) {
     where: { userId: user.id, deletedAt: null },
     select: { id: true },
   });
-  await db.$transaction(async (tx: any) => {
+  // [Gate Q0是正] @typescript-eslint/no-explicit-any対応。materialize.ts等の既存実装と
+  // 同じ`Prisma.TransactionClient`型を使う(想像で別の型を発明しない)。
+  await db.$transaction(async (tx: Prisma.TransactionClient) => {
     if (activeObservations.length > 0) {
       await tx.pemEvidenceDeletionEvent.createMany({
         data: activeObservations.map((o: { id: string }) => ({

@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import { getActivePemDialogueProvider } from "@/lib/ai/config";
 import { estimateCostMicros } from "@/lib/ai/pricing";
@@ -239,7 +240,9 @@ async function finalizeOnboarding(
   const facts = (conversation.proposedFacts as unknown as { kind: string; statement: string }[]) ?? [];
   const hypotheses = (conversation.proposedHypotheses as unknown as { statement: string; confidence: number }[]) ?? [];
 
-  await db.$transaction(async (tx: any) => {
+  // [Gate Q0是正] @typescript-eslint/no-explicit-any対応。materialize.ts等の既存実装と
+  // 同じ`Prisma.TransactionClient`型を使う(想像で別の型を発明しない)。
+  await db.$transaction(async (tx: Prisma.TransactionClient) => {
     for (const fact of facts) {
       if (fact.kind !== "FACT") continue;
       const createdObservation = await tx.pemObservation.create({

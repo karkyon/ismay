@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, startTransition } from "react";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
 import { debugLog } from "@/lib/debug";
 
@@ -40,8 +40,11 @@ export function TagsAdminClient() {
     setLoading(false);
   }, []);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    load();
+    startTransition(() => {
+      load();
+    });
   }, [load]);
 
   async function createTag(e: React.FormEvent) {

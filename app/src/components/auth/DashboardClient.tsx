@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, startTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiFetch, debugFetch } from "@/lib/auth/client";
@@ -105,8 +105,11 @@ export function DashboardClient() {
     setLoading(false);
   }, [router]);
 
+  // [Gate Q0是正] react-hooks/set-state-in-effect対応(既存パターンを踏襲)。
   useEffect(() => {
-    load();
+    startTransition(() => {
+      load();
+    });
   }, [load]);
 
   useEffect(() => {
