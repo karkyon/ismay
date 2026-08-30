@@ -4,6 +4,7 @@ import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import type { ResponsibilityCandidate } from "@/lib/ai/schema";
 import { resolveFormationSessionTransition, isValidTextOffsetRange, type FormationEventType } from "@/lib/formation/coreTypes";
+import { applyQuestionPolicyAndTransition, type CandidateForQuestionPolicy } from "@/lib/formation/formationQuestionService";
 
 /**
  * V5-M1-B2 Formation Session shadow書込み。
@@ -20,6 +21,12 @@ import { resolveFormationSessionTransition, isValidTextOffsetRange, type Formati
  *   成功経路でFormationSession/Candidate/Revision/SourceAnchorのデータ形状を実運用
  *   データで検証してから、FAILED/RETRY遷移やBatch経路へ拡張する方が安全(想像で
  *   全経路を一度に繋がない)。未対応経路は本ファイルでは一切呼び出されない。
+ *
+ * [2026-08-30更新・M1-B5a §4.2] DEC-010「Question Policy未接続のためCLARIFYING分岐は
+ * 使わない」は本Gateで解消した。候補作成後、`applyQuestionPolicyAndTransition`
+ * (formationQuestionService.ts、answerService.tsとの共通部品)を呼び、統合正本§6.4の
+ * Question Policyに従ってCLARIFYING(質問あり)またはREVIEW_READY(質問なし)へ遷移する。
+ * BATCH抽出経路(aiExtractJob.ts等)への同サービスの配線は未調査のため次のGateとする。
  *
  * [エラー方針] この関数はfire-and-forgetのbest-effortとして呼び出し元
  * (ai/extract.ts)から呼ばれる。内部で例外を捕捉し、失敗しても本体のCapture/
@@ -99,21 +106,15 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
       });
       await emit("ANALYSIS_REQUESTED", { aiRunId });
 
-      // ANALYZING --success/no question--> REVIEW_READY (候補>=1) または
+      // ANALYZING --success--> 候補作成後、Question Policyで質問要否を判定して
+      // CLARIFYING(質問あり)/REVIEW_READY(質問なし)へ遷移する(§6.4)。
       // ANALYZING --failure--> FAILED (候補0件)。
-      // [DEC-010] Question Policy(質問生成)はこのGateでは未接続のため、
-      // success/question分岐(CLARIFYING)は使わない(質問を生成する主体が
-      // まだ存在しない。想像でCLARIFYINGへ遷移させない)。
+      // [2026-08-30是正・M1-B5a §4.2] DEC-010は解消済み(ファイル冒頭コメント参照)。
       // [2026-08-30是正] 操作名をDOC-03語彙"ANALYSIS_SUCCESS_NO_QUESTION"から
       // 統合正本§6.3語彙"NO_QUESTIONS_NEEDED"へ置換。
+      const createdCandidates: CandidateForQuestionPolicy[] = [];
       if (candidates.length > 0) {
         await emit("ANALYSIS_SUCCEEDED", { candidateCount: candidates.length, captureSummary: captureSummary ?? null });
-        const toReviewReady = resolveFormationSessionTransition("ANALYZING", "NO_QUESTIONS_NEEDED");
-        if (!toReviewReady) throw new Error("coreTypes不整合: ANALYZING--NO_QUESTIONS_NEEDED-->の遷移が定義されていません");
-        await tx.formationSession.update({
-          where: { id: session.id },
-          data: { state: toReviewReady, version: { increment: 1 } },
-        });
       } else {
         await emit("ANALYSIS_FAILED", { reason: "候補0件" });
         // [2026-08-30是正] 操作名をDOC-03語彙"ANALYSIS_FAILURE"から統合正本§6.3語彙
@@ -160,6 +161,8 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
 
         await emit("CANDIDATE_CREATED", { candidateKey: candidate.candidateId, revisionId: revision.id, type: candidate.type });
 
+        createdCandidates.push({ identityId: identity.id, createdOrder: createdCandidates.length, candidate });
+
         for (const span of candidate.evidenceSpans) {
           const validRange = isValidTextOffsetRange(span.start, span.end, capture.rawText.length);
           // 不正range(AIがCapture本文の範囲外を指した等)はoffsetをnullにして保存する
@@ -190,6 +193,18 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
             validRange,
           });
         }
+      }
+
+      if (createdCandidates.length > 0) {
+        await applyQuestionPolicyAndTransition({
+          tx,
+          workspaceId: capture.workspaceId,
+          sessionId: session.id,
+          questionCountBefore: 0,
+          candidates: createdCandidates,
+          actorType: "SYSTEM",
+          actorUserId: null,
+        });
       }
 
       return session.id;

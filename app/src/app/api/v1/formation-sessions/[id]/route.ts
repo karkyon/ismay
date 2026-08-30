@@ -15,7 +15,13 @@ import { resolveLegacyProjectionMap, computeCandidateConflict } from "@/lib/form
  *
  * このAPI自体は読み取り専用。書込みは既存の
  * `POST /:id/candidates/:cid/decisions`・`POST /:id/candidates/bulk-decisions`・
- * `POST /:id/materialize`が担う。
+ * `POST /:id/materialize`・[2026-08-30追加]`POST /:id/answers`が担う。
+ *
+ * [2026-08-30追加・M1-B5a §4.4] CLARIFYING画面(次Gateで実装予定)が使えるよう、
+ * `FormationQuestion`一覧と各Questionの最新回答summaryをレスポンスへ追加した。
+ * 訂正チェーン(revisionOfIdを辿った全履歴)は、このAPIでは最新回答のみを返し
+ * (一覧表示には最新のみで十分なため)、履歴全体が必要な場合は将来
+ * 専用endpointを設ける。
  *
  * [B4.3是正] `legacyProjection.conflictCode`の算出を、このfile内のinline三項演算子
  * (「legacy ACCEPTED/EDITEDなのにResponsibilityが無い」の1パターンのみ検出)から、
@@ -136,6 +142,50 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const sessionActive = session.state === "REVIEW_READY" || session.state === "PARTIALLY_CONFIRMED";
   const acceptedMaterializedCount = candidates.filter((c) => c.materialization !== null).length;
+
+  // [2026-08-30追加・M1-B5a §4.4] Question一覧+各Questionの最新回答summary。
+  const questionRows = await db.formationQuestion.findMany({
+    where: { sessionId: session.id, workspaceId },
+    orderBy: { ordinal: "asc" },
+  });
+  const answerRows = questionRows.length
+    ? await db.formationAnswerEvent.findMany({
+        where: { workspaceId, questionId: { in: questionRows.map((q) => q.id) } },
+        orderBy: { occurredAt: "desc" },
+      })
+    : [];
+  const latestAnswerByQuestionId = new Map<string, (typeof answerRows)[number]>();
+  for (const a of answerRows) {
+    // occurredAt降順で最初に出た行=最新(Mapは既存keyを上書きしないためsetは1回のみ)。
+    if (!latestAnswerByQuestionId.has(a.questionId)) {
+      latestAnswerByQuestionId.set(a.questionId, a);
+    }
+  }
+  const questions = questionRows.map((q) => {
+    const latestAnswer = latestAnswerByQuestionId.get(q.id) ?? null;
+    return {
+      id: q.id,
+      ordinal: q.ordinal,
+      candidateId: q.candidateId,
+      questionCode: q.questionCode,
+      priority: q.priority,
+      reasonCode: q.reasonCode,
+      promptText: q.promptText,
+      promptVersion: q.promptVersion,
+      scoreValue: Number(q.scoreValue),
+      latestAnswer: latestAnswer
+        ? {
+            id: latestAnswer.id,
+            answerKind: latestAnswer.answerKind,
+            value: latestAnswer.valueJson,
+            occurredAt: latestAnswer.occurredAt.toISOString(),
+            revisionOfId: latestAnswer.revisionOfId,
+          }
+        : null,
+    };
+  });
+  const unansweredQuestionCount = questions.filter((q) => q.latestAnswer === null).length;
+
   const allowedActions = {
     decide: sessionActive && pendingCount > 0,
     materialize: sessionActive && acceptedUnmaterializedCount > 0,
@@ -143,6 +193,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     // 今回新規にmaterializeすべき候補が無い状態でのみ、明示finalizeを許可する
     // (materialize.tsのisExplicitZeroItemFinalize判定と同じ条件)。
     finalize: sessionActive && pendingCount === 0 && acceptedUnmaterializedCount === 0 && acceptedMaterializedCount > 0,
+    // [2026-08-30追加・M1-B5a §4.4] CLARIFYING状態かつ未回答Questionが残っている場合のみ回答可能。
+    answer: session.state === "CLARIFYING" && unansweredQuestionCount > 0,
   };
 
   const body = {
@@ -154,6 +206,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       questionCount: session.questionCount,
     },
     candidates,
+    questions,
     allowedActions,
   };
 
