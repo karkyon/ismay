@@ -189,6 +189,10 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
           // (formation_source_anchors_text_offset_check CHECKに合わせ、両方null
           // またはstart<end<=lengthのどちらかのみを許可するため)。SOURCE_ANCHOR_ATTACHED
           // Event自体はcandidateの根拠件数として残す。
+          // [M1-B6A追加・2026-08-31指示書§3.2.1] 不正rangeの場合、quality=
+          // UNAVAILABLEとして明示的に記録する(isValidSourceAnchorKindFieldsの
+          // TEXT_OFFSET/AVAILABLE契約はstartOffset/endOffset非null必須のため、
+          // quality=AVAILABLEのまま両方nullにすると不整合になる)。
           const excerpt = validRange ? capture.rawText.slice(span.start, span.end) : "";
           const excerptHash = createHash("sha256").update(excerpt).digest("hex");
           await tx.formationSourceAnchor.create({
@@ -200,6 +204,8 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
               startOffset: validRange ? span.start : null,
               endOffset: validRange ? span.end : null,
               excerptHash,
+              quality: validRange ? "AVAILABLE" : "UNAVAILABLE",
+              unavailableReason: validRange ? null : "TEXT_OFFSET_OUT_OF_RANGE",
               // [2026-08-30是正・M1-B6] classifyPii()による客観的pattern検出
               // (メールアドレス・電話番号)を適用する。
               // [R1-05是正・監査是正指示書2026-08-31] 不正range(excerptが空文字列)

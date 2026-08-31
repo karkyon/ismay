@@ -320,6 +320,18 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
             imageRegion: anchor.imageRegion ?? undefined,
             excerptHash: anchor.excerptHash,
             piiClassification: anchor.piiClassification,
+            // [M1-B6A追加・2026-08-31指示書§3.2.3「Split/Mergeは全kind固有field
+            // を正確に継承し、dedupeしても根拠を失わない」]
+            audioStartMs: anchor.audioStartMs,
+            audioEndMs: anchor.audioEndMs,
+            segmentIndex: anchor.segmentIndex,
+            speakerLabel: anchor.speakerLabel,
+            speakerConfirmed: anchor.speakerConfirmed,
+            pageIndex: anchor.pageIndex,
+            ocrConfidence: anchor.ocrConfidence ?? undefined,
+            quality: anchor.quality,
+            unavailableReason: anchor.unavailableReason,
+            anchorSchemaVersion: anchor.anchorSchemaVersion,
           },
         });
       }

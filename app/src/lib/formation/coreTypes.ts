@@ -329,6 +329,77 @@ export function isValidTextOffsetRange(
   );
 }
 
+/**
+ * [M1-B6A新設・2026-08-31指示書§3.2.1] FormationSourceAnchorの根拠としての質。
+ * AVAILABLE=kind固有fieldが実在する形で取得できた。UNAVAILABLE=Providerが
+ * kind固有情報(timecode/bbox/speaker等)を返さなかった、または不正な値を
+ * 返したためkind固有fieldを捏造せずnullのまま保存した状態。
+ */
+export const SOURCE_ANCHOR_QUALITIES = ["AVAILABLE", "UNAVAILABLE"] as const;
+export type SourceAnchorQuality = (typeof SOURCE_ANCHOR_QUALITIES)[number];
+
+export function isValidSourceAnchorQuality(value: string): value is SourceAnchorQuality {
+  return (SOURCE_ANCHOR_QUALITIES as readonly string[]).includes(value);
+}
+
+/**
+ * [M1-B6A新設] kindごとの必須field・禁止fieldをapplication層で検証する
+ * (DB CHECKは列単独の粗い制約のみを担い、kind間の相互排他はここで保証する。
+ * text offsetがCapture.rawText.lengthを必要とし、DB CHECKでは検証しきれない
+ * ためapplication層に置いた、という既存`isValidTextOffsetRange`と同じ設計)。
+ *
+ * quality="UNAVAILABLE"の場合、そのkindの必須fieldが揃っていなくても有効
+ * (Providerが実際に情報を返さなかった事実の記録であり、揃っていないことが
+ * 正しい状態のため)。ただしunavailableReasonは必須。
+ * quality="AVAILABLE"の場合、そのkindの必須fieldが全て揃っていなければ無効
+ * (「有る」と主張するなら実際に値を持っていなければならない)。
+ */
+export interface SourceAnchorKindFieldsInput {
+  sourceKind: FormationSourceAnchorKind;
+  quality: SourceAnchorQuality;
+  unavailableReason: string | null;
+  startOffset: number | null;
+  endOffset: number | null;
+  audioStartMs: number | null;
+  audioEndMs: number | null;
+  speakerLabel: string | null;
+  pageIndex: number | null;
+  imageRegion: unknown;
+  ocrConfidence: number | null;
+}
+
+export function isValidSourceAnchorKindFields(input: SourceAnchorKindFieldsInput): boolean {
+  if (input.quality === "UNAVAILABLE") {
+    return typeof input.unavailableReason === "string" && input.unavailableReason.trim().length > 0;
+  }
+  // quality === "AVAILABLE": unavailableReasonは無関係(付いていても無視する。
+  // 想像で「AVAILABLEならunavailableReasonは必ずnull」という追加制約は課さない
+  // 理由: この関数の責務はkind固有fieldの整合性のみに限定するため)。
+  switch (input.sourceKind) {
+    case "TEXT_OFFSET":
+      return input.startOffset !== null && input.endOffset !== null;
+    case "AUDIO_TIMECODE":
+      return (
+        input.audioStartMs !== null &&
+        input.audioEndMs !== null &&
+        Number.isInteger(input.audioStartMs) &&
+        Number.isInteger(input.audioEndMs) &&
+        input.audioStartMs >= 0 &&
+        input.audioEndMs > input.audioStartMs
+      );
+    case "MEETING_SPEAKER":
+      return typeof input.speakerLabel === "string" && input.speakerLabel.trim().length > 0;
+    case "IMAGE_BBOX":
+      return (
+        input.pageIndex !== null &&
+        Number.isInteger(input.pageIndex) &&
+        input.pageIndex >= 0 &&
+        input.imageRegion !== null &&
+        input.imageRegion !== undefined
+      );
+  }
+}
+
 /** tenant scope入力の共通型(既存projectContext/coreTypes.tsと同じ形)。 */
 export interface TenantScopeInput {
   workspaceId: string;

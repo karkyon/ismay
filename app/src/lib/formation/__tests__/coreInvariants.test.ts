@@ -26,6 +26,9 @@ import {
   FORMATION_SOURCE_ANCHOR_KINDS,
   isValidFormationSourceAnchorKind,
   isValidTextOffsetRange,
+  SOURCE_ANCHOR_QUALITIES,
+  isValidSourceAnchorQuality,
+  isValidSourceAnchorKindFields,
 } from "../coreTypes";
 
 let passed = 0;
@@ -237,6 +240,67 @@ ok("text offset: start===endは無効(空区間)", !isValidTextOffsetRange(5, 5,
 ok("text offset: end>sourceLengthは無効", !isValidTextOffsetRange(0, 25, 20));
 ok("text offset: start<0は無効", !isValidTextOffsetRange(-1, 10, 20));
 ok("text offset: 非整数は無効", !isValidTextOffsetRange(0.5, 10, 20));
+
+// -------------------------------------------------------------------
+// [M1-B6A新設] 正規化Source Unit(SOURCE_ANCHOR_QUALITIES/isValidSourceAnchorKindFields)
+// -------------------------------------------------------------------
+ok("SOURCE_ANCHOR_QUALITIESは2値ちょうど", SOURCE_ANCHOR_QUALITIES.length === 2);
+ok("AVAILABLEは有効なquality", isValidSourceAnchorQuality("AVAILABLE"));
+ok("UNAVAILABLEは有効なquality", isValidSourceAnchorQuality("UNAVAILABLE"));
+ok("未知のqualityは無効", !isValidSourceAnchorQuality("PARTIAL"));
+
+const baseAnchorFields = {
+  unavailableReason: null,
+  startOffset: null,
+  endOffset: null,
+  audioStartMs: null,
+  audioEndMs: null,
+  speakerLabel: null,
+  pageIndex: null,
+  imageRegion: null,
+  ocrConfidence: null,
+};
+
+ok(
+  "TEXT_OFFSET・AVAILABLE: startOffset/endOffset揃っていれば有効",
+  isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "TEXT_OFFSET", quality: "AVAILABLE", startOffset: 0, endOffset: 10 }),
+);
+ok(
+  "TEXT_OFFSET・AVAILABLE: startOffset/endOffsetが無いと無効(捏造禁止)",
+  !isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "TEXT_OFFSET", quality: "AVAILABLE" }),
+);
+ok(
+  "AUDIO_TIMECODE・AVAILABLE: audioStartMs<audioEndMsなら有効",
+  isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "AUDIO_TIMECODE", quality: "AVAILABLE", audioStartMs: 1000, audioEndMs: 2000 }),
+);
+ok(
+  "AUDIO_TIMECODE・AVAILABLE: audioStartMs>=audioEndMsは無効",
+  !isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "AUDIO_TIMECODE", quality: "AVAILABLE", audioStartMs: 2000, audioEndMs: 1000 }),
+);
+ok(
+  "MEETING_SPEAKER・AVAILABLE: speakerLabelがあれば有効",
+  isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "MEETING_SPEAKER", quality: "AVAILABLE", speakerLabel: "Speaker A" }),
+);
+ok(
+  "MEETING_SPEAKER・AVAILABLE: speakerLabel空文字は無効",
+  !isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "MEETING_SPEAKER", quality: "AVAILABLE", speakerLabel: "" }),
+);
+ok(
+  "IMAGE_BBOX・AVAILABLE: pageIndex+imageRegionがあれば有効",
+  isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "IMAGE_BBOX", quality: "AVAILABLE", pageIndex: 0, imageRegion: { x: 0, y: 0, w: 1, h: 1 } }),
+);
+ok(
+  "IMAGE_BBOX・AVAILABLE: imageRegionが無いと無効",
+  !isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "IMAGE_BBOX", quality: "AVAILABLE", pageIndex: 0 }),
+);
+ok(
+  "UNAVAILABLE: kind固有fieldが全て無くてもunavailableReasonがあれば有効(捏造せず未取得を記録する正規の状態)",
+  isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "AUDIO_TIMECODE", quality: "UNAVAILABLE", unavailableReason: "PROVIDER_NO_TIMECODE" }),
+);
+ok(
+  "UNAVAILABLE: unavailableReasonが無いと無効(理由を残さず未取得にするのを禁止)",
+  !isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "AUDIO_TIMECODE", quality: "UNAVAILABLE" }),
+);
 
 console.log(`\n${passed}件成功 / ${failed}件失敗`);
 if (failed > 0) {

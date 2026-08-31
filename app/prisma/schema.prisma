@@ -1760,29 +1760,67 @@ model FormationCandidateRevision {
 
 /// V5-DOC-03 4章 TBL: formation_source_anchors(原文位置根拠)
 model FormationSourceAnchor {
-  id                String                     @id @default(uuid())
-  workspaceId       String                     @map("workspace_id")
-  revisionId        String                     @map("revision_id")
-  revision          FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  id          String                     @id @default(uuid())
+  workspaceId String                     @map("workspace_id")
+  revisionId  String                     @map("revision_id")
+  revision    FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
   /// TEXT_OFFSET/AUDIO_TIMECODE/MEETING_SPEAKER/IMAGE_BBOX(M1-LOC機能、
   /// HANDOFF v1 M1「Text offset、音声timecode、会議speaker、画像page/bbox Adapter」)。
-  sourceKind        String                     @map("source_kind")
-  captureId         String                     @map("capture_id")
-  capture           Capture                    @relation(fields: [captureId, workspaceId], references: [id, workspaceId])
+  sourceKind  String                     @map("source_kind")
+  captureId   String                     @map("capture_id")
+  capture     Capture                    @relation(fields: [captureId, workspaceId], references: [id, workspaceId])
   /// TEXT_OFFSET用。DOC-10 6章「0<=start<end<=sourceLength」のうちDB CHECKで
   /// 保証できるのはstart>=0・end>startまで(sourceLengthはCapture側の値のため
   /// application層で追加検証する)。
-  startOffset       Int?                       @map("start_offset")
-  endOffset         Int?                       @map("end_offset")
+  startOffset Int?                       @map("start_offset")
+  endOffset   Int?                       @map("end_offset")
   /// IMAGE_BBOX用。DOC-10 6章「画像regionは0..1」の正規化座標をJSONで保持。
-  imageRegion       Json?                      @map("image_region")
-  excerptHash       String                     @map("excerpt_hash")
+  imageRegion Json?                      @map("image_region")
+  excerptHash String                     @map("excerpt_hash")
+
+  /// [M1-B6A新設・2026-08-31指示書§3.2.1「正規化Source Unit」]
+  /// AUDIO_TIMECODE/MEETING_SPEAKER用。文字起こしsegment内でのミリ秒offset。
+  audioStartMs     Int?     @map("audio_start_ms")
+  audioEndMs       Int?     @map("audio_end_ms")
+  /// AUDIO_TIMECODE/MEETING_SPEAKER用。Provider応答内でのsegment通し番号
+  /// (0始まり)。同一segmentから複数candidateのevidenceが作られる場合の
+  /// 突合せに使う。
+  segmentIndex     Int?     @map("segment_index")
+  /// MEETING_SPEAKER用。Provider(diarization機能付き)が返す話者ラベル
+  /// (例: "Speaker A")。Providerによっては提供されない値のため、その場合は
+  /// nullのままqualityをUNAVAILABLEとする(捏造しない)。
+  speakerLabel     String?  @map("speaker_label")
+  /// MEETING_SPEAKER用。speakerLabelが本人により確認・修正済みかどうか
+  /// (診断・信頼度表示用。確認は次GateのUIで扱う。この列自体は今回のGateで
+  /// 予約するがtrue/falseを能動的に設定する経路はまだ無い)。
+  speakerConfirmed Boolean? @map("speaker_confirmed")
+  /// IMAGE_BBOX用。複数ページ画像入力(ocrProvider.ts AiOcrInput.images)の
+  /// うち何ページ目由来かを示す(0始まり、Provider入力時のページ順と対応)。
+  pageIndex        Int?     @map("page_index")
+  /// IMAGE_BBOX用。OCR結果の信頼度(0..1)。Providerが返す場合のみ設定。
+  ocrConfidence    Decimal? @map("ocr_confidence") @db.Decimal(4, 3)
+
+  /// [M1-B6A新設] このAnchorの根拠としての質。§3.2.2「Providerがtimecode/bbox/
+  /// speakerを返さない場合は、それを捏造しない。UNAVAILABLE品質として保存し、
+  /// Text Anchorへ安全にfallbackする」。AVAILABLE=kind固有fieldが実在する形で
+  /// 取得できた。UNAVAILABLE=Provider応答にkind固有情報が無かった(この場合、
+  /// kind固有fieldは全てnullのまま、unavailableReasonに理由を記録する)。
+  quality             String  @default("AVAILABLE") @map("quality")
+  /// quality=UNAVAILABLEの場合のみ必須(DB CHECKで強制)。例:
+  /// "PROVIDER_NO_DIARIZATION"(話者分離非対応Provider)、
+  /// "PROVIDER_NO_TIMECODE"(timecode非対応Provider)等。想像で理由を作らず、
+  /// 呼出元(Provider Adapter)が実際に判定した理由をそのまま記録する。
+  unavailableReason   String? @map("unavailable_reason")
+  /// この正規化Source Unit契約自体のversion("1.0"固定。将来fieldを追加する
+  /// 場合はversionを上げ、旧versionの行は読み取り時にdual-readする)。
+  anchorSchemaVersion String  @default("1.0") @map("anchor_schema_version")
+
   /// pem/coreTypes.tsのPiiClassification語彙を再利用する(新規語彙を発明しない)。
   /// [R1-05是正・監査是正指示書2026-08-31] NONE/UNCLASSIFIEDを混同しない
   /// (piiClassifier.ts参照)。DB CHECK制約(migration 20260831040000)で
   /// NONE/LOW/MEDIUM/HIGH/UNCLASSIFIEDの5値のみへ制限している。
-  piiClassification String                     @map("pii_classification")
-  createdAt         DateTime                   @default(now()) @map("created_at")
+  piiClassification String   @map("pii_classification")
+  createdAt         DateTime @default(now()) @map("created_at")
 
   @@index([workspaceId, revisionId])
   @@map("formation_source_anchors")

@@ -426,7 +426,20 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
       // endOffset/excerptHashのみで、captureId・imageRegionを含んでいなかった。
       // 異なるCaptureの同じoffset範囲(偶然一致)や、IMAGE_BBOXのregion違いを
       // 誤って同一視し得たため、captureIdとimageRegionの正規化文字列を加える。
-      const dedupeKey = `${anchor.sourceKind}:${anchor.captureId}:${anchor.startOffset ?? "null"}:${anchor.endOffset ?? "null"}:${JSON.stringify(anchor.imageRegion ?? null)}:${anchor.excerptHash}`;
+      // [M1-B6A追加・2026-08-31指示書§3.2.1「異なる根拠を誤って同一視し得る」]
+      // audio timecode/speaker/pageも同様の理由で追加する。
+      const dedupeKey = [
+        anchor.sourceKind,
+        anchor.captureId,
+        anchor.startOffset ?? "null",
+        anchor.endOffset ?? "null",
+        JSON.stringify(anchor.imageRegion ?? null),
+        anchor.audioStartMs ?? "null",
+        anchor.audioEndMs ?? "null",
+        anchor.speakerLabel ?? "null",
+        anchor.pageIndex ?? "null",
+        anchor.excerptHash,
+      ].join(":");
       if (seenAnchorKeys.has(dedupeKey)) continue;
       seenAnchorKeys.add(dedupeKey);
       await tx.formationSourceAnchor.create({
@@ -440,6 +453,18 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
           imageRegion: anchor.imageRegion ?? undefined,
           excerptHash: anchor.excerptHash,
           piiClassification: anchor.piiClassification,
+          // [M1-B6A追加・2026-08-31指示書§3.2.3「Split/Mergeは全kind固有field
+          // を正確に継承し、dedupeしても根拠を失わない」]
+          audioStartMs: anchor.audioStartMs,
+          audioEndMs: anchor.audioEndMs,
+          segmentIndex: anchor.segmentIndex,
+          speakerLabel: anchor.speakerLabel,
+          speakerConfirmed: anchor.speakerConfirmed,
+          pageIndex: anchor.pageIndex,
+          ocrConfidence: anchor.ocrConfidence ?? undefined,
+          quality: anchor.quality,
+          unavailableReason: anchor.unavailableReason,
+          anchorSchemaVersion: anchor.anchorSchemaVersion,
         },
       });
     }
