@@ -228,8 +228,12 @@ export function isValidCandidateDecisionEventValue(value: string): value is Cand
  * [2026-08-30是正] 旧語彙(`ATOMIC/NEEDS_SPLIT/NEEDS_CLARIFICATION/TOO_FINE/
  * NOT_ACTIONABLE`)はDOC-03由来だが、これ自体が統合正本§11.1とは別物だったため、
  * 統合正本の実際の語彙(`ATOMIC/PROBABLY_ATOMIC/NEEDS_CLARIFICATION/SHOULD_DECOMPOSE/
- * CONTEXT_LIKE`)へ置換した。M1-C(Atomicity Assessment本体)未実装のため、この定数は
- * 現時点ではどこからも参照されていない(coreTypes.ts内の定義とpure testのみ)。
+ * CONTEXT_LIKE`)へ置換した。
+ * [R1-04是正・監査是正指示書2026-08-31] 元のコメントは「M1-C(Atomicity Assessment
+ * 本体)未実装のためこの定数はどこからも参照されていない」としていたが、M1-C実装
+ * (`atomicityAssessment.ts`・`atomicityOverride.ts`・`materialize.ts`のMaterialize
+ * Guard)により現在は実際に参照されている。このコメントは是正時点(この定数が
+ * pure testからのみ参照されていた時期)の記録として残す。
  */
 export const ATOMICITY_ASSESSMENTS = [
   "ATOMIC",
@@ -248,7 +252,18 @@ export function isValidAtomicityAssessment(value: string): value is AtomicityAss
  * Formation Event Catalog(DOC-02 7.3節、v5追加・16種)。FormationSessionEvent.eventType
  * の許容値集合(schema.prisma側にDB CHECKとしても追加する。SourceAnchorはEvent化しない
  * 独立tableのためSOURCE_ANCHOR_ATTACHEDのみEvent Catalogとして存在する点に注意)。
- * このPatchでは変更なし(統合正本§6.6のEntity一覧とも矛盾しないため)。
+ *
+ * [R1-04是正・監査是正指示書2026-08-31] `CANDIDATE_SPLIT`/`CANDIDATE_MERGED`の2値を
+ * 追加し18種とした。以前はSPLIT/MERGED決定を`sessionEventTypeForDecision()`が
+ * `CANDIDATE_DEFERRED`へ丸めていたため、Session timeline上で「候補が分解・統合
+ * された」ことが「延期された」と誤って見えていた(正確な決定値自体は
+ * `FormationCandidateDecisionEvent.decision`に残るため正本データの欠落ではなく、
+ * timeline表示のみの問題だった)。これは`CANDIDATE_DECISION_EVENT_VALUES`へ
+ * `SPLIT`/`MERGED`を追加した際(2026-08-30・M1-C)と同じ「実装が追いついた時点で
+ * versioned語彙を拡張する」パターンであり、正本のEvent Catalog原本(DOC-02 7.3節・
+ * 統合正本§6.6)には無い値である。旧`CANDIDATE_DEFERRED`行は読み取り互換のため
+ * このcatalogに残したまま、新規書込みだけ切り替える(expand→dual-read→switch→
+ * contractのうちexpand+switch。旧行のcontract/rewriteは行わない=履歴改変しない)。
  */
 export const FORMATION_EVENT_TYPES = [
   "FORMATION_CREATED",
@@ -263,6 +278,10 @@ export const FORMATION_EVENT_TYPES = [
   "CANDIDATE_ACCEPTED",
   "CANDIDATE_REJECTED",
   "CANDIDATE_DEFERRED",
+  /// [R1-04新設] 2026-08-30(M1-C)でCandidateDecisionEvent.decisionへSPLIT/MERGEDを
+  /// 追加した後も、Session timeline上はCANDIDATE_DEFERREDへ丸めていたための追加。
+  "CANDIDATE_SPLIT",
+  "CANDIDATE_MERGED",
   "MATERIALIZATION_COMMITTED",
   "SESSION_CONFIRMED",
   "SESSION_DISMISSED",

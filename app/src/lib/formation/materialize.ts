@@ -205,6 +205,18 @@ export function computeMaterializeRequestHash(input: {
  * 採否対象でなくなる」という点でDEFERRED/DO_NOT_MATERIALIZEと同じ意味的近さを持つため、
  * 同じCANDIDATE_DEFERREDバケットへ丸める。正確な決定値はCandidateDecisionEvent.decision
  * (SPLIT/MERGED)に残るため、timeline表示の丸めのみで正本データは失わない。
+ *
+ * [R1-04是正・監査是正指示書2026-08-31] 上記のSPLIT/MERGED丸めは撤回する。
+ * 「Session timeline上で分解・統合が延期として見える」ことは、DEC-STATE-001の
+ * ような正本データの欠落ではないが、監査運用者がtimelineだけを見て状況を
+ * 誤認する実害があるため是正した。FORMATION_EVENT_TYPESへ`CANDIDATE_SPLIT`/
+ * `CANDIDATE_MERGED`を新設し(coreTypes.ts参照、CANDIDATE_DECISION_EVENT_VALUESへ
+ * SPLIT/MERGEDを追加した際と同じ「実装が追いついた時点でversioned語彙を拡張する」
+ * パターン)、SPLIT/MERGEDはそれぞれ専用codeへ記録する。DEFERRED/DO_NOT_MATERIALIZEは
+ * 引き続きCANDIDATE_DEFERREDへ丸める(こちらは「専用codeが無い」という前提が今も
+ * 真であり、丸め自体は妥当なため変更しない)。旧SPLIT/MERGED決定に対応する既存の
+ * CANDIDATE_DEFERRED行は書き換えない(履歴改変しない。isValidFormationEventTypeは
+ * 引き続きCANDIDATE_DEFERREDを有効値として受理するため読み取り互換を保つ)。
  */
 export function sessionEventTypeForDecision(decision: CandidateDecisionEventValue): FormationEventType {
   switch (decision) {
@@ -214,9 +226,11 @@ export function sessionEventTypeForDecision(decision: CandidateDecisionEventValu
       return "CANDIDATE_REJECTED";
     case "DEFERRED":
     case "DO_NOT_MATERIALIZE":
-    case "SPLIT":
-    case "MERGED":
       return "CANDIDATE_DEFERRED";
+    case "SPLIT":
+      return "CANDIDATE_SPLIT";
+    case "MERGED":
+      return "CANDIDATE_MERGED";
   }
 }
 
@@ -291,8 +305,14 @@ export async function recordCandidateDecision(
   // transaction内で作る専用service(splitCorrection.ts)を必ず経由しなければならず、
   // この経路から直接SPLITを記録できてしまうと「決定はSPLITと記録されたのに
   // 子候補が1件も作られない」という壊れた状態を作れてしまう(§11.4「同一
-  // transactionで作る」という不変条件に違反する)。MERGEDも同様(transaction本体は
-  // 未実装だが、将来のMERGE serviceでも同じ理由で専用経路必須にする設計を先取りする)。
+  // transactionで作る」という不変条件に違反する)。
+  // [R1-04是正・監査是正指示書2026-08-31] 元のコメントは「MERGEDも同様(transaction
+  // 本体は未実装だが、将来のMERGE serviceでも同じ理由で専用経路必須にする設計を
+  // 先取りする)」としていたが、MERGE本体はmergeCorrection.tsで実装済み(2026-08-30・
+  // M1-C2B)。このguardは「先取り」ではなく、実装済みのmergeCorrection.tsを必ず
+  // 経由させるために現に機能している(理由はSPLITと全く同じ: この経路から直接
+  // MERGEDを記録できると、新統合候補・lineage・Anchor継承が1件も作られない壊れた
+  // 状態を作れてしまう)。
   if (decision === "SPLIT" || decision === "MERGED") {
     return { ok: false, error: "INVALID_DECISION_VALUE" };
   }

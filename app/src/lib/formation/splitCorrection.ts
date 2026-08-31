@@ -29,12 +29,14 @@ import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
  * 削減」思想に反するため。子候補はSession=REVIEW_READY/PARTIALLY_CONFIRMEDの
  * ままACCEPT/REJECTの対象として直接並ぶ)。
  *
- * [MERGEはこのGateでは未実装] 複数候補を1件に統合するMERGE transactionは、
- * 「どの候補群を対象にするか」「統合後の内容を誰がどう決めるか」の入力形が
- * SPLITと非対称で、UI設計も含め別途検討が必要なため、このPatchでは
- * coreTypes.tsへの値の予約(`MERGED`)のみ行い、実装は次のGateへ持ち越す。
- * [2026-08-30更新・M1-C2B] MERGE本体はmergeCorrection.tsで実装済み。このコメントは
- * 元々このファイルが書かれた時点の状況説明として残す。
+ * [MERGE実装状況の記録・R1-04是正で明確化] 複数候補を1件に統合するMERGE
+ * transactionは「どの候補群を対象にするか」「統合後の内容を誰がどう決めるか」の
+ * 入力形がSPLITと非対称で、UI設計も含め別途検討が必要だったため、このファイルが
+ * 最初に書かれた時点ではcoreTypes.tsへの値の予約(`MERGED`)のみ行い、実装は
+ * 次のGateへ持ち越していた。[2026-08-30更新・M1-C2B] MERGE本体は
+ * `mergeCorrection.ts`で実装済み(このfileのSPLIT実装と対になる、同じ不変条件
+ * パターンを踏襲したtransaction)。上記の段落はこのfileが最初に書かれた時点の
+ * 状況説明として残す。
  *
  * [2026-08-30是正・M1-C2C] `formation_candidate_lineages`(mergeCorrection.tsが
  * 使うのと同じtable)への記録、実Source Anchor行の子候補への複製、

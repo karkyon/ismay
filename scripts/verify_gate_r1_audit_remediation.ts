@@ -80,6 +80,7 @@ async function main(): Promise<void> {
   const { recordCandidateDecision } = await import("../app/src/lib/formation/materialize");
   const { recordAtomicityOverride } = await import("../app/src/lib/formation/atomicityOverride");
   const { mergeFormationCandidates } = await import("../app/src/lib/formation/mergeCorrection");
+  const { splitFormationCandidate } = await import("../app/src/lib/formation/splitCorrection");
 
   const orphans = await db.user.findMany({
     where: { email: { startsWith: EMAIL_PREFIX, endsWith: "@example.invalid" } },
@@ -614,6 +615,103 @@ async function main(): Promise<void> {
           String(inheritedAnchors),
         );
       }
+    }
+
+    // ============================================================
+    // R1-04.A: SPLIT/MERGED決定がSession timeline上で専用code(CANDIDATE_SPLIT/
+    //          CANDIDATE_MERGED)として記録される(以前はCANDIDATE_DEFERREDへ
+    //          丸められていた)。
+    // ============================================================
+    {
+      const fx = await makeFixture("r104a");
+      const cap = await makeCapture(fx, "分解対象TASK");
+      const session = await seedSession(fx, cap.id, "r104a");
+      const { identity } = await seedValidCandidate(fx, session.id, "c1", "複合作業", { completionCondition: "全て完了する" });
+
+      const splitResult = await splitFormationCandidate({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        candidateId: identity.id,
+        expectedRevision: 1,
+        parts: [
+          { type: "TASK", title: "部分1", completionCondition: "部分1が完了する" },
+          { type: "TASK", title: "部分2", completionCondition: "部分2が完了する" },
+        ],
+        actorUserId: fx.userId,
+      });
+      ok("[R1-04.1前提] Splitが成功する", splitResult.ok === true, JSON.stringify(splitResult));
+
+      const splitEvent = await db.formationSessionEvent.findFirst({
+        where: { workspaceId: fx.workspaceId, sessionId: session.id, eventType: { in: ["CANDIDATE_SPLIT", "CANDIDATE_DEFERRED"] } },
+        orderBy: { sequence: "desc" },
+      });
+      ok(
+        "[R1-04.2・是正の核心] SPLIT決定のSession EventはCANDIDATE_SPLIT(CANDIDATE_DEFERREDへ丸められない)",
+        splitEvent?.eventType === "CANDIDATE_SPLIT",
+        JSON.stringify(splitEvent),
+      );
+    }
+
+    {
+      const fx = await makeFixture("r104b");
+      const cap = await makeCapture(fx, "統合対象TASK2件");
+      const session = await seedSession(fx, cap.id, "r104b");
+      const a = await seedValidCandidate(fx, session.id, "a", "Aを実施する", { completionCondition: "Aが完了する" });
+      const b = await seedValidCandidate(fx, session.id, "b", "Bを実施する", { completionCondition: "Bが完了する" });
+
+      const mergeResult = await mergeFormationCandidates({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        clientEventId: `client-${RUN_ID}-r104b`,
+        parents: [
+          { candidateId: a.identity.id, expectedRevision: 1 },
+          { candidateId: b.identity.id, expectedRevision: 1 },
+        ],
+        merged: { type: "TASK", title: "統合後" },
+        actorUserId: fx.userId,
+      });
+      ok("[R1-04.3前提] Mergeが成功する", mergeResult.ok === true, JSON.stringify(mergeResult));
+
+      const mergeEvent = await db.formationSessionEvent.findFirst({
+        where: { workspaceId: fx.workspaceId, sessionId: session.id, eventType: { in: ["CANDIDATE_MERGED", "CANDIDATE_DEFERRED"] } },
+        orderBy: { sequence: "desc" },
+      });
+      ok(
+        "[R1-04.4・是正の核心] MERGED決定のSession EventはCANDIDATE_MERGED(CANDIDATE_DEFERREDへ丸められない)",
+        mergeEvent?.eventType === "CANDIDATE_MERGED",
+        JSON.stringify(mergeEvent),
+      );
+    }
+
+    // ============================================================
+    // R1-04.B: 旧CANDIDATE_DEFERRED行の読み取り互換(履歴改変しない、
+    //          DB CHECK制約が引き続きCANDIDATE_DEFERREDを許容する)。
+    // ============================================================
+    {
+      const fx = await makeFixture("r104c");
+      const cap = await makeCapture(fx, "旧形式イベントの再現");
+      const session = await seedSession(fx, cap.id, "r104c");
+
+      // [意図的] R1-04是正前の挙動を模した「旧SPLIT決定がCANDIDATE_DEFERREDとして
+      // 記録された」行を直接seedする(過去に実際に書き込まれた行の再現)。
+      const legacyEvent = await db.formationSessionEvent.create({
+        data: {
+          workspaceId: fx.workspaceId,
+          sessionId: session.id,
+          sequence: 1,
+          eventType: "CANDIDATE_DEFERRED",
+          actorType: "USER",
+          actorUserId: fx.userId,
+          payload: { legacyNote: "R1-04是正前に記録された旧SPLIT/MERGED丸め行の再現" },
+        },
+      });
+      ok(
+        "[R1-04.5・読み取り互換] 旧CANDIDATE_DEFERRED行はDB CHECK制約変更後も書込み・読み取りとも成功する(履歴改変しない)",
+        legacyEvent.eventType === "CANDIDATE_DEFERRED",
+        legacyEvent.eventType,
+      );
+      const reread = await db.formationSessionEvent.findUniqueOrThrow({ where: { id: legacyEvent.id } });
+      ok("[R1-04.6] 旧CANDIDATE_DEFERRED行を再読込しても例外なく取得できる", reread.eventType === "CANDIDATE_DEFERRED", reread.eventType);
     }
 
     ok(

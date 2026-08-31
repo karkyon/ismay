@@ -1675,7 +1675,8 @@ model FormationSessionEvent {
   session     FormationSession @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
   /// (sessionId,sequence)でunique(DOC-10 5章「Formation timeline」)。
   sequence    Int
-  /// DOC-02 7.3節Formation Event Catalog(16種)のいずれか。
+  /// DOC-02 7.3節Formation Event Catalog(16種)+R1-04新設CANDIDATE_SPLIT/
+  /// CANDIDATE_MERGED(coreTypes.ts FORMATION_EVENT_TYPES参照、計18種)のいずれか。
   eventType   String           @map("event_type")
   /// actorType=USERの場合のみactorUserId必須(DOC-10 6章「actorTypeとactor IDの排他」、
   /// ProjectContextLinkEventと同じ設計)。ANALYSIS_REQUESTED等はSYSTEM/AI起点もありうる。

@@ -195,7 +195,7 @@ ok(
 );
 ok("ACCEPTEDは有効なdecision event値", isValidCandidateDecisionEventValue("ACCEPTED"));
 ok("SPLITは有効なdecision event値(M1-C新設)", isValidCandidateDecisionEventValue("SPLIT"));
-ok("MERGEDは有効なdecision event値(M1-C新設・値の予約のみ、transaction未実装)", isValidCandidateDecisionEventValue("MERGED"));
+ok("MERGEDは有効なdecision event値(M1-C2Bでmergeコレクション transaction実装済み)", isValidCandidateDecisionEventValue("MERGED"));
 ok("PENDINGはdecision event値として無効(既定Projection値でEvent化しない)", !isValidCandidateDecisionEventValue("PENDING"));
 
 // -------------------------------------------------------------------
@@ -213,9 +213,12 @@ ok("未知の判定値は無効", !isValidAtomicityAssessment("MAYBE_SPLIT"));
 // -------------------------------------------------------------------
 // Formation Event Catalog
 // -------------------------------------------------------------------
-ok("FORMATION_EVENT_TYPESは16値ちょうど(DOC-02 7.3節)", FORMATION_EVENT_TYPES.length === 16);
+ok("FORMATION_EVENT_TYPESは18値ちょうど(DOC-02 7.3節の16値+R1-04新設CANDIDATE_SPLIT/CANDIDATE_MERGED)", FORMATION_EVENT_TYPES.length === 18);
 ok("FORMATION_CREATEDは有効なEvent種別", isValidFormationEventType("FORMATION_CREATED"));
 ok("MATERIALIZATION_COMMITTEDは有効なEvent種別", isValidFormationEventType("MATERIALIZATION_COMMITTED"));
+ok("CANDIDATE_SPLITは有効なEvent種別(R1-04新設)", isValidFormationEventType("CANDIDATE_SPLIT"));
+ok("CANDIDATE_MERGEDは有効なEvent種別(R1-04新設)", isValidFormationEventType("CANDIDATE_MERGED"));
+ok("旧CANDIDATE_DEFERREDは引き続き有効(読み取り互換・履歴改変しない)", isValidFormationEventType("CANDIDATE_DEFERRED"));
 ok("未知のEvent種別は無効", !isValidFormationEventType("CANDIDATE_DELETED"));
 ok(
   "FORMATION_EVENT_TYPESに重複がない",
