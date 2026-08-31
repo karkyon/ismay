@@ -19,12 +19,26 @@ import { type PiiClassification } from "@/lib/pem/coreTypes";
  * §19.4のPII仮名化Vault(tenant別token置換)も「将来候補・設計未完了のため
  * 実装着手しない」と明記されている別機能であり、このGateのscope外。
  *
- * [判定levels] PII_CLASSIFICATIONS=NONE/LOW/MEDIUM/HIGHのうち、このv1が実際に
- * 判定できるのはNONE/HIGHの2値のみ(客観的パターンが「有る」か「無い」かの
- * 二値判定しかできないため)。LOW/MEDIUMは「連絡先ではないが間接的に個人を
- * 特定しうる情報(住所の一部、生年月日等)」に相当すると考えられるが、
- * この判定には現状信頼できる検出手段が無いため、値としては予約するが
- * このv1のロジックからは返さない(想像で中間段階を作らない)。
+ * [R1-05是正・監査是正指示書2026-08-31 NONE/UNCLASSIFIED混同の是正] このv1が
+ * 実際に検出できるのは「email/電話番号patternが有る」ことだけであり、
+ * 「何も検出しなかった」ことは「PIIが無いと確認した」ことを意味しない
+ * (氏名・会社名・住所等は一切判定していないため)。したがって
+ * `classifyPii()`は`HIGH`か`UNCLASSIFIED`のいずれかしか返さない
+ * (`NONE`を返すことは絶対にない)。`NONE`は「分類を実施し、PIIが無いと
+ * 判定できた」ことを意味するpem/coreTypes.tsの語彙であり、この分類器は
+ * その水準の判定を行う手段を持たないため、`NONE`を名乗る資格が無い。
+ * excerptが空文字列(anchorのoffsetが不正範囲でexcerptを取得できなかった
+ * 場合)も同様にUNCLASSIFIEDを返す。「判定材料が無い」ことは「anchor品質が
+ * 低い」という別の事実であり、それを理由に「PIIなしと確定した」かのように
+ * NONEへ倒すのは誤り(是正前の`shadowWrite.ts`はこの2つを混同していた)。
+ *
+ * [判定levels] PII_CLASSIFICATIONS=NONE/LOW/MEDIUM/HIGH/UNCLASSIFIEDのうち、
+ * このv1が実際に返しうるのはHIGH/UNCLASSIFIEDの2値のみ。LOW/MEDIUMは
+ * 「連絡先ではないが間接的に個人を特定しうる情報(住所の一部、生年月日等)」
+ * に相当すると考えられるが、この判定には現状信頼できる検出手段が無いため、
+ * 値としては予約するがこのv1のロジックからは返さない(想像で中間段階を
+ * 作らない)。NONEも同じ理由で(信頼できる網羅的検出手段が無いため)このv1
+ * からは返さない。
  */
 
 /**
@@ -47,11 +61,13 @@ const EMAIL_PATTERN = /[a-zA-Z0-9][a-zA-Z0-9._%+-]*@[a-zA-Z0-9][a-zA-Z0-9.-]*\.[
 /**
  * 抜粋文字列(SourceAnchorのexcerpt相当)を分類する。
  * メールアドレス・電話番号のいずれかのpatternに一致すればHIGH、
- * 一致しなければNONEを返す。
+ * 一致しなければUNCLASSIFIED(=分類未実施。PIIが無いと確認したわけではない)
+ * を返す。excerptが空文字列の場合もUNCLASSIFIED(anchor品質の問題であり、
+ * PII分類とは別事実)。
  */
 export function classifyPii(excerpt: string): PiiClassification {
   if (EMAIL_PATTERN.test(excerpt) || PHONE_PATTERN.test(excerpt)) {
     return "HIGH";
   }
-  return "NONE";
+  return "UNCLASSIFIED";
 }

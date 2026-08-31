@@ -77,9 +77,25 @@ export type EvidenceDeletionMode = (typeof EVIDENCE_DELETION_MODES)[number];
 /**
  * 個人情報区分(v3.3.1整合性修正・用語コード定義書 第II部1章 piiClassificationに対応)。
  * Event Definition Registryの各エントリが持ち、ログ・Export・削除方針の判断材料にする。
+ *
+ * [R1-05新設・監査是正指示書2026-08-31] `UNCLASSIFIED`を追加した。`NONE`は
+ * 「分類を実施した結果、PIIが無いと判定できた」ことを意味し、`UNCLASSIFIED`は
+ * 「分類を実施していない、または実施したが判定できなかった」ことを意味する。
+ * この2つを混同すると、実際には未分類のデータが「PII無しと確認済み」と
+ * 誤って扱われ、Export・保持期間・削除方針の判断を誤らせる危険がある
+ * (`formation/piiClassifier.ts`のv1実装は、この区別を守るためemail/電話番号の
+ * 客観的pattern検出時のみHIGHを返し、それ以外は常にUNCLASSIFIEDを返す。
+ * 氏名・住所等を判定する手段が無い以上、NONEを名乗ることは正当化できない
+ * ため)。Event Definition Registry既存9件の`LOW`指定は、開発者が個々の
+ * イベント種別について意識的に行った分類判断であり、この追加によって
+ * 意味が変わるものではない。
  */
-export const PII_CLASSIFICATIONS = ["NONE", "LOW", "MEDIUM", "HIGH"] as const;
+export const PII_CLASSIFICATIONS = ["NONE", "LOW", "MEDIUM", "HIGH", "UNCLASSIFIED"] as const;
 export type PiiClassification = (typeof PII_CLASSIFICATIONS)[number];
+
+export function isValidPiiClassification(value: string): value is PiiClassification {
+  return (PII_CLASSIFICATIONS as readonly string[]).includes(value);
+}
 
 /**
  * Execution Ledgerイベント種別(v4.0 5.2節)。FACTのみで構成される。

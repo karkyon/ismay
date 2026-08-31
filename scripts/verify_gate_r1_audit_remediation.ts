@@ -81,6 +81,7 @@ async function main(): Promise<void> {
   const { recordAtomicityOverride } = await import("../app/src/lib/formation/atomicityOverride");
   const { mergeFormationCandidates } = await import("../app/src/lib/formation/mergeCorrection");
   const { splitFormationCandidate } = await import("../app/src/lib/formation/splitCorrection");
+  const { classifyPii } = await import("../app/src/lib/formation/piiClassifier");
 
   const orphans = await db.user.findMany({
     where: { email: { startsWith: EMAIL_PREFIX, endsWith: "@example.invalid" } },
@@ -712,6 +713,67 @@ async function main(): Promise<void> {
       );
       const reread = await db.formationSessionEvent.findUniqueOrThrow({ where: { id: legacyEvent.id } });
       ok("[R1-04.6] 旧CANDIDATE_DEFERRED行を再読込しても例外なく取得できる", reread.eventType === "CANDIDATE_DEFERRED", reread.eventType);
+    }
+
+    // ============================================================
+    // R1-05.A: classifyPiiはHIGH以外を返す時UNCLASSIFIEDのみ(NONEを名乗らない)。
+    // ============================================================
+    {
+      ok("[R1-05.1・是正の核心] 通常の日本語文はUNCLASSIFIED(NONEではない)", classifyPii("見積書を明日までに送付する") === "UNCLASSIFIED");
+      ok("[R1-05.2] 空文字列(anchor品質が低い場合の再現)もUNCLASSIFIED", classifyPii("") === "UNCLASSIFIED");
+      ok("[R1-05.3] メールアドレスを含む文はHIGH", classifyPii("連絡先は taro@example.com です") === "HIGH");
+      ok(
+        "[R1-05.4] classifyPiiはいかなる入力でもNONEを返さない",
+        ["普通の文章", "", "2026-08-30までに提出", "090-1234-5678"].every((s) => classifyPii(s) !== "NONE"),
+      );
+    }
+
+    // ============================================================
+    // R1-05.B: DB CHECK制約がpii_classificationを5値(NONE/LOW/MEDIUM/HIGH/
+    //          UNCLASSIFIED)以外拒否する。
+    // ============================================================
+    {
+      const fx = await makeFixture("r105b");
+      const cap = await makeCapture(fx, "PII CHECK制約確認用TASK");
+      const session = await seedSession(fx, cap.id, "r105b");
+      const { revision } = await seedValidCandidate(fx, session.id, "c1", "確認用候補");
+
+      let rejectedByCheckConstraint = false;
+      try {
+        await db.formationSourceAnchor.create({
+          data: {
+            workspaceId: fx.workspaceId,
+            revisionId: revision.id,
+            sourceKind: "TEXT_OFFSET",
+            captureId: cap.id,
+            startOffset: 0,
+            endOffset: 4,
+            excerptHash: "test-hash",
+            // [意図的] TypeScript型を迂回してDB CHECK制約そのものを検証する。
+            piiClassification: "INVALID_PII_VALUE" as unknown as string,
+          },
+        });
+      } catch {
+        rejectedByCheckConstraint = true;
+      }
+      ok(
+        "[R1-05.5・DB CHECK制約の核心] pii_classificationへ5値以外を書き込もうとするとDBが拒否する",
+        rejectedByCheckConstraint,
+      );
+
+      const validAnchor = await db.formationSourceAnchor.create({
+        data: {
+          workspaceId: fx.workspaceId,
+          revisionId: revision.id,
+          sourceKind: "TEXT_OFFSET",
+          captureId: cap.id,
+          startOffset: 0,
+          endOffset: 4,
+          excerptHash: "test-hash-2",
+          piiClassification: "UNCLASSIFIED",
+        },
+      });
+      ok("[R1-05.6] UNCLASSIFIEDは正常に書き込める", validAnchor.piiClassification === "UNCLASSIFIED", validAnchor.piiClassification);
     }
 
     ok(

@@ -1778,6 +1778,9 @@ model FormationSourceAnchor {
   imageRegion       Json?                      @map("image_region")
   excerptHash       String                     @map("excerpt_hash")
   /// pem/coreTypes.tsのPiiClassification語彙を再利用する(新規語彙を発明しない)。
+  /// [R1-05是正・監査是正指示書2026-08-31] NONE/UNCLASSIFIEDを混同しない
+  /// (piiClassifier.ts参照)。DB CHECK制約(migration 20260831040000)で
+  /// NONE/LOW/MEDIUM/HIGH/UNCLASSIFIEDの5値のみへ制限している。
   piiClassification String                     @map("pii_classification")
   createdAt         DateTime                   @default(now()) @map("created_at")
 

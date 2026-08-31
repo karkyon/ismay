@@ -8,8 +8,9 @@
  * 検証内容:
  *   1. writeShadowFormationSession経由で作られたSource Anchorが、
  *      evidenceSpansが指す原文抜粋にメールアドレス/電話番号を含む場合HIGH、
- *      含まない場合NONEに分類されること(shadowWrite.tsへの実配線確認)。
- *   2. classifyPii()の直接呼び出しでのHIGH/NONE判定(pure相当の追加DB外検証)。
+ *      含まない場合UNCLASSIFIED(NONEではない。R1-05是正)に分類されること
+ *      (shadowWrite.tsへの実配線確認)。
+ *   2. classifyPii()の直接呼び出しでのHIGH/UNCLASSIFIED判定(pure相当の追加DB外検証)。
  *
  * 実行方法:
  *   cd ~/projects/ismay/app
@@ -110,7 +111,10 @@ async function main(): Promise<void> {
     // ============================================================
     ok("[M1B6.1] メールアドレスを含む文字列はHIGH", classifyPii("連絡先: taro@example.com") === "HIGH");
     ok("[M1B6.2] 電話番号を含む文字列はHIGH", classifyPii("090-1234-5678へ連絡") === "HIGH");
-    ok("[M1B6.3] PIIパターンを含まない通常文はNONE", classifyPii("見積書を送付する") === "NONE");
+    ok(
+      "[M1B6.3是正・監査是正指示書2026-08-31] PIIパターンを含まない通常文はUNCLASSIFIED(NONEではない。email/電話番号を検出できないだけでは「PII無しと確認した」ことにならない)",
+      classifyPii("見積書を送付する") === "UNCLASSIFIED",
+    );
 
     // ============================================================
     // 2. writeShadowFormationSession経由での実配線確認
@@ -201,7 +205,11 @@ async function main(): Promise<void> {
       const revision = await db.formationCandidateRevision.findFirstOrThrow({ where: { candidateId: identity.id, workspaceId: fx.workspaceId, revision: 1 } });
       const anchors = await db.formationSourceAnchor.findMany({ where: { revisionId: revision.id, workspaceId: fx.workspaceId } });
 
-      ok("[M1B6.6] PIIパターンを含まない原文の場合、shadowWrite.ts経由でNONEのまま(過検出していない)", anchors[0]?.piiClassification === "NONE", anchors[0]?.piiClassification);
+      ok(
+        "[M1B6.6是正・監査是正指示書2026-08-31] PIIパターンを含まない原文の場合、shadowWrite.ts経由でUNCLASSIFIED(過検出していない・NONEを誤って確定しない)",
+        anchors[0]?.piiClassification === "UNCLASSIFIED",
+        anchors[0]?.piiClassification,
+      );
     }
 
     ok(

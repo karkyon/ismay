@@ -201,9 +201,13 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
               endOffset: validRange ? span.end : null,
               excerptHash,
               // [2026-08-30是正・M1-B6] classifyPii()による客観的pattern検出
-              // (メールアドレス・電話番号)を適用する。不正range(excerptが
-              // 空文字列)の場合は判定材料が無いためNONEのまま
-              // (classifyPii("")は既にNONEを返すため自然にそうなる)。
+              // (メールアドレス・電話番号)を適用する。
+              // [R1-05是正・監査是正指示書2026-08-31] 不正range(excerptが空文字列)
+              // の場合、以前は「判定材料が無い」ことを「PII無しと確認した」NONEへ
+              // 倒していたが、これはAnchor品質(判定材料の有無)とPII分類(判定
+              // 結果)を混同する誤りだった。classifyPii("")は現在UNCLASSIFIEDを
+              // 返すため、この呼出しをそのまま使うだけで正しく「未分類」として
+              // 記録される(NONEへの特別扱いは不要になった)。
               piiClassification: classifyPii(excerpt),
             },
           });
