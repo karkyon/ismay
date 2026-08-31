@@ -75,7 +75,10 @@ function buildRequestParams(model: string, input: AiOcrInput): Record<string, un
   };
 }
 
-/** Messages API応答(同期呼び出し・Batch結果の両方で同じ形)をAiOcrOutcomeへ変換する。 */
+/** Messages API応答(同期呼び出し・Batch結果の両方で同じ形)をAiOcrOutcomeへ変換する。
+ *  [M1-B6A §3.2.2] `pages`は設定しない(ocrProvider.ts AiOcrOutcome型doc参照。
+ *  この応答は複数ページを結合した1本の自由文であり、pageIndex単位で正確に
+ *  切り分ける手段が無いため、想像で分割しない)。 */
 function parseMessageBody(
   body: { content?: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } },
   latencyMs: number,
