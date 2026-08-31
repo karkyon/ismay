@@ -382,6 +382,90 @@ async function main(): Promise<void> {
       }
     }
 
+    // ============================================================
+    // D: §3.2.3 Source Anchorのない断定候補はconfidence上限0.49が
+    //    保存前に強制される。
+    // ============================================================
+    {
+      const fx = await makeFixture("d1");
+      const rawText = "短いメモ";
+      const capture = await db.capture.create({
+        data: { workspaceId: fx.workspaceId, domainId: fx.domainId, createdById: fx.userId, sourceType: "TEXT", rawText, processingStatus: "READY" },
+      });
+      await writeShadowFormationSession({
+        capture: { id: capture.id, workspaceId: fx.workspaceId, domainId: fx.domainId, createdById: fx.userId, rawText },
+        aiRunId: `airun-${RUN_ID}-d1`,
+        schemaVersion: "1.0",
+        candidates: [
+          {
+            candidateId: "c1",
+            type: "TASK",
+            title: "根拠が原文範囲外を指す断定候補",
+            completionCondition: "完了する",
+            // [意図的] Capture本文(4文字)の範囲外を指す唯一のevidenceSpan。
+            // 有効な根拠が1件も無い状態を再現する。
+            evidenceSpans: [{ start: 0, end: 999 }],
+            confidence: 0.95,
+            dateMentions: [],
+            unknowns: [],
+            blockedByCandidateIds: [],
+            suggestedTags: [],
+          },
+        ],
+      });
+      const session = await db.formationSession.findFirstOrThrow({ where: { captureId: capture.id, workspaceId: fx.workspaceId } });
+      const identity = await db.formationCandidateIdentity.findFirstOrThrow({ where: { sessionId: session.id, workspaceId: fx.workspaceId } });
+      const revision = await db.formationCandidateRevision.findFirstOrThrow({ where: { candidateId: identity.id, workspaceId: fx.workspaceId, revision: 1 } });
+
+      ok(
+        "[D.1・是正の核心] 根拠(AVAILABLE Anchor)が無い候補は、AI自己申告confidence(0.95)ではなく0.49以下で保存される",
+        Number(revision.confidence) <= 0.49,
+        String(revision.confidence),
+      );
+      const proposed = revision.proposedFields as { confidence?: number };
+      ok(
+        "[D.2] proposedFields(AIの元申告値)自体は書き換えない(0.95のまま、監査証跡として保持)",
+        proposed.confidence === 0.95,
+        String(proposed.confidence),
+      );
+    }
+
+    {
+      const fx = await makeFixture("d2");
+      const rawText = "見積書を明日までに送付する";
+      const capture = await db.capture.create({
+        data: { workspaceId: fx.workspaceId, domainId: fx.domainId, createdById: fx.userId, sourceType: "TEXT", rawText, processingStatus: "READY" },
+      });
+      await writeShadowFormationSession({
+        capture: { id: capture.id, workspaceId: fx.workspaceId, domainId: fx.domainId, createdById: fx.userId, rawText },
+        aiRunId: `airun-${RUN_ID}-d2`,
+        schemaVersion: "1.0",
+        candidates: [
+          {
+            candidateId: "c1",
+            type: "TASK",
+            title: "見積書を送付する",
+            completionCondition: "送付が完了する",
+            evidenceSpans: [{ start: 0, end: 6 }],
+            confidence: 0.95,
+            dateMentions: [],
+            unknowns: [],
+            blockedByCandidateIds: [],
+            suggestedTags: [],
+          },
+        ],
+      });
+      const session = await db.formationSession.findFirstOrThrow({ where: { captureId: capture.id, workspaceId: fx.workspaceId } });
+      const identity = await db.formationCandidateIdentity.findFirstOrThrow({ where: { sessionId: session.id, workspaceId: fx.workspaceId } });
+      const revision = await db.formationCandidateRevision.findFirstOrThrow({ where: { candidateId: identity.id, workspaceId: fx.workspaceId, revision: 1 } });
+
+      ok(
+        "[D.3・回帰確認] 有効な根拠がある候補のconfidenceは変更されない(0.95のまま)",
+        Number(revision.confidence) === 0.95,
+        String(revision.confidence),
+      );
+    }
+
     ok(
       "[非課金guard] scenario実行中、AI provider hostへの通信試行は0件(self-test自身の既知の1件を除く)",
       denyGuard.deniedCallAttempts.length === deniedBaseline,

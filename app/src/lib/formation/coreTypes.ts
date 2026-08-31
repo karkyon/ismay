@@ -400,6 +400,32 @@ export function isValidSourceAnchorKindFields(input: SourceAnchorKindFieldsInput
   }
 }
 
+/**
+ * [M1-B6A §3.2.3新設・2026-08-31指示書] 「Source Anchorのない断定候補は
+ * confidence上限0.49を保存前に強制する」。0.49という値の意味: このリポジトリの
+ * 既存慣習で「confidence>=0.5」は概ね「AIが自信を持って断定した」水準として
+ * 扱われている(atomicityAssessment.tsのPROBABLY_ATOMIC既定分岐、
+ * questionPolicy.tsのHARD_DEADLINE低confidence閾値等が0.5〜0.6帯に集中する)。
+ * 実在する根拠(AVAILABLE Anchor)を1件も持たない候補が0.5以上を名乗ることは、
+ * 「原文のどこにも実在しない断定」を高信頼扱いすることになり、
+ * 統合正本§19.5「推論禁止」の精神(客観的根拠に基づかない断定をしない)に反する。
+ * 0.49はその境界のすぐ下(「高信頼帯には入れない」ことが目的であり、0.49自体に
+ * 他の意味は無い)。
+ */
+export const NO_EVIDENCE_CONFIDENCE_CAP = 0.49;
+
+/**
+ * 候補のconfidenceを、実在する根拠(AVAILABLE Anchor)の有無に応じて調整する。
+ * `hasAvailableEvidence=false`の場合、元のconfidenceがNO_EVIDENCE_CONFIDENCE_CAPを
+ * 超えていればそこまで引き下げる(下回っている場合はそのまま。低いconfidenceを
+ * わざわざ引き上げない)。`hasAvailableEvidence=true`の場合は元の値をそのまま返す
+ * (実在する根拠がある候補のconfidenceを本関数が変更することはない)。
+ */
+export function capConfidenceForMissingEvidence(confidence: number, hasAvailableEvidence: boolean): number {
+  if (hasAvailableEvidence) return confidence;
+  return Math.min(confidence, NO_EVIDENCE_CONFIDENCE_CAP);
+}
+
 /** tenant scope入力の共通型(既存projectContext/coreTypes.tsと同じ形)。 */
 export interface TenantScopeInput {
   workspaceId: string;

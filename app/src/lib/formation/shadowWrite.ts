@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import type { ResponsibilityCandidate } from "@/lib/ai/schema";
-import { resolveFormationSessionTransition, isValidTextOffsetRange, type FormationEventType } from "@/lib/formation/coreTypes";
+import { resolveFormationSessionTransition, isValidTextOffsetRange, capConfidenceForMissingEvidence, type FormationEventType } from "@/lib/formation/coreTypes";
 import { applyQuestionPolicyAndTransition, type CandidateForQuestionPolicy } from "@/lib/formation/formationQuestionService";
 import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
 import { classifyPii } from "@/lib/formation/piiClassifier";
@@ -151,7 +151,16 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
             // そのまま下書きとして保持する(M1-BのMaterialize service接続はまだ無いため、
             // ここでの厳密なmapping先ResponsibilityDetail型は未確定)。
             proposedFields: candidate as unknown as object,
-            confidence: candidate.confidence,
+            // [M1-B6A追加・2026-08-31指示書§3.2.3「Source Anchorのない断定候補は
+            // confidence上限0.49を保存前に強制する」] 実在するTEXT_OFFSET
+            // evidenceSpan(=Capture本文のvalid rangeを指すもの)を1件も持たない
+            // 候補は、AI自己申告のconfidenceをそのまま保存せず、
+            // NO_EVIDENCE_CONFIDENCE_CAP(0.49)以下へ引き下げる。Revisionは
+            // immutableなため、この判定は書込み前(ここ)で行う必要がある。
+            confidence: capConfidenceForMissingEvidence(
+              candidate.confidence,
+              candidate.evidenceSpans.some((span) => isValidTextOffsetRange(span.start, span.end, capture.rawText.length)),
+            ),
             schemaVersion,
           },
         });

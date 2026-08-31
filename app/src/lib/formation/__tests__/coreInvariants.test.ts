@@ -29,6 +29,8 @@ import {
   SOURCE_ANCHOR_QUALITIES,
   isValidSourceAnchorQuality,
   isValidSourceAnchorKindFields,
+  NO_EVIDENCE_CONFIDENCE_CAP,
+  capConfidenceForMissingEvidence,
 } from "../coreTypes";
 
 let passed = 0;
@@ -301,6 +303,19 @@ ok(
   "UNAVAILABLE: unavailableReasonが無いと無効(理由を残さず未取得にするのを禁止)",
   !isValidSourceAnchorKindFields({ ...baseAnchorFields, sourceKind: "AUDIO_TIMECODE", quality: "UNAVAILABLE" }),
 );
+
+// -------------------------------------------------------------------
+// [M1-B6A §3.2.3新設] capConfidenceForMissingEvidence
+// -------------------------------------------------------------------
+ok("NO_EVIDENCE_CONFIDENCE_CAPは0.49", NO_EVIDENCE_CONFIDENCE_CAP === 0.49);
+ok(
+  "[是正の核心] 根拠無しでconfidence0.9はNO_EVIDENCE_CONFIDENCE_CAP(0.49)まで引き下げられる",
+  capConfidenceForMissingEvidence(0.9, false) === 0.49,
+);
+ok("根拠無しでも元々0.49以下なら変更しない", capConfidenceForMissingEvidence(0.3, false) === 0.3);
+ok("根拠無しでちょうど0.49はそのまま", capConfidenceForMissingEvidence(0.49, false) === 0.49);
+ok("根拠有りならconfidenceを一切変更しない(0.9のまま)", capConfidenceForMissingEvidence(0.9, true) === 0.9);
+ok("根拠有りなら低いconfidenceも変更しない(0.1のまま)", capConfidenceForMissingEvidence(0.1, true) === 0.1);
 
 console.log(`\n${passed}件成功 / ${failed}件失敗`);
 if (failed > 0) {
