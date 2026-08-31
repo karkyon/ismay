@@ -264,6 +264,13 @@ export function isValidAtomicityAssessment(value: string): value is AtomicityAss
  * 統合正本§6.6)には無い値である。旧`CANDIDATE_DEFERRED`行は読み取り互換のため
  * このcatalogに残したまま、新規書込みだけ切り替える(expand→dual-read→switch→
  * contractのうちexpand+switch。旧行のcontract/rewriteは行わない=履歴改変しない)。
+ *
+ * [M1-B6B新設・2026-08-31指示書 Session Lifecycle] `SESSION_RESUMED`/
+ * `SESSION_RETRIED`の2値を追加し20種とした。DEFERRED→RESUME、FAILED→RETRYの
+ * 遷移(統合正本§6.3表に既存)を実装するにあたり、SESSION_CONFIRMED/DISMISSED/
+ * DEFERREDと同じ粒度でSession timeline上に記録する専用codeが無かったため、
+ * 上記R1-04と同じ「実装が追いついた時点でversioned語彙を拡張する」パターンで
+ * 追加した。
  */
 export const FORMATION_EVENT_TYPES = [
   "FORMATION_CREATED",
@@ -286,6 +293,9 @@ export const FORMATION_EVENT_TYPES = [
   "SESSION_CONFIRMED",
   "SESSION_DISMISSED",
   "SESSION_DEFERRED",
+  /// [M1-B6B新設] DEFERRED→RESUME、FAILED→RETRY用。
+  "SESSION_RESUMED",
+  "SESSION_RETRIED",
 ] as const;
 export type FormationEventType = (typeof FORMATION_EVENT_TYPES)[number];
 

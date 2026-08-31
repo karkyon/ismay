@@ -218,7 +218,9 @@ ok("未知の判定値は無効", !isValidAtomicityAssessment("MAYBE_SPLIT"));
 // -------------------------------------------------------------------
 // Formation Event Catalog
 // -------------------------------------------------------------------
-ok("FORMATION_EVENT_TYPESは18値ちょうど(DOC-02 7.3節の16値+R1-04新設CANDIDATE_SPLIT/CANDIDATE_MERGED)", FORMATION_EVENT_TYPES.length === 18);
+ok("FORMATION_EVENT_TYPESは20値ちょうど(DOC-02 7.3節の16値+R1-04新設CANDIDATE_SPLIT/CANDIDATE_MERGED+M1-B6B新設SESSION_RESUMED/SESSION_RETRIED)", FORMATION_EVENT_TYPES.length === 20);
+ok("SESSION_RESUMEDは有効なEvent種別(M1-B6B新設)", isValidFormationEventType("SESSION_RESUMED"));
+ok("SESSION_RETRIEDは有効なEvent種別(M1-B6B新設)", isValidFormationEventType("SESSION_RETRIED"));
 ok("FORMATION_CREATEDは有効なEvent種別", isValidFormationEventType("FORMATION_CREATED"));
 ok("MATERIALIZATION_COMMITTEDは有効なEvent種別", isValidFormationEventType("MATERIALIZATION_COMMITTED"));
 ok("CANDIDATE_SPLITは有効なEvent種別(R1-04新設)", isValidFormationEventType("CANDIDATE_SPLIT"));

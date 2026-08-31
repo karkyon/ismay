@@ -49,38 +49,40 @@ model User {
   updatedAt                 DateTime  @updatedAt @map("updated_at")
   deletedAt                 DateTime? @map("deleted_at")
 
-  workspaceMembers                     WorkspaceMember[]
-  sessions                             UserSession[]
-  totpSecret                           UserTotpSecret?
-  capturesCreated                      Capture[]                         @relation("CaptureCreatedBy")
-  responsibilitiesCreated              Responsibility[]                  @relation("ResponsibilityCreatedBy")
-  responsibilitiesUpdated              Responsibility[]                  @relation("ResponsibilityUpdatedBy")
-  pemObservations                      PemObservation[]
-  pemHypotheses                        PemHypothesis[]
-  pemOnboardingConversations           PemOnboardingConversation[]
-  pemWeeklyReviews                     PemWeeklyReview[]
-  pemConsentEvents                     PemConsentEvent[]
-  pemMetricConsentEvents               PemMetricConsentEvent[]
-  pemEvidenceDeletionEvents            PemEvidenceDeletionEvent[]
-  bootstrapAssertions                  BootstrapAssertion[]
-  notifications                        Notification[]
-  auditLogsAsActor                     AuditLog[]                        @relation("AuditActorUser")
+  workspaceMembers                       WorkspaceMember[]
+  sessions                               UserSession[]
+  totpSecret                             UserTotpSecret?
+  capturesCreated                        Capture[]                         @relation("CaptureCreatedBy")
+  responsibilitiesCreated                Responsibility[]                  @relation("ResponsibilityCreatedBy")
+  responsibilitiesUpdated                Responsibility[]                  @relation("ResponsibilityUpdatedBy")
+  pemObservations                        PemObservation[]
+  pemHypotheses                          PemHypothesis[]
+  pemOnboardingConversations             PemOnboardingConversation[]
+  pemWeeklyReviews                       PemWeeklyReview[]
+  pemConsentEvents                       PemConsentEvent[]
+  pemMetricConsentEvents                 PemMetricConsentEvent[]
+  pemEvidenceDeletionEvents              PemEvidenceDeletionEvent[]
+  bootstrapAssertions                    BootstrapAssertion[]
+  notifications                          Notification[]
+  auditLogsAsActor                       AuditLog[]                        @relation("AuditActorUser")
   /// [V5-M1-A1新設] Context本人(観測対象)としての逆relation。
-  projectContextsOwned                 ProjectContext[]                  @relation("ProjectContextOwner")
+  projectContextsOwned                   ProjectContext[]                  @relation("ProjectContextOwner")
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
   /// 同一model内に無いため)。
-  formationSessionsAsSubject           FormationSession[]
-  formationSessionEventsAsActor        FormationSessionEvent[]
-  formationAnswerEventsAsActor         FormationAnswerEvent[]
-  formationCandidateDecisionsAsActor   FormationCandidateDecisionEvent[]
+  formationSessionsAsSubject             FormationSession[]
+  formationSessionEventsAsActor          FormationSessionEvent[]
+  formationAnswerEventsAsActor           FormationAnswerEvent[]
+  formationCandidateDecisionsAsActor     FormationCandidateDecisionEvent[]
   /// [2026-08-30新設・M1-C2A] FormationAtomicityOverride.actorUserId逆参照。
-  formationAtomicityOverridesAsActor   FormationAtomicityOverride[]
+  formationAtomicityOverridesAsActor     FormationAtomicityOverride[]
   /// [2026-08-30新設・M1-C2B] FormationCandidateMergeEvent.actorUserId逆参照。
-  formationCandidateMergeEventsAsActor FormationCandidateMergeEvent[]
+  formationCandidateMergeEventsAsActor   FormationCandidateMergeEvent[]
+  /// [M1-B6B新設・2026-08-31指示書 Session Lifecycle]
+  formationSessionLifecycleEventsAsActor FormationSessionLifecycleEvent[]
   /// [V5-M1-A1新設] Context作成者としての逆relation。
-  projectContextsCreated               ProjectContext[]                  @relation("ProjectContextCreatedBy")
+  projectContextsCreated                 ProjectContext[]                  @relation("ProjectContextCreatedBy")
 
   @@map("users")
 }
@@ -1656,6 +1658,8 @@ model FormationSession {
   /// [R1-03新設・監査是正指示書2026-08-31] FormationCandidateMergeEvent.session
   /// 複合FKの逆側(Prismaは両側の宣言が必須)。
   candidateMergeEvents FormationCandidateMergeEvent[]
+  /// [M1-B6B新設・2026-08-31指示書 Session Lifecycle]
+  lifecycleEvents      FormationSessionLifecycleEvent[]
 
   /// Idempotency-Key再送検出用(DOC-03 7章 POST /formation-sessions)。
   @@unique([workspaceId, captureId, clientSessionKey], map: "formation_sessions_idempotency_uq")
@@ -2124,4 +2128,40 @@ model FormationCandidateMergeEvent {
   @@unique([workspaceId, clientEventId], map: "formation_candidate_merge_events_workspace_client_uq")
   @@index([workspaceId, sessionId])
   @@map("formation_candidate_merge_events")
+}
+
+/// V5-M1-B6B TBL: formation_session_lifecycle_events(defer/dismiss/resume/retry
+/// のidempotency記録・append-only audit trail)。
+/// 出典: Claude向け ISMAY 69b5a87以降 監査是正・M1-B6完遂・PEM-0連続実装指示
+/// (2026-08-31) Gate M1-B6B Session Lifecycle。
+///
+/// [設計方針] `FormationSessionEvent`(汎用timeline)とは別にこの専用tableを
+/// 設けた理由: (1) idempotency契約(clientEventId+requestHash、DEC-MERGE-001と
+/// 同じ設計)を持つのはこの4操作(DEFER/DISMISS/RESUME/RETRY)のみであり、
+/// 汎用timeline行にidempotency専用列を持たせるとSOURCE_ANCHOR_ATTACHED等の
+/// 他Event種別には無関係な列が常に付く。(2) RESUMEが「defer前の状態」を
+/// 正確に再現するには、直近のDEFER行のfromStateを機械的に検索できる必要があり、
+/// これは汎用timelineのpayload(Json、型無し)を都度parseするより、専用列を
+/// 持つ方が安全・高速(想像でJsonのkey名に依存しない)。
+model FormationSessionLifecycleEvent {
+  id            String           @id @default(uuid())
+  workspaceId   String           @map("workspace_id")
+  sessionId     String           @map("session_id")
+  session       FormationSession @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
+  /// Answer/Merge APIと同じidempotency契約(clientEventId+requestHash)。
+  clientEventId String           @map("client_event_id")
+  requestHash   String           @map("request_hash")
+  /// "DEFER" | "DISMISS" | "RESUME" | "RETRY"(想像で他の値を追加しない)。
+  action        String
+  fromState     String           @map("from_state")
+  toState       String           @map("to_state")
+  /// DEFER/DISMISS時、本人が任意で入力する理由(統合正本§6.3「理由任意」)。
+  reasonCode    String?          @map("reason_code")
+  actorUserId   String           @map("actor_user_id")
+  actorUser     User             @relation(fields: [actorUserId], references: [id])
+  occurredAt    DateTime         @default(now()) @map("occurred_at")
+
+  @@unique([workspaceId, clientEventId], map: "formation_session_lifecycle_events_workspace_client_uq")
+  @@index([workspaceId, sessionId, action, occurredAt])
+  @@map("formation_session_lifecycle_events")
 }

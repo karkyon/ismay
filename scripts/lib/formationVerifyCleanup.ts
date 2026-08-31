@@ -163,6 +163,10 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
       }
       await step(errors, "formationCandidateIdentity.deleteMany", () => db.formationCandidateIdentity.deleteMany({ where: { sessionId: { in: sessionIds } } }), { count: 0 });
       await step(errors, "materializationReceipt.deleteMany", () => db.materializationReceipt.deleteMany({ where: { sessionId: { in: sessionIds } } }), { count: 0 });
+      // [M1-B6B新設] formation_session_lifecycle_eventsもformation_sessionsへの
+      // 複合FKを持つため、formationSession.deleteManyより先に削除する
+      // (formationSessionEvent.deleteManyと同じ理由)。
+      await step(errors, "formationSessionLifecycleEvent.deleteMany", () => db.formationSessionLifecycleEvent.deleteMany({ where: { sessionId: { in: sessionIds } } }), { count: 0 });
       await step(errors, "formationSessionEvent.deleteMany", () => db.formationSessionEvent.deleteMany({ where: { sessionId: { in: sessionIds } } }), { count: 0 });
       await step(errors, "formationSession.deleteMany", () => db.formationSession.deleteMany({ where: { id: { in: sessionIds } } }), { count: 0 });
     }
