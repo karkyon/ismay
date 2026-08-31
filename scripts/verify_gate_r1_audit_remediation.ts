@@ -517,6 +517,105 @@ async function main(): Promise<void> {
       }
     }
 
+    // ============================================================
+    // R1-03.A: newCandidateKeyがrequestHash由来で安定・Session内衝突しない
+    //          (以前は先頭3候補名連結だったため、異なる構成の別Mergeで
+    //          衝突し得た)。
+    // ============================================================
+    {
+      const fx = await makeFixture("r103a");
+      const cap = await makeCapture(fx, "同じ先頭候補名を持つ2組のMerge");
+      const session = await seedSession(fx, cap.id, "r103a");
+      const a1 = await seedValidCandidate(fx, session.id, "same", "同名候補群1のA");
+      const b1 = await seedValidCandidate(fx, session.id, "same-b1", "同名候補群1のB");
+      const a2 = await seedValidCandidate(fx, session.id, "same2", "同名候補群2のA");
+      const b2 = await seedValidCandidate(fx, session.id, "same2-b2", "同名候補群2のB");
+
+      const merge1 = await mergeFormationCandidates({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        clientEventId: `client-${RUN_ID}-r103a-1`,
+        parents: [
+          { candidateId: a1.identity.id, expectedRevision: 1 },
+          { candidateId: b1.identity.id, expectedRevision: 1 },
+        ],
+        merged: { type: "TASK", title: "統合1" },
+        actorUserId: fx.userId,
+      });
+      const merge2 = await mergeFormationCandidates({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        clientEventId: `client-${RUN_ID}-r103a-2`,
+        parents: [
+          { candidateId: a2.identity.id, expectedRevision: 1 },
+          { candidateId: b2.identity.id, expectedRevision: 1 },
+        ],
+        merged: { type: "TASK", title: "統合2" },
+        actorUserId: fx.userId,
+      });
+      ok("[R1-03.1前提] 1件目のMergeが成功する", merge1.ok === true, JSON.stringify(merge1));
+      ok(
+        "[R1-03.2・是正の核心] 同一Session内の別Merge操作が異なるnewCandidateKeyを持つ(先頭3候補名連結による衝突が解消)",
+        merge2.ok === true && merge1.ok === true && merge2.ok && merge1.ok && merge2.newCandidateKey !== merge1.newCandidateKey,
+        JSON.stringify({ merge1, merge2 }),
+      );
+      if (merge1.ok) {
+        ok("[R1-03.3] newCandidateKeyはrequestHash由来のprefixを持つ", merge1.newCandidateKey.startsWith("merged-"), merge1.newCandidateKey);
+      }
+    }
+
+    // ============================================================
+    // R1-03.B: Anchor dedupe keyがcaptureId/imageRegionを含む
+    //          (異なるCaptureの同一offset範囲を誤って同一視しない)。
+    // ============================================================
+    {
+      const fx = await makeFixture("r103b");
+      const capA = await makeCapture(fx, "CaptureA: 同じoffset範囲のテキスト");
+      const capB = await makeCapture(fx, "CaptureB: 同じoffset範囲のテキスト");
+      const session = await seedSession(fx, capA.id, "r103b");
+
+      async function seedCandidateWithAnchor(key: string, title: string, captureId: string) {
+        const { identity, revision } = await seedValidCandidate(fx, session.id, key, title);
+        await db.formationSourceAnchor.create({
+          data: {
+            workspaceId: fx.workspaceId,
+            revisionId: revision.id,
+            sourceKind: "TEXT_OFFSET",
+            captureId,
+            startOffset: 0,
+            endOffset: 8,
+            excerptHash: "same-excerpt-hash-for-test",
+            piiClassification: "NONE",
+          },
+        });
+        return identity;
+      }
+
+      const a = await seedCandidateWithAnchor("a", "A(CaptureA由来)", capA.id);
+      const b = await seedCandidateWithAnchor("b", "B(CaptureB由来・同じoffset/hash)", capB.id);
+
+      const result = await mergeFormationCandidates({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        clientEventId: `client-${RUN_ID}-r103b`,
+        parents: [
+          { candidateId: a.id, expectedRevision: 1 },
+          { candidateId: b.id, expectedRevision: 1 },
+        ],
+        merged: { type: "TASK", title: "統合後" },
+        actorUserId: fx.userId,
+      });
+      ok("[R1-03.4前提] Mergeが成功する", result.ok === true, JSON.stringify(result));
+      if (result.ok) {
+        const inheritedAnchors = await db.formationSourceAnchor.count({ where: { revisionId: result.newRevisionId, workspaceId: fx.workspaceId } });
+        ok(
+          "[R1-03.5・是正の核心] captureIdが異なる2件のAnchor(offset/hashは偶然同一)は誤って重複排除されず両方継承される",
+          inheritedAnchors === 2,
+          String(inheritedAnchors),
+        );
+      }
+    }
+
     ok(
       "[非課金guard] scenario実行中、AI provider hostへの通信試行は0件(self-test自身の既知の1件を除く)",
       denyGuard.deniedCallAttempts.length === deniedBaseline,

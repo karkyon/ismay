@@ -1649,10 +1649,13 @@ model FormationSession {
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
-  events     FormationSessionEvent[]
-  candidates FormationCandidateIdentity[]
-  questions  FormationQuestion[]
-  receipts   MaterializationReceipt[]
+  events               FormationSessionEvent[]
+  candidates           FormationCandidateIdentity[]
+  questions            FormationQuestion[]
+  receipts             MaterializationReceipt[]
+  /// [R1-03新設・監査是正指示書2026-08-31] FormationCandidateMergeEvent.session
+  /// 複合FKの逆側(Prismaは両側の宣言が必須)。
+  candidateMergeEvents FormationCandidateMergeEvent[]
 
   /// Idempotency-Key再送検出用(DOC-03 7章 POST /formation-sessions)。
   @@unique([workspaceId, captureId, clientSessionKey], map: "formation_sessions_idempotency_uq")
@@ -1748,6 +1751,9 @@ model FormationCandidateRevision {
 
   @@unique([candidateId, revision], map: "formation_candidate_revisions_candidate_revision_uq")
   @@unique([id, workspaceId], map: "formation_candidate_revisions_id_workspace_uq")
+  /// [R1-03新設・監査是正指示書2026-08-31] FormationCandidateLineage.parentRevisionが
+  /// parentIdentityに実際に属することをDB複合FKで保証するための参照先。
+  @@unique([id, candidateId, workspaceId], map: "formation_candidate_revisions_id_candidate_workspace_uq")
   @@map("formation_candidate_revisions")
 }
 
@@ -2030,8 +2036,16 @@ model FormationCandidateLineage {
   parentIdentity   FormationCandidateIdentity @relation("LineageParentIdentity", fields: [parentIdentityId, workspaceId], references: [id, workspaceId])
   /// 親candidateの「その訂正の対象になった時点のRevision」を固定する
   /// (recordCandidateDecisionの決定Revision固定と同じ設計原則)。
+  /// [R1-03是正・監査是正指示書2026-08-31] 以前は(parentRevisionId,workspaceId)の
+  /// 2列FKのみで、「このRevisionが本当にparentIdentityId(上のFK)に属するか」を
+  /// DBが保証していなかった(application層のtxロジックが常に整合させていたが、
+  /// 将来のバグや手動データ投入で不整合が起き得た)。parentRevisionId自体は
+  /// 変えず、FK先をFormationCandidateRevisionの(id,candidateId,workspaceId)
+  /// 複合uniqueへ変更し、[parentRevisionId, parentIdentityId, workspaceId]の
+  /// 3列で参照することで「parentRevisionのcandidateId===parentIdentityId」を
+  /// DB制約として強制する。
   parentRevisionId String                     @map("parent_revision_id")
-  parentRevision   FormationCandidateRevision @relation("LineageParentRevision", fields: [parentRevisionId, workspaceId], references: [id, workspaceId])
+  parentRevision   FormationCandidateRevision @relation("LineageParentRevision", fields: [parentRevisionId, parentIdentityId, workspaceId], references: [id, candidateId, workspaceId])
   /// "MERGE" | "SPLIT"(想像で他の値を追加しない。この2値のみが正本§11.4の
   /// 対象操作)。
   correctionKind   String                     @map("correction_kind")
@@ -2051,7 +2065,12 @@ model FormationCandidateLineage {
 model FormationCandidateMergeEvent {
   id             String                     @id @default(uuid())
   workspaceId    String                     @map("workspace_id")
+  /// [R1-03是正・監査是正指示書2026-08-31] 以前はsessionIdが素のString fieldで、
+  /// DB上どのFormationSessionを指すか制約されていなかった(削除済み/別workspaceの
+  /// sessionIdを指してもDBが拒否しなかった)。FormationSession側の既存
+  /// `formation_sessions_id_workspace_uq`を参照先とする複合FKを追加する。
   sessionId      String                     @map("session_id")
+  session        FormationSession           @relation(fields: [sessionId, workspaceId], references: [id, workspaceId])
   clientEventId  String                     @map("client_event_id")
   requestHash    String                     @map("request_hash")
   newCandidateId String                     @map("new_candidate_id")

@@ -83,7 +83,11 @@ export type MergeCandidatesResult =
   // [R1-01] 全親のparseは成功したが、代表Evidenceを1件も確保できない
   // (通常はResponsibilityCandidateSchemaのevidenceSpans min(1)により発生しない
   // 防御的分岐。DBの参照整合性が崩れRevision行が想定数取得できない場合等)。
-  | { ok: false; error: "SOURCE_EVIDENCE_UNAVAILABLE" };
+  | { ok: false; error: "SOURCE_EVIDENCE_UNAVAILABLE" }
+  // [R1-03新設・監査是正指示書2026-08-31] idempotency replay時、FormationCandidateMergeEvent
+  // 行は見つかったのに、それが指すはずのnewCandidateId/新Revisionが実在しない
+  // (データ不整合)。空文字を返して成功扱いにする代わりに、明示的に拒否する。
+  | { ok: false; error: "REPLAY_INTEGRITY_ERROR"; mergeEventId: string };
 
 const RESPONSIBILITY_TYPE_SET = new Set<string>(RESPONSIBILITY_TYPES);
 
@@ -150,6 +154,12 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
     const newRevision = newIdentity
       ? await db.formationCandidateRevision.findFirst({ where: { candidateId: newIdentity.id, workspaceId, revision: 1 } })
       : null;
+    // [R1-03是正・監査是正指示書2026-08-31] MergeEvent行が実在するのに、それが
+    // 指すはずのCandidateIdentity/Revisionが見つからないのはデータ不整合
+    // (通常発生しない)。空文字で「成功」を返す代わりに明示的に拒否する。
+    if (!newIdentity || !newRevision) {
+      return { ok: false, error: "REPLAY_INTEGRITY_ERROR", mergeEventId: existingMergeEvent.id };
+    }
     const parentDecisionEvents = await db.formationCandidateDecisionEvent.findMany({
       where: { workspaceId, candidateId: { in: parents.map((p) => p.candidateId) }, decision: "MERGED" },
     });
@@ -157,8 +167,8 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
       ok: true,
       replay: true,
       newCandidateId: existingMergeEvent.newCandidateId,
-      newCandidateKey: newIdentity?.candidateKey ?? "",
-      newRevisionId: newRevision?.id ?? "",
+      newCandidateKey: newIdentity.candidateKey,
+      newRevisionId: newRevision.id,
       parentDecisionEventIds: parentDecisionEvents.map((e) => e.id),
     };
   }
@@ -181,6 +191,9 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
       const newRevision = newIdentity
         ? await tx.formationCandidateRevision.findFirst({ where: { candidateId: newIdentity.id, workspaceId, revision: 1 } })
         : null;
+      if (!newIdentity || !newRevision) {
+        return { ok: false, error: "REPLAY_INTEGRITY_ERROR", mergeEventId: existingInTx.id } as const;
+      }
       const parentDecisionEvents = await tx.formationCandidateDecisionEvent.findMany({
         where: { workspaceId, candidateId: { in: parents.map((p) => p.candidateId) }, decision: "MERGED" },
       });
@@ -188,8 +201,8 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
         ok: true,
         replay: true,
         newCandidateId: existingInTx.newCandidateId,
-        newCandidateKey: newIdentity?.candidateKey ?? "",
-        newRevisionId: newRevision?.id ?? "",
+        newCandidateKey: newIdentity.candidateKey,
+        newRevisionId: newRevision.id,
         parentDecisionEventIds: parentDecisionEvents.map((e) => e.id),
       } as const;
     }
@@ -338,9 +351,13 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
     }
 
     // [DEC-MERGE-001「新しいCandidate Identity/Revisionを同一transactionで作る」]
-    const newCandidateKey = `merged-${parentIdentities.map((p) => p.candidateKey).slice(0, 3).join("+")}${
-      parentIdentities.length > 3 ? `+etc${parentIdentities.length - 3}` : ""
-    }`;
+    // [R1-03是正・監査是正指示書2026-08-31] 以前は先頭3候補名の連結
+    // (`merged-${key1}+${key2}+${key3}`)だったため、同一Session内で構成要素が
+    // 異なる別のMerge操作が同じ先頭3候補名を持つ場合に衝突し得た
+    // (`formation_candidate_identities_session_key_uq`違反)。requestHashは
+    // parents/merged内容から決定論的に算出済み(=このMerge要求そのものを
+    // 一意に表す)であり、これに由来する値を使うことでSession内衝突を防ぐ。
+    const newCandidateKey = `merged-${requestHash.slice(0, 16)}`;
     const newIdentity = await tx.formationCandidateIdentity.create({
       data: { workspaceId, sessionId, candidateKey: newCandidateKey },
     });
@@ -405,7 +422,11 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
     });
     const seenAnchorKeys = new Set<string>();
     for (const anchor of parentAnchors) {
-      const dedupeKey = `${anchor.sourceKind}:${anchor.startOffset ?? "null"}:${anchor.endOffset ?? "null"}:${anchor.excerptHash}`;
+      // [R1-03是正・監査是正指示書2026-08-31] 以前はsourceKind/startOffset/
+      // endOffset/excerptHashのみで、captureId・imageRegionを含んでいなかった。
+      // 異なるCaptureの同じoffset範囲(偶然一致)や、IMAGE_BBOXのregion違いを
+      // 誤って同一視し得たため、captureIdとimageRegionの正規化文字列を加える。
+      const dedupeKey = `${anchor.sourceKind}:${anchor.captureId}:${anchor.startOffset ?? "null"}:${anchor.endOffset ?? "null"}:${JSON.stringify(anchor.imageRegion ?? null)}:${anchor.excerptHash}`;
       if (seenAnchorKeys.has(dedupeKey)) continue;
       seenAnchorKeys.add(dedupeKey);
       await tx.formationSourceAnchor.create({

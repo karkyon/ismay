@@ -109,6 +109,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           "統合元候補の根拠情報を確認できないため統合できません。管理者へご連絡ください",
           { retryable: false },
         );
+      case "REPLAY_INTEGRITY_ERROR":
+        // [R1-03是正・監査是正指示書2026-08-31]
+        return apiError(
+          "VALIDATION_FAILED",
+          "過去の統合記録の整合性が確認できません。管理者へご連絡ください",
+          { retryable: false, extra: { mergeEventId: result.mergeEventId } },
+        );
     }
   }
 
