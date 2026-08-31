@@ -6,6 +6,7 @@ import type { ResponsibilityCandidate } from "@/lib/ai/schema";
 import { resolveFormationSessionTransition, isValidTextOffsetRange, type FormationEventType } from "@/lib/formation/coreTypes";
 import { applyQuestionPolicyAndTransition, type CandidateForQuestionPolicy } from "@/lib/formation/formationQuestionService";
 import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
+import { classifyPii } from "@/lib/formation/piiClassifier";
 
 /**
  * V5-M1-B2 Formation Session shadow書込み。
@@ -199,10 +200,11 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
               startOffset: validRange ? span.start : null,
               endOffset: validRange ? span.end : null,
               excerptHash,
-              // [DEC-011] PII自動分類器はこのGateでは未実装のため、既定でNONEとする
-              // (誤ってHIGHより安全側に倒すのではなく、「分類していない」ことを示す
-              // 明示的な既定値として選ぶ。将来分類器が実装されたら再計算する)。
-              piiClassification: "NONE",
+              // [2026-08-30是正・M1-B6] classifyPii()による客観的pattern検出
+              // (メールアドレス・電話番号)を適用する。不正range(excerptが
+              // 空文字列)の場合は判定材料が無いためNONEのまま
+              // (classifyPii("")は既にNONEを返すため自然にそうなる)。
+              piiClassification: classifyPii(excerpt),
             },
           });
           await emit("SOURCE_ANCHOR_ATTACHED", {
