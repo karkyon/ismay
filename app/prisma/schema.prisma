@@ -49,38 +49,38 @@ model User {
   updatedAt                 DateTime  @updatedAt @map("updated_at")
   deletedAt                 DateTime? @map("deleted_at")
 
-  workspaceMembers                   WorkspaceMember[]
-  sessions                           UserSession[]
-  totpSecret                         UserTotpSecret?
-  capturesCreated                    Capture[]                         @relation("CaptureCreatedBy")
-  responsibilitiesCreated            Responsibility[]                  @relation("ResponsibilityCreatedBy")
-  responsibilitiesUpdated            Responsibility[]                  @relation("ResponsibilityUpdatedBy")
-  pemObservations                    PemObservation[]
-  pemHypotheses                      PemHypothesis[]
-  pemOnboardingConversations         PemOnboardingConversation[]
-  pemWeeklyReviews                   PemWeeklyReview[]
-  pemConsentEvents                   PemConsentEvent[]
-  pemMetricConsentEvents             PemMetricConsentEvent[]
-  pemEvidenceDeletionEvents          PemEvidenceDeletionEvent[]
-  bootstrapAssertions                BootstrapAssertion[]
-  notifications                      Notification[]
-  auditLogsAsActor                   AuditLog[]                        @relation("AuditActorUser")
+  workspaceMembers                     WorkspaceMember[]
+  sessions                             UserSession[]
+  totpSecret                           UserTotpSecret?
+  capturesCreated                      Capture[]                         @relation("CaptureCreatedBy")
+  responsibilitiesCreated              Responsibility[]                  @relation("ResponsibilityCreatedBy")
+  responsibilitiesUpdated              Responsibility[]                  @relation("ResponsibilityUpdatedBy")
+  pemObservations                      PemObservation[]
+  pemHypotheses                        PemHypothesis[]
+  pemOnboardingConversations           PemOnboardingConversation[]
+  pemWeeklyReviews                     PemWeeklyReview[]
+  pemConsentEvents                     PemConsentEvent[]
+  pemMetricConsentEvents               PemMetricConsentEvent[]
+  pemEvidenceDeletionEvents            PemEvidenceDeletionEvent[]
+  bootstrapAssertions                  BootstrapAssertion[]
+  notifications                        Notification[]
+  auditLogsAsActor                     AuditLog[]                        @relation("AuditActorUser")
   /// [V5-M1-A1新設] Context本人(観測対象)としての逆relation。
-  projectContextsOwned               ProjectContext[]                  @relation("ProjectContextOwner")
+  projectContextsOwned                 ProjectContext[]                  @relation("ProjectContextOwner")
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
   /// 同一model内に無いため)。
-  formationSessionsAsSubject         FormationSession[]
-  formationSessionEventsAsActor      FormationSessionEvent[]
-  formationAnswerEventsAsActor       FormationAnswerEvent[]
-  formationCandidateDecisionsAsActor FormationCandidateDecisionEvent[]
+  formationSessionsAsSubject           FormationSession[]
+  formationSessionEventsAsActor        FormationSessionEvent[]
+  formationAnswerEventsAsActor         FormationAnswerEvent[]
+  formationCandidateDecisionsAsActor   FormationCandidateDecisionEvent[]
   /// [2026-08-30新設・M1-C2A] FormationAtomicityOverride.actorUserId逆参照。
-  formationAtomicityOverridesAsActor FormationAtomicityOverride[]
+  formationAtomicityOverridesAsActor   FormationAtomicityOverride[]
   /// [2026-08-30新設・M1-C2B] FormationCandidateMergeEvent.actorUserId逆参照。
   formationCandidateMergeEventsAsActor FormationCandidateMergeEvent[]
   /// [V5-M1-A1新設] Context作成者としての逆relation。
-  projectContextsCreated             ProjectContext[]                  @relation("ProjectContextCreatedBy")
+  projectContextsCreated               ProjectContext[]                  @relation("ProjectContextCreatedBy")
 
   @@map("users")
 }
@@ -1701,14 +1701,14 @@ model FormationCandidateIdentity {
   currentRevision Int              @default(0) @map("current_revision")
   createdAt       DateTime         @default(now()) @map("created_at")
 
-  revisions      FormationCandidateRevision[]
-  questions      FormationQuestion[]
-  receiptItems   MaterializationReceiptItem[]
-  decisionEvents FormationCandidateDecisionEvent[]
+  revisions                FormationCandidateRevision[]
+  questions                FormationQuestion[]
+  receiptItems             MaterializationReceiptItem[]
+  decisionEvents           FormationCandidateDecisionEvent[]
   /// [2026-08-30新設・M1-C2B] このIdentityが親としてMerge/Splitのlineageに現れる場合。
-  lineageAsParent FormationCandidateLineage[] @relation("LineageParentIdentity")
+  lineageAsParent          FormationCandidateLineage[]       @relation("LineageParentIdentity")
   /// [2026-08-30新設・M1-C2B] このIdentityがMerge操作の結果として作られた場合。
-  mergeEventAsNewCandidate FormationCandidateMergeEvent[] @relation("MergeEventNewCandidate")
+  mergeEventAsNewCandidate FormationCandidateMergeEvent[]    @relation("MergeEventNewCandidate")
 
   @@unique([sessionId, candidateKey], map: "formation_candidate_identities_session_key_uq")
   @@unique([id, workspaceId], map: "formation_candidate_identities_id_workspace_uq")
@@ -1734,17 +1734,17 @@ model FormationCandidateRevision {
   schemaVersion  String                     @map("schema_version")
   createdAt      DateTime                   @default(now()) @map("created_at")
 
-  sourceAnchors  FormationSourceAnchor[]
-  decisionEvents FormationCandidateDecisionEvent[]
-  receiptItems   MaterializationReceiptItem[]
-  atomicityAssessments FormationAtomicityAssessment[]
+  sourceAnchors           FormationSourceAnchor[]
+  decisionEvents          FormationCandidateDecisionEvent[]
+  receiptItems            MaterializationReceiptItem[]
+  atomicityAssessments    FormationAtomicityAssessment[]
   /// [2026-08-30新設・M1-C2A] SHOULD_DECOMPOSE/CONTEXT_LIKEなRevisionに対する
   /// 本人の明示override(Materialize Guardの解除)。
-  atomicityOverrides   FormationAtomicityOverride[]
+  atomicityOverrides      FormationAtomicityOverride[]
   /// [2026-08-30新設・M1-C2B] このRevisionが子(Merge/Split結果)である場合のlineage。
-  lineageAsChild       FormationCandidateLineage[] @relation("LineageChildRevision")
+  lineageAsChild          FormationCandidateLineage[]       @relation("LineageChildRevision")
   /// [2026-08-30新設・M1-C2B] このRevisionが親の決定時点Revisionとしてlineageに現れる場合。
-  lineageAsParentRevision FormationCandidateLineage[] @relation("LineageParentRevision")
+  lineageAsParentRevision FormationCandidateLineage[]       @relation("LineageParentRevision")
 
   @@unique([candidateId, revision], map: "formation_candidate_revisions_candidate_revision_uq")
   @@unique([id, workspaceId], map: "formation_candidate_revisions_id_workspace_uq")
@@ -1818,30 +1818,30 @@ model FormationQuestion {
 
 /// V5-DOC-03 4章 TBL: formation_answer_events(append-only、訂正はrevisionOf)
 model FormationAnswerEvent {
-  id           String                 @id @default(uuid())
-  workspaceId  String                 @map("workspace_id")
-  questionId   String                 @map("question_id")
-  question     FormationQuestion      @relation(fields: [questionId, workspaceId], references: [id, workspaceId])
+  id            String                 @id @default(uuid())
+  workspaceId   String                 @map("workspace_id")
+  questionId    String                 @map("question_id")
+  question      FormationQuestion      @relation(fields: [questionId, workspaceId], references: [id, workspaceId])
   /// SELECTED/FREE_TEXT/UNKNOWN/DEFERRED/DO_NOT_MATERIALIZE(統合正本v5.0 §6.4)。
   /// [2026-08-30是正] 旧DOC-02語彙のANSWERED(選択式・自由文を区別しなかった)から、
   /// 統合正本§6.4のSELECTED/FREE_TEXT分離語彙へ移行(migration
   /// 20260830010000_formation_question_answer_v5_contract_normalization)。
-  answerKind   String                 @map("answer_kind")
-  valueJson    Json?                  @map("value_json")
+  answerKind    String                 @map("answer_kind")
+  valueJson     Json?                  @map("value_json")
   /// DOC-03 4章では単一必須fieldとして定義(質問への回答は常に本人。
   /// FormationSessionEventのような汎用actorType化はしない)。
-  actorUserId  String                 @map("actor_user_id")
-  actorUser    User                   @relation(fields: [actorUserId], references: [id])
-  occurredAt   DateTime               @default(now()) @map("occurred_at")
+  actorUserId   String                 @map("actor_user_id")
+  actorUser     User                   @relation(fields: [actorUserId], references: [id])
+  occurredAt    DateTime               @default(now()) @map("occurred_at")
   /// 訂正時は新規行を追加し、元の回答行を指す(UPDATE禁止、append-only)。
-  revisionOfId String?                @map("revision_of_id")
-  revisionOf   FormationAnswerEvent?  @relation("FormationAnswerCorrection", fields: [revisionOfId], references: [id])
-  corrections  FormationAnswerEvent[] @relation("FormationAnswerCorrection")
+  revisionOfId  String?                @map("revision_of_id")
+  revisionOf    FormationAnswerEvent?  @relation("FormationAnswerCorrection", fields: [revisionOfId], references: [id])
+  corrections   FormationAnswerEvent[] @relation("FormationAnswerCorrection")
   /// [2026-08-30新設・M1-B5a §3.2] POST /:id/answers の冪等性key
   /// (統合正本DOC-03 §7「POST /:id/answers | 回答Event追加 | clientEventId unique」)。
   /// (workspaceId, actorUserId, clientEventId)でtenant+本人scopeの一意性を持たせる
   /// (既存captures.clientDraftIdの(workspaceId, createdById, clientDraftId)パターンを踏襲)。
-  clientEventId String                @map("client_event_id")
+  clientEventId String                 @map("client_event_id")
 
   @@unique([workspaceId, actorUserId, clientEventId], map: "formation_answer_events_workspace_actor_client_event_uq")
   @@index([workspaceId, questionId])
@@ -1945,23 +1945,23 @@ model MaterializationReceiptItem {
 /// 1:1の派生値として扱う。algorithm versionが将来上がった場合の再評価は
 /// このGateのscope外とする(想像で再評価運用を先取りしない)。)
 model FormationAtomicityAssessment {
-  id            String                     @id @default(uuid())
-  workspaceId   String                     @map("workspace_id")
-  revisionId    String                     @map("revision_id")
-  revision      FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  id               String                     @id @default(uuid())
+  workspaceId      String                     @map("workspace_id")
+  revisionId       String                     @map("revision_id")
+  revision         FormationCandidateRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
   /// ATOMIC/PROBABLY_ATOMIC/NEEDS_CLARIFICATION/SHOULD_DECOMPOSE/CONTEXT_LIKE
   /// (統合正本§11.1、coreTypes.ts ATOMICITY_ASSESSMENTSと同じ5値)。
-  assessment    String
+  assessment       String
   /// 判定に至った主理由の短いcode(既存reasonCode方式を踏襲)。
-  reasonCode    String                     @map("reason_code")
+  reasonCode       String                     @map("reason_code")
   /// §11.3「使用Evidence」。{code, detail}の配列。
-  evidence      Json
+  evidence         Json
   /// アルゴリズム自身の判定に対する確信度(0〜1、候補のAI抽出confidenceとは別物)。
-  confidence    Decimal                    @db.Decimal(5, 4)
+  confidence       Decimal                    @db.Decimal(5, 4)
   /// atomicityAssessment.tsのATOMICITY_ALGORITHM_VERSION。再現性のため
   /// (§11.3「algorithm version」)、算出時のversionをsnapshotする。
-  algorithmVersion String                  @map("algorithm_version")
-  createdAt     DateTime                   @default(now()) @map("created_at")
+  algorithmVersion String                     @map("algorithm_version")
+  createdAt        DateTime                   @default(now()) @map("created_at")
 
   @@unique([revisionId], map: "formation_atomicity_assessments_revision_uq")
   @@index([workspaceId, revisionId])
@@ -1991,10 +1991,20 @@ model FormationAtomicityOverride {
   actorUser   User                       @relation(fields: [actorUserId], references: [id])
   occurredAt  DateTime                   @default(now()) @map("occurred_at")
 
-  /// 1 Revisionにつきoverrideは高々1件(idempotency)。同一Revisionへの
+  /// [R1-02新設・監査是正指示書2026-08-31] Answer/Merge APIと同じidempotency契約。
+  /// 「同じkey・同じ内容の再送は同じ結果、内容が違えば拒否」をrequestHashと併せて
+  /// 保証する(呼出元route/serviceレベルでのbody内容変更を検知するため)。
+  clientEventId String @map("client_event_id")
+  /// sessionId/workspaceId/candidateId/expectedRevision/reasonCodeから決定論的に
+  /// 算出するSHA-256(atomicityOverride.ts computeOverrideRequestHash)。
+  requestHash   String @map("request_hash")
+
+  /// 1 Revisionにつきoverrideは高々1件(業務不変条件)。同一Revisionへの
   /// 再override試行はこの一意制約により既存行の再利用として扱われる
   /// (service層でP2002をcatchしatomicityOverride.tsのRESULT型へ変換する)。
   @@unique([revisionId], map: "formation_atomicity_overrides_revision_uq")
+  /// [R1-02新設] idempotency key本体。clientEventIdの再送検知に使う。
+  @@unique([workspaceId, clientEventId], map: "formation_atomicity_overrides_workspace_client_uq")
   @@index([workspaceId, revisionId])
   @@map("formation_atomicity_overrides")
 }
@@ -2054,5 +2064,3 @@ model FormationCandidateMergeEvent {
   @@index([workspaceId, sessionId])
   @@map("formation_candidate_merge_events")
 }
-
-

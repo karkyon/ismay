@@ -96,6 +96,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         );
       case "IDEMPOTENCY_KEY_REUSED":
         return apiError("IDEMPOTENCY_KEY_REUSED", "同一clientEventIdで異なる内容のリクエストが送信されました");
+      case "CORRUPTED_CANDIDATE_DATA":
+        // [R1-01是正・監査是正指示書2026-08-31]
+        return apiError(
+          "VALIDATION_FAILED",
+          `候補データが破損しているため統合できません(候補${result.candidateId})。管理者へご連絡ください`,
+          { retryable: false, extra: { candidateId: result.candidateId } },
+        );
+      case "SOURCE_EVIDENCE_UNAVAILABLE":
+        return apiError(
+          "VALIDATION_FAILED",
+          "統合元候補の根拠情報を確認できないため統合できません。管理者へご連絡ください",
+          { retryable: false },
+        );
     }
   }
 

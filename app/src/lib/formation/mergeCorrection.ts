@@ -75,7 +75,15 @@ export type MergeCandidatesResult =
   | { ok: false; error: "ALREADY_MATERIALIZED_BY_LEGACY"; candidateId: string; legacyInferenceId: string; legacyDecision: string }
   | { ok: false; error: "ALREADY_DECIDED_BY_LEGACY"; candidateId: string; legacyInferenceId: string; legacyDecision: string }
   | { ok: false; error: "LEGACY_PROJECTION_CONFLICT"; candidateId: string; legacyInferenceId: string; legacyDecision: string }
-  | { ok: false; error: "IDEMPOTENCY_KEY_REUSED" };
+  | { ok: false; error: "IDEMPOTENCY_KEY_REUSED" }
+  // [R1-02監査是正指示書2026-08-31 R1-01] 親Revisionのproposed Fieldsがparse不能。
+  // materialize.ts/splitCorrection.ts/answerService.tsと同じ語彙。架空Evidence
+  // [{start:0,end:1}]を生成する代わりに、書込み前に拒否する。
+  | { ok: false; error: "CORRUPTED_CANDIDATE_DATA"; candidateId: string }
+  // [R1-01] 全親のparseは成功したが、代表Evidenceを1件も確保できない
+  // (通常はResponsibilityCandidateSchemaのevidenceSpans min(1)により発生しない
+  // 防御的分岐。DBの参照整合性が崩れRevision行が想定数取得できない場合等)。
+  | { ok: false; error: "SOURCE_EVIDENCE_UNAVAILABLE" };
 
 const RESPONSIBILITY_TYPE_SET = new Set<string>(RESPONSIBILITY_TYPES);
 
@@ -264,6 +272,35 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
       parentIdentities.push({ id: identity.id, candidateKey: identity.candidateKey, revisionId: revision.id });
     }
 
+    // [R1-01是正・監査是正指示書2026-08-31] 全親Revisionのproposed Fieldsを、
+    // どのDecisionEvent/lineage/MergeEvent書込みよりも前にparseする。parse不能な
+    // 親が1件でもあれば、ここで何も書き込まずCORRUPTED_CANDIDATE_DATAで拒否する
+    // (以前はこのparseがDecisionEvent/SessionEvent作成の後段(旧336行目付近)で
+    // 行われており、parse失敗時に架空Evidence[{start:0,end:1}]を生成していた)。
+    const parentRevisionRows = await tx.formationCandidateRevision.findMany({
+      where: { id: { in: parentIdentities.map((p) => p.revisionId) }, workspaceId },
+    });
+    const parentRevisionById = new Map(parentRevisionRows.map((r) => [r.id, r]));
+    const representativeEvidenceSpans: { start: number; end: number }[] = [];
+    for (const parent of parentIdentities) {
+      const rev = parentRevisionById.get(parent.revisionId);
+      if (!rev) {
+        return { ok: false, error: "CORRUPTED_CANDIDATE_DATA", candidateId: parent.id } as const;
+      }
+      const parsed = ResponsibilityCandidateSchema.safeParse(rev.proposedFields);
+      if (!parsed.success) {
+        return { ok: false, error: "CORRUPTED_CANDIDATE_DATA", candidateId: parent.id } as const;
+      }
+      // ResponsibilityCandidateSchemaはevidenceSpans min(1)必須のため、parseが
+      // 成功した時点で必ず1件以上存在する(架空値を補う必要が無い)。
+      representativeEvidenceSpans.push(parsed.data.evidenceSpans[0]);
+    }
+    if (representativeEvidenceSpans.length === 0) {
+      // [R1-01「実Anchorと実Evidenceの双方が無い場合は拒否」]
+      // 全親parse成功時は上のpushにより通常到達しない防御的分岐。捏造せず拒否する。
+      return { ok: false, error: "SOURCE_EVIDENCE_UNAVAILABLE" } as const;
+    }
+
     // [DEC-MERGE-001「各候補へMERGED Correction/Decision Eventをappend」]
     const parentDecisionEventIds: string[] = [];
     for (const parent of parentIdentities) {
@@ -308,31 +345,20 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
       data: { workspaceId, sessionId, candidateKey: newCandidateKey },
     });
 
-    // [DEC-MERGE-001「根拠が無い場合は空/UNKNOWNとして表し、offsetを捏造しない」]
-    // 統合後の候補は本人が明示入力した新しい内容であり、原文中の新しい単一の
-    // 根拠位置は存在しない。evidenceSpansはResponsibilityCandidateSchema上
-    // 必須(min 1)のため、後述のAnchor継承と整合する形で「各親の最初の
-    // evidenceSpan」を代表として引き継ぐ(捏造ではなく、実在する親のevidence
-    // を引き継ぐ選択。SourceAnchor自体は全親から重複排除して継承するため、
-    // Anchor側の記録は正確に保たれる)。
-    const parentRevisionRows = await tx.formationCandidateRevision.findMany({
-      where: { id: { in: parentIdentities.map((p) => p.revisionId) }, workspaceId },
-    });
-    const representativeEvidenceSpans: { start: number; end: number }[] = [];
-    for (const rev of parentRevisionRows) {
-      const parsed = ResponsibilityCandidateSchema.safeParse(rev.proposedFields);
-      if (parsed.success && parsed.data.evidenceSpans.length > 0) {
-        representativeEvidenceSpans.push(parsed.data.evidenceSpans[0]);
-      }
-    }
-
+    // [R1-01是正・DEC-MERGE-001「根拠が無い場合は空/UNKNOWNとして表し、offsetを
+    // 捏造しない」] 統合後の候補は本人が明示入力した新しい内容であり、原文中の
+    // 新しい単一の根拠位置は存在しない。evidenceSpansはResponsibilityCandidateSchema
+    // 上必須(min 1)のため、上でtx冒頭にて全親から実在するevidenceを確認・収集
+    // 済みのrepresentativeEvidenceSpansをそのまま使う(捏造ではなく、実在する
+    // 親のevidenceを引き継ぐ選択。SourceAnchor自体は全親から重複排除して継承
+    // するため、Anchor側の記録は正確に保たれる)。
     const mergedCandidate: ResponsibilityCandidate = {
       candidateId: newCandidateKey,
       type: merged.type as ResponsibilityCandidate["type"],
       title: merged.title,
       description: merged.description,
       completionCondition: merged.completionCondition,
-      evidenceSpans: representativeEvidenceSpans.length > 0 ? representativeEvidenceSpans : [{ start: 0, end: 1 }],
+      evidenceSpans: representativeEvidenceSpans,
       // [設計判断・splitCorrection.tsと同じ] 本人が明示確認した内容のため1(最大)。
       confidence: 1,
       dateMentions: [],

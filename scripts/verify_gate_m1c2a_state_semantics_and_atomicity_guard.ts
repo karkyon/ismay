@@ -264,6 +264,7 @@ async function main(): Promise<void> {
         expectedRevision: 1,
         reasonCode: "TEST_OVERRIDE",
         actorUserId: fx.userId,
+        clientEventId: `client-${RUN_ID}-s2-override`,
       });
       // decomposeはSHOULD_DECOMPOSEなのでOVERRIDE_NOT_APPLICABLEにはならない(次の別候補で検証する)
       ok("[M1C2A.14] SHOULD_DECOMPOSE候補へのoverride記録は成功する", notApplicable.ok === true, JSON.stringify(notApplicable));
@@ -290,6 +291,7 @@ async function main(): Promise<void> {
         expectedRevision: 1,
         reasonCode: "TEST",
         actorUserId: fxAtomic.userId,
+        clientEventId: `client-${RUN_ID}-s2atomic-override`,
       });
       ok(
         "[M1C2A.16] 既にATOMICな候補へのoverride試行はOVERRIDE_NOT_APPLICABLE",
