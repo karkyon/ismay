@@ -285,6 +285,9 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
         unknowns: [],
         blockedByCandidateIds: [],
         suggestedTags: [],
+        // [M1-B6B追加] 本人がSPLIT操作で明示確定させた子候補のため、質問すべき
+        // 曖昧性は無い(clarificationSignalsは空)。
+        clarificationSignals: [],
       };
 
       const childRevision = await tx.formationCandidateRevision.create({

@@ -3,7 +3,7 @@
  * 既存 formation/__tests__/coreInvariants.test.ts と同じdb非依存パターン
  * (npx tsx で直接実行、DATABASE_URL不要)。
  */
-import type { ResponsibilityCandidate } from "../../ai/schema";
+import { ResponsibilityCandidateSchema, type ResponsibilityCandidate } from "../../ai/schema";
 import {
   QUESTION_POLICY_VERSION,
   QUESTION_SCORE_THRESHOLDS,
@@ -142,6 +142,166 @@ ok("QUESTION_POLICY_VERSIONがv1", QUESTION_POLICY_VERSION === "v1");
   });
   const qs = buildQuestionCandidatesForCandidate(c);
   ok("P2項目の単純欠落だけでは質問0件(構造化signal無しのため)", qs.length === 0, `got ${qs.map((q) => q.questionCode).join(",")}`);
+}
+
+// --- (7b) [M1-B6B新設] P2は構造化clarificationSignalが有る場合のみ発生する ---
+{
+  const c = baseCandidate({
+    type: "TASK",
+    completionCondition: "提出する",
+    importance: undefined,
+    clarificationSignals: [
+      { field: "IMPORTANCE", ambiguity: 0.8, downstreamImpact: 0.7, errorRisk: 0.6, answerCost: 0.1 },
+    ],
+  });
+  const qs = buildQuestionCandidatesForCandidate(c);
+  const q = qs.find((x) => x.questionCode === "IMPORTANCE_MISSING");
+  ok(
+    "[是正の核心] IMPORTANCE構造化signal有り・importance未設定でIMPORTANCE_MISSINGが生成される",
+    q !== undefined,
+    `got ${qs.map((x) => x.questionCode).join(",")}`,
+  );
+  ok(
+    "生成されたscoreComponentsはsignalの値をそのまま使う(questionPolicy.ts側の静的値ではない)",
+    q?.scoreComponents.ambiguity === 0.8 && q?.scoreComponents.downstreamImpact === 0.7,
+  );
+}
+{
+  // 構造化signalがあっても、既にimportanceが設定済みなら聞く必要が無い。
+  const c = baseCandidate({
+    type: "TASK",
+    completionCondition: "提出する",
+    importance: 3,
+    clarificationSignals: [
+      { field: "IMPORTANCE", ambiguity: 0.8, downstreamImpact: 0.7, errorRisk: 0.6, answerCost: 0.1 },
+    ],
+  });
+  const qs = buildQuestionCandidatesForCandidate(c);
+  ok(
+    "[単なる空欄では質問しない、の裏返し] importance設定済みならsignalがあっても質問しない",
+    !qs.some((x) => x.questionCode === "IMPORTANCE_MISSING"),
+    `got ${qs.map((x) => x.questionCode).join(",")}`,
+  );
+}
+{
+  const c = baseCandidate({
+    type: "TASK",
+    completionCondition: "提出する",
+    description: undefined,
+    clarificationSignals: [
+      { field: "DESCRIPTION", ambiguity: 0.5, downstreamImpact: 0.9, errorRisk: 0.9, answerCost: 0.05 },
+    ],
+  });
+  const qs = buildQuestionCandidatesForCandidate(c);
+  ok(
+    "DESCRIPTION構造化signal有り・description未設定でDESCRIPTION_MISSINGが生成される",
+    qs.some((x) => x.questionCode === "DESCRIPTION_MISSING"),
+    `got ${qs.map((x) => x.questionCode).join(",")}`,
+  );
+}
+{
+  const c = baseCandidate({
+    type: "TASK",
+    completionCondition: "提出する",
+    dateMentions: [],
+    clarificationSignals: [
+      { field: "DESIRED_DATE", ambiguity: 0.5, downstreamImpact: 0.9, errorRisk: 0.9, answerCost: 0.05 },
+    ],
+  });
+  const qs = buildQuestionCandidatesForCandidate(c);
+  ok(
+    "DESIRED_DATE構造化signal有り・dateMentions空でDESIRED_DATE_MISSINGが生成される",
+    qs.some((x) => x.questionCode === "DESIRED_DATE_MISSING"),
+    `got ${qs.map((x) => x.questionCode).join(",")}`,
+  );
+}
+{
+  // signalのscoreがP2閾値未満なら、signalが有っても質問しない(既存の閾値機構が
+  // 構造化signalにも変わらず適用されることの確認)。
+  const c = baseCandidate({
+    type: "TASK",
+    completionCondition: "提出する",
+    importance: undefined,
+    clarificationSignals: [
+      { field: "IMPORTANCE", ambiguity: 0.1, downstreamImpact: 0.1, errorRisk: 0.1, answerCost: 0.05 },
+    ],
+  });
+  const qs = buildQuestionCandidatesForCandidate(c);
+  ok(
+    "signalのscoreがP2閾値(0.1)未満なら質問しない(未確定属性としてUI表示するだけ)",
+    !qs.some((x) => x.questionCode === "IMPORTANCE_MISSING"),
+    `got ${qs.map((x) => x.questionCode).join(",")}`,
+  );
+}
+
+// --- (7c) [M1-B6B新設] ResponsibilityCandidateSchema: clarificationSignalsの
+//          versioned parse契約(旧schema互換・未知field拒否)。 ---
+{
+  const validated = ResponsibilityCandidateSchema.safeParse({
+    candidateId: "c1",
+    type: "TASK",
+    title: "旧形式のAI応答(clarificationSignalsフィールド自体が無い)",
+    evidenceSpans: [{ start: 0, end: 5 }],
+    confidence: 0.9,
+  });
+  ok(
+    "[旧schema互換・dual-read] clarificationSignalsを含まない旧形式のAI応答もparse成功する",
+    validated.success && validated.data.clarificationSignals.length === 0,
+    JSON.stringify(validated),
+  );
+}
+{
+  const validated = ResponsibilityCandidateSchema.safeParse({
+    candidateId: "c1",
+    type: "TASK",
+    title: "新形式・構造化signal付き",
+    evidenceSpans: [{ start: 0, end: 5 }],
+    confidence: 0.9,
+    clarificationSignals: [
+      { field: "IMPORTANCE", ambiguity: 0.5, downstreamImpact: 0.5, errorRisk: 0.5, answerCost: 0.1 },
+    ],
+  });
+  ok("新形式(clarificationSignals有り)はparse成功する", validated.success);
+}
+{
+  const validated = ResponsibilityCandidateSchema.safeParse({
+    candidateId: "c1",
+    type: "TASK",
+    title: "未知fieldを含むclarificationSignals",
+    evidenceSpans: [{ start: 0, end: 5 }],
+    confidence: 0.9,
+    clarificationSignals: [
+      {
+        field: "IMPORTANCE",
+        ambiguity: 0.5,
+        downstreamImpact: 0.5,
+        errorRisk: 0.5,
+        answerCost: 0.1,
+        // [意図的] schemaが想定していない未知field。
+        madeUpExtraField: "should be rejected",
+      },
+    ],
+  });
+  ok(
+    "[是正の核心・想像で新語彙を受け入れない] 未知fieldを含むclarificationSignalsはparse失敗する",
+    !validated.success,
+  );
+}
+{
+  const validated = ResponsibilityCandidateSchema.safeParse({
+    candidateId: "c1",
+    type: "TASK",
+    title: "未知のfield値",
+    evidenceSpans: [{ start: 0, end: 5 }],
+    confidence: 0.9,
+    clarificationSignals: [
+      { field: "LOCATION", ambiguity: 0.5, downstreamImpact: 0.5, errorRisk: 0.5, answerCost: 0.1 },
+    ],
+  });
+  ok(
+    "[scope外・是正の核心] field=LOCATIONはCLARIFICATION_SIGNAL_FIELDSに含まれないためparse失敗する(Candidate側に対応fieldが無いため未対応)",
+    !validated.success,
+  );
 }
 
 // --- (8) score計算式 ---

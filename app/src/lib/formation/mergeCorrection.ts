@@ -382,6 +382,9 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
       unknowns: [],
       blockedByCandidateIds: [],
       suggestedTags: [],
+      // [M1-B6B追加] 本人が統合を明示確定させた候補のため、質問すべき曖昧性は
+      // 無い(clarificationSignalsは空)。
+      clarificationSignals: [],
     };
 
     const newRevision = await tx.formationCandidateRevision.create({

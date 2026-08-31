@@ -37,6 +37,42 @@ const EvidenceSpanSchema = z.object({
   end: z.number().int().min(0),
 });
 
+/**
+ * [M1-B6B新設・2026-08-31指示書§Question Policy P2]
+ * 「importance、desired date、location、tool、description補足は、単なる空欄では
+ * 質問しない。AI/schemaまたは決定論ruleがambiguity/downstreamImpact/errorRisk/
+ * answerCostを構造化して明示した場合だけP2候補にする」を実現するための構造化
+ * signal。questionPolicy.tsのScoreComponentsと1対1対応する4値をAI(または
+ * 将来の決定論rule)が明示した場合のみ、その値でP2質問のscoreを計算する
+ * (questionPolicy.ts側の静的な既定値は使わない=「本当にこの候補で曖昧・
+ * 重要」だとAIが判断した場合のみ質問が発生する)。
+ *
+ * [scope・2026-08-31時点] `field`は既存ResponsibilityCandidate fieldとして
+ * 実在するimportance/dateMentions(希望期限)/descriptionの3種のみを対象とする。
+ * location/toolは`TaskDetail`(schema.prisma)にのみ存在しCandidate側に対応
+ * fieldが無いため、Candidate schema・reducer・TaskDetail materialize連携を
+ * 揃えて拡張する必要がある大きめの変更になる。想像でCandidate側にlocation/tool
+ * fieldだけ追加してmaterializeへの接続を後回しにすると「回答しても永続化
+ * されない」壊れた状態を作るため、このPatchでは意図的に対象外とし、次の
+ * 独立したPatchで扱う。
+ *
+ * `.strict()`により、想定外のfieldが1つでも含まれるとparse全体が失敗する
+ * (「想像で新しいsignal語彙を受け入れない」既存方針をschema levelで強制する)。
+ */
+export const CLARIFICATION_SIGNAL_FIELDS = ["IMPORTANCE", "DESIRED_DATE", "DESCRIPTION"] as const;
+export type ClarificationSignalField = (typeof CLARIFICATION_SIGNAL_FIELDS)[number];
+
+const ClarificationSignalSchema = z
+  .object({
+    field: z.enum(CLARIFICATION_SIGNAL_FIELDS),
+    ambiguity: z.number().min(0).max(1),
+    downstreamImpact: z.number().min(0).max(1),
+    errorRisk: z.number().min(0).max(1),
+    answerCost: z.number().min(0).max(1),
+  })
+  .strict();
+export type ClarificationSignal = z.infer<typeof ClarificationSignalSchema>;
+
 export const ResponsibilityCandidateSchema = z
   .object({
     candidateId: z.string().min(1).max(64),
@@ -66,6 +102,10 @@ export const ResponsibilityCandidateSchema = z
     // あればモデルに挙げさせる(自由入力ではなく、原文の文脈から妥当なラベルを推定させる)。
     // 新規タグの自動作成は候補採用(ACCEPT)時に限り許可し、乱造を防ぐため最大3件に制限する。
     suggestedTags: z.array(z.string().max(50)).max(3).default([]),
+    // [M1-B6B新設・2026-08-31指示書] 後方互換optional(.default([])のため旧AI
+    // 応答・旧保存済みRevisionは自動的に空配列としてdual-readされ、既存の
+    // 「P2は構造化signal無しでは発生しない」挙動を維持する。
+    clarificationSignals: z.array(ClarificationSignalSchema).max(5).default([]),
   })
   .refine((c) => c.evidenceSpans.every((s) => s.end > s.start), {
     message: "evidenceSpansのendはstartより大きい必要があります",

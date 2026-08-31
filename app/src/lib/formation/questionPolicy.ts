@@ -1,4 +1,4 @@
-import type { ResponsibilityCandidate } from "@/lib/ai/schema";
+import type { ResponsibilityCandidate, ClarificationSignalField } from "@/lib/ai/schema";
 import type { FormationAnswerKind } from "@/lib/formation/coreTypes";
 
 /**
@@ -40,13 +40,23 @@ import type { FormationAnswerKind } from "@/lib/formation/coreTypes";
  * 質問生成条件に入れていない。ただしFACTへの昇格はService層の責務であり、
  * このPure関数は判定条件を提供するのみ)。
  *
- * P2(重要度・希望期限・場所・道具・説明補足)は、現行`ResponsibilityCandidate`
- * schema(ai/schema.ts)にdownstreamImpact/errorRiskを示す構造化signalが
- * まだ存在しないため、[2026-08-30時点]では自動発生条件を持たない
- * (Question Code Registryには型として存在するが、`condition`が常にfalseを
- * 返す「将来の構造化signal追加を待つ」設計。理由: 指示書§3.1「downstreamImpact/
- * errorRiskが閾値以上、又は原文がそれを必要としている時だけ質問する」を
- * 満たす判定材料が現行schemaに無いため、想像で閾値を作らない)。
+ * P2(重要度・希望期限・場所・道具・説明補足)は、[2026-08-30時点]では
+ * `ResponsibilityCandidate` schema(ai/schema.ts)にdownstreamImpact/errorRisk
+ * を示す構造化signalが存在しなかったため、自動発生条件を持たなかった。
+ * [M1-B6B是正・2026-08-31指示書] `ai/schema.ts`へ`clarificationSignals`
+ * (versioned・後方互換optional・`.strict()`で未知field拒否)を追加し、
+ * IMPORTANCE_MISSING/DESIRED_DATE_MISSING/DESCRIPTION_MISSINGの3codeは
+ * 「対応するclarificationSignalが実在し、かつ対象fieldが依然として空」の
+ * 場合のみ発生するよう更新した(単なる空欄だけでは発生しない、という制約は
+ * 維持したまま、AIが明示的に「この項目は聞く価値がある」と構造化signalで
+ * 申告した場合だけ質問候補になる)。LOCATION_MISSING/TOOL_MISSING相当は
+ * `TaskDetail`(schema.prisma)にのみ対応fieldがあり`ResponsibilityCandidate`
+ * には無いため、Candidate schema・reducer・TaskDetail materialize連携を
+ * 揃えて拡張する必要がある別Patchのscopeとし、このPatchでは扱わない
+ * (ai/schema.ts側のコメント参照)。AI抽出プロンプト自体は変更していない
+ * (この構造化signalを実際にAIへ生成させる指示は、既存コメント下段
+ * 「構造化Uncertainty」に記載の理由と同じくAI応答分布へ実運用影響がある
+ * ため、別Gateとする)。
  *
  * ============================================================================
  * 構造化Uncertainty(指示書§3.2)について
@@ -174,6 +184,22 @@ const HARD_DEADLINE_CONFIRM_OPTIONS = [
 ];
 const IMPORTANCE_SELECT_OPTIONS = [1, 2, 3, 4, 5].map((n) => ({ id: String(n), label: `${n}` }));
 
+function findClarificationSignal(candidate: ResponsibilityCandidate, field: ClarificationSignalField) {
+  return candidate.clarificationSignals?.find((s) => s.field === field);
+}
+
+function scoreComponentsFromSignal(signal: ReturnType<typeof findClarificationSignal>): ScoreComponents {
+  // [M1-B6B前提] この関数はfindClarificationSignalがdefinedを返した場合にのみ
+  // 呼ばれる(呼出元のconditionで既に存在確認済み)。呼び出し側の型を単純に
+  // 保つためsignal!を使わず、フォールバック値(0)を明示する形にしている。
+  return {
+    ambiguity: signal?.ambiguity ?? 0,
+    downstreamImpact: signal?.downstreamImpact ?? 0,
+    errorRisk: signal?.errorRisk ?? 0,
+    answerCost: signal?.answerCost ?? 0,
+  };
+}
+
 const QUESTION_CODE_REGISTRY: QuestionCodeDefinition[] = [
   {
     code: "COMMITMENT_COUNTERPARTY_MISSING",
@@ -234,41 +260,40 @@ const QUESTION_CODE_REGISTRY: QuestionCodeDefinition[] = [
       `「${c.title}」についてAIが自信を持てなかった点があります: ${c.unknowns.join(" / ")}。補足があれば教えてください。`,
     scoreComponents: () => ({ ambiguity: 0.8, downstreamImpact: 0.6, errorRisk: 0.6, answerCost: 0.15 }),
   },
-  // [2026-08-30時点・意図的にcondition=false] P2(重要度・希望期限・説明補足)は
-  // downstreamImpact/errorRiskを示す構造化signalが現行schemaに無いため、
-  // 判定材料が揃うまで自動発生させない(このファイル冒頭コメント参照)。
-  // Registry・promptTextは将来の構造化signal追加に備えて先行定義するが、
-  // condition側を常にfalseにすることで実際には質問を生成しない。
+  // [2026-08-30新設→M1-B6B是正] P2(重要度・希望期限・説明補足)は、単なる
+  // field空欄だけでは発生しない。「対応するclarificationSignalが実在し、かつ
+  // 対象fieldが依然として空」の両方を満たす場合のみ質問候補になる
+  // (ファイル冒頭コメント参照)。
   {
     code: "IMPORTANCE_MISSING",
     priority: "P2",
     targetField: "importance",
     answerKind: "SELECTED",
-    condition: () => false,
-    reasonCode: "IMPORTANCE_SIGNAL_UNAVAILABLE",
+    condition: (c) => c.importance === undefined && findClarificationSignal(c, "IMPORTANCE") !== undefined,
+    reasonCode: "IMPORTANCE_SIGNAL_STRUCTURED",
     promptText: (c) => `「${c.title}」の重要度を教えてください。`,
     options: () => IMPORTANCE_SELECT_OPTIONS,
-    scoreComponents: () => ({ ambiguity: 0.3, downstreamImpact: 0.3, errorRisk: 0.2, answerCost: 0.1 }),
+    scoreComponents: (c) => scoreComponentsFromSignal(findClarificationSignal(c, "IMPORTANCE")),
   },
   {
     code: "DESIRED_DATE_MISSING",
     priority: "P2",
     targetField: "dateMentions",
     answerKind: "FREE_TEXT",
-    condition: () => false,
-    reasonCode: "DESIRED_DATE_SIGNAL_UNAVAILABLE",
+    condition: (c) => c.dateMentions.length === 0 && findClarificationSignal(c, "DESIRED_DATE") !== undefined,
+    reasonCode: "DESIRED_DATE_SIGNAL_STRUCTURED",
     promptText: (c) => `「${c.title}」の希望期限はありますか？`,
-    scoreComponents: () => ({ ambiguity: 0.3, downstreamImpact: 0.3, errorRisk: 0.2, answerCost: 0.15 }),
+    scoreComponents: (c) => scoreComponentsFromSignal(findClarificationSignal(c, "DESIRED_DATE")),
   },
   {
     code: "DESCRIPTION_MISSING",
     priority: "P2",
     targetField: "description",
     answerKind: "FREE_TEXT",
-    condition: () => false,
-    reasonCode: "DESCRIPTION_SIGNAL_UNAVAILABLE",
+    condition: (c) => !c.description && findClarificationSignal(c, "DESCRIPTION") !== undefined,
+    reasonCode: "DESCRIPTION_SIGNAL_STRUCTURED",
     promptText: (c) => `「${c.title}」について補足しておきたいことはありますか？`,
-    scoreComponents: () => ({ ambiguity: 0.25, downstreamImpact: 0.25, errorRisk: 0.15, answerCost: 0.2 }),
+    scoreComponents: (c) => scoreComponentsFromSignal(findClarificationSignal(c, "DESCRIPTION")),
   },
 ];
 
