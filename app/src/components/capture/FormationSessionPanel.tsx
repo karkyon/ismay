@@ -149,6 +149,10 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
   const [mergingOpen, setMergingOpen] = useState(false);
   const [mergeDraft, setMergeDraft] = useState({ type: "TASK", title: "", description: "", completionCondition: "" });
   const [mergeBusy, setMergeBusy] = useState(false);
+  // [M1-B6C-4新設・2026-09-01指示書§6.2] Session Lifecycle(defer/dismiss/resume/retry)UI。
+  const [lifecycleBusy, setLifecycleBusy] = useState<"defer" | "dismiss" | "resume" | "retry" | null>(null);
+  const [deferReasonOpen, setDeferReasonOpen] = useState(false);
+  const [deferReasonDraft, setDeferReasonDraft] = useState("");
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -426,7 +430,60 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
     }
   }
 
+  /**
+   * [M1-B6C-4新設・2026-09-01指示書§6.2] defer/dismiss/resume/retryの共通送信処理。
+   * 4 APIとも`{clientEventId, expectedVersion, reasonCode?}`という同じ形の
+   * requestを受け取るため、既存decide/materialize等と同じ「busyフラグで二重
+   * 送信防止→送信→エラー表示→再読込」の形に統一する。
+   *
+   * [version conflict後の再fetch] 失敗時(VERSION_CONFLICTに限らず全ての失敗)、
+   * `load(true)`で最新のSession状態(および最新version)を必ず再取得する。
+   * これにより、他タブ・他ユーザーの操作で競合した場合でも、次の操作は
+   * 自動的に最新versionを前提に行われる(ユーザーが手動で再読み込みしなくても
+   * 次のクリックが成功する)。
+   */
+  async function runLifecycleAction(action: "defer" | "dismiss" | "resume" | "retry", reasonCode?: string) {
+    if (!data || lifecycleBusy) return;
+    setLifecycleBusy(action);
+    setError("");
+    const clientEventId = `ui-lifecycle-${action}-${sessionId}-${Date.now()}`;
+    debugLog.event("FormationSessionPanel", "lifecycleAction", { action, sessionId, hasReasonCode: !!reasonCode });
+    try {
+      const res = await apiFetch(`/api/v1/formation-sessions/${sessionId}/${action}`, {
+        method: "POST",
+        body: JSON.stringify({
+          clientEventId,
+          expectedVersion: data.session.version,
+          ...(reasonCode ? { reasonCode } : {}),
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        const code = body?.error?.code;
+        setError(
+          code === "VERSION_CONFLICT"
+            ? "他の操作と競合しました。最新の状態を再取得しました。もう一度お試しください。"
+            : (body?.error?.message ?? "操作に失敗しました"),
+        );
+        await load(true);
+        return;
+      }
+      setDeferReasonOpen(false);
+      setDeferReasonDraft("");
+      await load(true);
+      onChanged?.();
+    } finally {
+      setLifecycleBusy(null);
+    }
+  }
+
+  async function handleDismiss() {
+    if (!confirm("このSessionを却下します。未決定の候補は失われません(履歴として残ります)が、このSession自体はもう確認できなくなります。よろしいですか?")) return;
+    await runLifecycleAction("dismiss");
+  }
+
   const sessionActive = data ? data.session.state === "REVIEW_READY" || data.session.state === "PARTIALLY_CONFIRMED" : false;
+
 
   if (loading) {
     return <div className="border-t border-line bg-canvas/60 px-5 py-4 text-xs text-faint">Session Reviewを読み込み中...</div>;
@@ -447,6 +504,14 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
   const unansweredQuestions = data.questions
     .filter((q) => !q.latestAnswer)
     .sort((a, b) => a.ordinal - b.ordinal);
+
+  // [M1-B6C-4新設・§6.2] 各操作の許可状態はsessionLifecycle.tsのstate guardと
+  // 同じ条件をUI側でも判定する(defer: CLARIFYING/REVIEW_READY/PARTIALLY_CONFIRMED、
+  // dismiss: REVIEW_READYのみ、resume: DEFERREDのみ、retry: FAILEDのみ)。
+  const canDefer = data.session.state === "CLARIFYING" || data.session.state === "REVIEW_READY" || data.session.state === "PARTIALLY_CONFIRMED";
+  const canDismiss = data.session.state === "REVIEW_READY";
+  const canResume = data.session.state === "DEFERRED";
+  const canRetry = data.session.state === "FAILED";
 
   return (
     <div className="border-t border-line bg-canvas/60 px-5 py-4">
@@ -478,6 +543,96 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
           </button>
         )}
       </div>
+
+      {/* [M1-B6C-4新設・§6.2] Session Lifecycle操作(defer/dismiss/resume/retry)。
+          state別に排他的に表示する(同時に複数の操作が可能な状態は無い)。 */}
+      {(canDefer || canDismiss || canResume || canRetry) && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {canDefer && !deferReasonOpen && (
+            <button
+              onClick={() => setDeferReasonOpen(true)}
+              disabled={lifecycleBusy !== null}
+              className="shrink-0 text-[11px] text-muted border border-line rounded-lg px-2.5 py-1.5 disabled:opacity-40 hover:bg-canvas transition"
+            >
+              保留にする
+            </button>
+          )}
+          {canDismiss && (
+            <button
+              onClick={handleDismiss}
+              disabled={lifecycleBusy !== null}
+              className="shrink-0 text-[11px] text-warn border border-warn-200 rounded-lg px-2.5 py-1.5 disabled:opacity-40 hover:bg-warn-50 transition"
+            >
+              {lifecycleBusy === "dismiss" ? "却下中..." : "却下する"}
+            </button>
+          )}
+          {canResume && (
+            <button
+              onClick={() => runLifecycleAction("resume")}
+              disabled={lifecycleBusy !== null}
+              className="shrink-0 text-[11px] bg-ink text-white rounded-lg px-2.5 py-1.5 disabled:opacity-40 hover:bg-black transition"
+            >
+              {lifecycleBusy === "resume" ? "再開中..." : "再開する"}
+            </button>
+          )}
+          {canRetry && (
+            <button
+              onClick={() => runLifecycleAction("retry")}
+              disabled={lifecycleBusy !== null}
+              className="shrink-0 text-[11px] bg-ink text-white rounded-lg px-2.5 py-1.5 disabled:opacity-40 hover:bg-black transition"
+            >
+              {lifecycleBusy === "retry" ? "再試行中..." : "再解析する"}
+            </button>
+          )}
+        </div>
+      )}
+      {/* [M1-B6C-4新設・§6.2] deferの理由入力(任意)。破壊的操作ではないため
+          dismissのようなconfirm()は使わず、キャンセル可能なインライン入力にする。 */}
+      {canDefer && deferReasonOpen && (
+        <div className="mt-3 rounded-lg border border-line bg-white p-3">
+          <p className="text-[11px] text-muted mb-1.5">保留にする理由(任意)</p>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={deferReasonDraft}
+              onChange={(e) => setDeferReasonDraft(e.target.value)}
+              disabled={lifecycleBusy !== null}
+              placeholder="例: 来週まで判断を保留したい"
+              className="flex-1 min-w-0 text-sm rounded border border-line px-2 py-1.5 disabled:opacity-40"
+            />
+            <button
+              onClick={() => runLifecycleAction("defer", deferReasonDraft.trim() || undefined)}
+              disabled={lifecycleBusy !== null}
+              className="shrink-0 text-[11px] bg-ink text-white rounded px-2.5 py-1.5 disabled:opacity-40 hover:bg-black transition"
+            >
+              {lifecycleBusy === "defer" ? "保留中..." : "保留にする"}
+            </button>
+            <button
+              onClick={() => {
+                setDeferReasonOpen(false);
+                setDeferReasonDraft("");
+              }}
+              disabled={lifecycleBusy !== null}
+              className="shrink-0 text-[11px] text-faint px-2 py-1.5 disabled:opacity-40 hover:text-muted transition"
+            >
+              キャンセル
+            </button>
+          </div>
+        </div>
+      )}
+      {data.session.state === "DEFERRED" && (
+        <p className="mt-2 text-[11px] text-faint">
+          このSessionは保留中です。「再開する」を押すと、保留前の状態から確認を続けられます。
+        </p>
+      )}
+      {data.session.state === "FAILED" && (
+        <p className="mt-2 text-[11px] text-faint">
+          このSessionは解析に失敗しました。「再解析する」を押すと解析待ち状態へ戻りますが、実際の再解析は別途手動で開始する必要があります。
+        </p>
+      )}
+      {data.session.state === "DISMISSED" && (
+        <p className="mt-2 text-[11px] text-faint">このSessionは却下されました。候補の履歴は失われていません。</p>
+      )}
 
       {data.allowedActions.answer && unansweredQuestions.length > 0 && (
         <div className="mt-3 space-y-2">
