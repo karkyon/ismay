@@ -130,6 +130,7 @@ async function main(): Promise<void> {
         clientEventId: `client-${RUN_ID}-a-${label}-defer`,
         actorUserId: fx.userId,
         reasonCode: "検証用",
+        expectedVersion: session.version,
       });
       ok(`[A・${label}.1前提] ${startState}からのdeferが成功する`, deferResult.ok === true, JSON.stringify(deferResult));
       if (deferResult.ok) {
@@ -144,6 +145,7 @@ async function main(): Promise<void> {
         workspaceId: fx.workspaceId,
         clientEventId: `client-${RUN_ID}-a-${label}-resume`,
         actorUserId: fx.userId,
+        expectedVersion: dbAfterDefer.version,
       });
       ok(
         `[A・${label}.4・是正の核心] resumeが${expectedResume}へ正しく復元する(想像で固定値を返さない)`,
@@ -160,17 +162,17 @@ async function main(): Promise<void> {
       const session = await seedSession(fx, "b", "REVIEW_READY");
       const clientEventId = `client-${RUN_ID}-b`;
 
-      const first = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId, actorUserId: fx.userId, reasonCode: "理由A" });
+      const first = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId, actorUserId: fx.userId, reasonCode: "理由A", expectedVersion: session.version });
       ok("[B.1] 初回defer成功(replay=false)", first.ok === true && first.ok && first.replay === false, JSON.stringify(first));
 
-      const replay = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId, actorUserId: fx.userId, reasonCode: "理由A" });
+      const replay = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId, actorUserId: fx.userId, reasonCode: "理由A", expectedVersion: session.version });
       ok(
         "[B.2・idempotency核心] 同一clientEventId・同一内容の再送はreplay=trueで同じ結果",
         replay.ok === true && replay.ok && replay.replay === true && replay.toState === "DEFERRED",
         JSON.stringify(replay),
       );
 
-      const mismatched = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId, actorUserId: fx.userId, reasonCode: "理由B(違う)" });
+      const mismatched = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId, actorUserId: fx.userId, reasonCode: "理由B(違う)", expectedVersion: session.version });
       ok(
         "[B.3] 同一clientEventId・異なる内容はIDEMPOTENCY_KEY_REUSEDで拒否される",
         mismatched.ok === false && (mismatched as { error: string }).error === "IDEMPOTENCY_KEY_REUSED",
@@ -192,6 +194,7 @@ async function main(): Promise<void> {
         workspaceId: fx.workspaceId,
         clientEventId: `client-${RUN_ID}-c`,
         actorUserId: fx.userId,
+        expectedVersion: session.version,
       });
       ok("[C.1] REVIEW_READYからのdismissが成功しDISMISSEDへ遷移する", result.ok === true && result.ok && result.toState === "DISMISSED", JSON.stringify(result));
     }
@@ -203,6 +206,7 @@ async function main(): Promise<void> {
         workspaceId: fx.workspaceId,
         clientEventId: `client-${RUN_ID}-c2`,
         actorUserId: fx.userId,
+        expectedVersion: session.version,
       });
       ok(
         "[C.2・state guard] DRAFT状態からのdismiss試行はINVALID_SESSION_STATEで拒否される",
@@ -222,6 +226,7 @@ async function main(): Promise<void> {
         workspaceId: fx.workspaceId,
         clientEventId: `client-${RUN_ID}-d`,
         actorUserId: fx.userId,
+        expectedVersion: session.version,
       });
       ok("[D.1] FAILEDからのretryが成功しANALYZINGへ遷移する", result.ok === true && result.ok && result.toState === "ANALYZING", JSON.stringify(result));
 
@@ -236,6 +241,7 @@ async function main(): Promise<void> {
         workspaceId: fx.workspaceId,
         clientEventId: `client-${RUN_ID}-d2`,
         actorUserId: fx.userId,
+        expectedVersion: session.version,
       });
       ok(
         "[D.3・state guard] DEFERRED以外からのresume試行はINVALID_SESSION_STATEで拒否される",
@@ -251,8 +257,9 @@ async function main(): Promise<void> {
     {
       const fx = await makeFixture("e");
       const session = await seedSession(fx, "e", "REVIEW_READY");
-      await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId: `client-${RUN_ID}-e-defer`, actorUserId: fx.userId });
-      await resumeFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId: `client-${RUN_ID}-e-resume`, actorUserId: fx.userId });
+      const deferResult = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId: `client-${RUN_ID}-e-defer`, actorUserId: fx.userId, expectedVersion: session.version });
+      const versionAfterDefer = deferResult.ok ? session.version + 1 : session.version;
+      await resumeFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId: `client-${RUN_ID}-e-resume`, actorUserId: fx.userId, expectedVersion: versionAfterDefer });
 
       const timelineEvents = await db.formationSessionEvent.findMany({
         where: { workspaceId: fx.workspaceId, sessionId: session.id },
@@ -263,6 +270,70 @@ async function main(): Promise<void> {
         "[E.1] Session timelineにSESSION_DEFERRED・SESSION_RESUMEDが両方記録される",
         eventTypes.includes("SESSION_DEFERRED") && eventTypes.includes("SESSION_RESUMED"),
         JSON.stringify(eventTypes),
+      );
+    }
+
+    // ============================================================
+    // F: [M1-B6C-4新設] version CAS。古いexpectedVersionでの新規リクエストは
+    //    VERSION_CONFLICTで拒否され、DBのstateは変化しない。
+    // ============================================================
+    {
+      const fx = await makeFixture("f");
+      const session = await seedSession(fx, "f", "REVIEW_READY");
+      const staleResult = await deferFormationSession({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        clientEventId: `client-${RUN_ID}-f-stale`,
+        actorUserId: fx.userId,
+        expectedVersion: session.version + 999, // 実際のversionと一致しない
+      });
+      ok(
+        "[F.1・是正の核心] 不一致なexpectedVersionの新規リクエストはVERSION_CONFLICTで拒否される",
+        staleResult.ok === false && (staleResult as { error: string }).error === "VERSION_CONFLICT",
+        JSON.stringify(staleResult),
+      );
+      const dbAfterConflict = await db.formationSession.findUniqueOrThrow({ where: { id: session.id } });
+      ok("[F.2] VERSION_CONFLICT時はstateが変化しない", dbAfterConflict.state === "REVIEW_READY", dbAfterConflict.state);
+      ok("[F.3] VERSION_CONFLICT時はversionも変化しない", dbAfterConflict.version === session.version, String(dbAfterConflict.version));
+
+      // 正しいexpectedVersionでの再送は成功する。
+      const correctResult = await deferFormationSession({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        clientEventId: `client-${RUN_ID}-f-correct`,
+        actorUserId: fx.userId,
+        expectedVersion: session.version,
+      });
+      ok("[F.4] 正しいexpectedVersionでの再送は成功する", correctResult.ok === true, JSON.stringify(correctResult));
+    }
+    {
+      // [M1-B6C-4新設] idempotent replayはversionが進んだ後でも同じ結果を返す
+      // (§6.1「idempotent replayはversionが進んだ後でも同じ結果」)。
+      const fx = await makeFixture("g");
+      const session = await seedSession(fx, "g", "REVIEW_READY");
+      const clientEventId = `client-${RUN_ID}-g`;
+      const first = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId, actorUserId: fx.userId, expectedVersion: session.version });
+      ok("[G.1前提] 初回defer成功", first.ok === true, JSON.stringify(first));
+
+      const sessionAfterDefer = await db.formationSession.findUniqueOrThrow({ where: { id: session.id } });
+      // resumeで実際にversionをさらに進める(replay検証時点でDBのversionが
+      // 初回defer呼出し時から既に変化していることを保証するため)。
+      await resumeFormationSession({
+        sessionId: session.id,
+        workspaceId: fx.workspaceId,
+        clientEventId: `client-${RUN_ID}-g-resume`,
+        actorUserId: fx.userId,
+        expectedVersion: sessionAfterDefer.version,
+      });
+
+      // 元のdefer呼出しと同じclientEventId・同じexpectedVersion(=元の古い値)で
+      // 再送する。DB上のversionは既に2回進んでいるが、replayとして同じ結果を返す
+      // べきであり、version CASの対象にならない。
+      const replay = await deferFormationSession({ sessionId: session.id, workspaceId: fx.workspaceId, clientEventId, actorUserId: fx.userId, expectedVersion: session.version });
+      ok(
+        "[G.2・是正の核心] versionが進んだ後でも、同一clientEventIdの再送はVERSION_CONFLICTにならずreplay=trueで同じ結果を返す",
+        replay.ok === true && replay.ok && replay.replay === true && replay.toState === "DEFERRED",
+        JSON.stringify(replay),
       );
     }
 

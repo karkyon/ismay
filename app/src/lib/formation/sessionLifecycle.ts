@@ -45,6 +45,11 @@ export interface SessionLifecycleActionParams {
   clientEventId: string;
   actorUserId: string;
   reasonCode?: string;
+  /** [M1-B6C-4新設・2026-09-01指示書§6.1「optimistic concurrency」] クライアントが
+   *  直前に見ていたFormationSession.version。Session行lock後にDBの実際のversionと
+   *  一致しない場合はVERSION_CONFLICTで拒否する(materialize.ts/answerService.tsと
+   *  同じ楽観ロック契約)。 */
+  expectedVersion: number;
 }
 
 export type SessionLifecycleActionResult =
@@ -52,6 +57,7 @@ export type SessionLifecycleActionResult =
   | { ok: false; error: "NOT_FOUND" }
   | { ok: false; error: "INVALID_SESSION_STATE"; sessionState: FormationSessionState }
   | { ok: false; error: "IDEMPOTENCY_KEY_REUSED" }
+  | { ok: false; error: "VERSION_CONFLICT"; latestVersion: number }
   | { ok: false; error: "COREYPES_TRANSITION_UNDEFINED" };
 
 function computeLifecycleRequestHash(input: {
@@ -59,6 +65,7 @@ function computeLifecycleRequestHash(input: {
   workspaceId: string;
   action: string;
   reasonCode?: string;
+  expectedVersion: number;
 }): string {
   return createHash("sha256")
     .update(
@@ -67,6 +74,11 @@ function computeLifecycleRequestHash(input: {
         workspaceId: input.workspaceId,
         action: input.action,
         reasonCode: input.reasonCode ?? null,
+        // [M1-B6C-4新設] expectedVersionをrequestHashへ含める。同一clientEventIdで
+        // 異なるexpectedVersion(=異なる前提状態)から送られた場合、それは
+        // 「同じ要求の再送」ではなく別の要求とみなし、IDEMPOTENCY_KEY_REUSEDで
+        // 拒否する(materialize.tsのrequestHash B31-02是正と同じ設計判断)。
+        expectedVersion: input.expectedVersion,
       }),
     )
     .digest("hex");
@@ -87,8 +99,8 @@ async function runSessionLifecycleAction(
     session: { id: string; workspaceId: string; state: string },
   ) => Promise<{ ok: true; toState: FormationSessionState } | { ok: false; error: SessionLifecycleActionResult }>,
 ): Promise<SessionLifecycleActionResult> {
-  const { sessionId, workspaceId, clientEventId, actorUserId, reasonCode } = params;
-  const requestHash = computeLifecycleRequestHash({ sessionId, workspaceId, action, reasonCode });
+  const { sessionId, workspaceId, clientEventId, actorUserId, reasonCode, expectedVersion } = params;
+  const requestHash = computeLifecycleRequestHash({ sessionId, workspaceId, action, reasonCode, expectedVersion });
 
   const existing = await db.formationSessionLifecycleEvent.findFirst({ where: { workspaceId, clientEventId } });
   if (existing) {
@@ -123,6 +135,18 @@ async function runSessionLifecycleAction(
         fromState: existingInTx.fromState as FormationSessionState,
         toState: existingInTx.toState as FormationSessionState,
       } as const;
+    }
+
+    // [M1-B6C-4新設・§6.1] version CAS。idempotency確認(上記existingInTx)を
+    // 通過した=新規リクエストであることが確定した後にのみ検証する。これにより、
+    // 「versionが既に進んだ後の同一内容replay」は(idempotency一致により)この
+    // チェックへ到達せず常に同じ結果を返し続ける(指示書§6.1「idempotent replay
+    // はversionが進んだ後でも同じ結果」を満たす)。新規リクエストのみが実際の
+    // 楽観ロックの対象になる。state guard(resolveTarget)より先に検証する:
+    // クライアントの前提versionが古い場合、それに基づくstate判断自体が古い
+    // 情報に基づいている可能性があるため、より根本的な不整合を先に報告する。
+    if (session.version !== expectedVersion) {
+      return { ok: false, error: "VERSION_CONFLICT", latestVersion: session.version } as const;
     }
 
     const resolved = await resolveTarget(tx, session);

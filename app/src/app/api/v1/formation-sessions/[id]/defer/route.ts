@@ -15,6 +15,9 @@ import { deferFormationSession } from "@/lib/formation/sessionLifecycle";
 const DeferRequestSchema = z.object({
   clientEventId: z.string().min(1).max(200),
   reasonCode: z.string().max(500).optional(),
+  // [M1-B6C-4新設・2026-09-01指示書§6.1] optimistic concurrency。クライアントが
+  // 直前に見ていたFormationSession.versionを必須で送らせる(If-Match相当)。
+  expectedVersion: z.number().int().min(0),
 });
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
@@ -44,6 +47,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     workspaceId,
     clientEventId: parsed.data.clientEventId,
     reasonCode: parsed.data.reasonCode,
+    expectedVersion: parsed.data.expectedVersion,
     actorUserId: auth.user.userId,
   });
 
@@ -58,6 +62,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         );
       case "IDEMPOTENCY_KEY_REUSED":
         return apiError("IDEMPOTENCY_KEY_REUSED", "同一clientEventIdで異なる内容のリクエストが送信されました");
+      case "VERSION_CONFLICT":
+        return apiError("VERSION_CONFLICT", "他の更新と競合しました。最新の状態を取得してください", {
+          retryable: true,
+          extra: { latestVersion: result.latestVersion },
+        });
       case "COREYPES_TRANSITION_UNDEFINED":
         return apiError("VALIDATION_FAILED", "この状態からのdeferは定義されていません。管理者へご連絡ください", { retryable: false });
     }
