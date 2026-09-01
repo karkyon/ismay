@@ -10,7 +10,7 @@ import { RESPONSIBILITY_TYPES, initialStatusFor } from "@/lib/responsibility";
 import { ResponsibilityCandidateSchema } from "@/lib/ai/schema";
 import { embedAndStoreResponsibility, findRelatedResponsibilities } from "@/lib/ai/relatedResponsibilities";
 import { createResponsibilityWithLinks } from "@/lib/formation/responsibilityMaterializationCore";
-import { findFormationSessionForCapture } from "@/lib/formation/legacyProjectionResolver";
+import { resolveLegacyFallbackEligibility } from "@/lib/formation/legacyProjectionResolver";
 
 /**
  * [B4新設・CHG-011 Feature Flag委譲・2026-08-29]
@@ -112,23 +112,35 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     });
   }
 
-  // [B4.2新設・2026-08-29] cutover flag(FEATURE_CHG011_SHARED_CORE)がON、かつ
-  // このCaptureに対応するFormationSessionが既に存在する場合、旧routeでの直接
-  // 生成をserver側で拒否する(監査「Gate M1-B4.1即時完了・B4.2連続実装指示」
-  // B4.2受入項目7・8「cutover flag ONかつ対応Sessionありの場合、旧directgeneration
-  // をserver側で拒否し、二重生成を防止。FormationSessionが存在しないlegacy
-  // Captureだけ旧route fallbackを許可」)。Flag OFF時は既存Inbox挙動を完全維持する
-  // (項目10)。decision種別(ACCEPT/EDIT/REJECT/HOLD)を問わず一律拒否する。
+  // [B4.2新設・2026-08-29、M1-B6C-5是正・2026-09-02指示書§7]
+  // cutover flag(FEATURE_CHG011_SHARED_CORE)がON、かつこのCaptureに対応する
+  // FormationSessionが既に存在する場合、旧routeでの直接生成をserver側で拒否する
+  // (監査「Gate M1-B4.1即時完了・B4.2連続実装指示」B4.2受入項目7・8)。
+  // [M1-B6C-5是正] 「shadow欠落時だけ安全に旧経路へfallbackする」という条件を
+  // 厳密化した: FormationSessionが無くても、shadow書込みがまだ進行中
+  // (PENDING/RUNNING/RETRY_WAIT)の間はfallbackを許可しない(詳細は
+  // legacyProjectionResolver.ts `resolveLegacyFallbackEligibility`のコメント参照)。
+  // Flag OFF時は既存Inbox挙動を完全維持する(項目10、この判定自体を呼ばない)。
   if (CHG011_SHARED_CORE_ENABLED) {
-    const sessionForCapture = await findFormationSessionForCapture(db, {
+    const fallbackDecision = await resolveLegacyFallbackEligibility(db, {
       captureId: inference.captureId,
       workspaceId,
     });
-    if (sessionForCapture) {
+    if (!fallbackDecision.allowed) {
+      if (fallbackDecision.reason === "FORMATION_SESSION_EXISTS") {
+        return apiError(
+          "STATE_TRANSITION_INVALID",
+          "このCaptureはFormation経路(Session Review)へ移行済みです。旧採否APIは使用できません",
+          { retryable: false, extra: { formationSessionId: fallbackDecision.formationSessionId } },
+        );
+      }
+      // SHADOW_WRITE_IN_PROGRESS: まだ「欠落」と確定していないため、確定
+      // (成功→Formation経路/DEAD_LETTER→fallback許可)するまで少し待ってから
+      // 再試行するようクライアントへ伝える。
       return apiError(
         "STATE_TRANSITION_INVALID",
-        "このCaptureはFormation経路(Session Review)へ移行済みです。旧採否APIは使用できません",
-        { retryable: false, extra: { formationSessionId: sessionForCapture.id } },
+        "このCaptureはFormation経路への移行処理が進行中です。少し時間をおいて再度お試しください",
+        { retryable: true, extra: { checkpointStatus: fallbackDecision.checkpointStatus } },
       );
     }
   }

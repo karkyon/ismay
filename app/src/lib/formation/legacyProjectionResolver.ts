@@ -140,6 +140,67 @@ export async function findFormationSessionForCapture(
 }
 
 // ---------------------------------------------------------------------------
+// [M1-B6C-5新設・2026-09-02指示書§7「Legacy/Realtime/Batch収束」]
+// 「shadow欠落時だけ安全に旧経路へfallbackする条件を明文化する」。
+//
+// [是正の背景] 従来のcutover guard(B4.2、上の`findFormationSessionForCapture`)は
+// 「対応するFormationSessionが存在するか」だけを見ていた。しかし
+// FormationShadowCheckpoint(M1-B6C-1)がPENDING/RUNNING/RETRY_WAITの間
+// (=shadow書込みがまだ進行中で、最終的に成功する可能性がまだ残っている間)は
+// FormationSessionがまだ存在しないため、この期間に旧route経由でACCEPTすると、
+// 直後にshadow書込みが成功した際、同じ論理candidateに対してlegacy側の
+// Responsibilityと(将来Formation側でACCEPTされれば)Formation側の
+// Responsibilityが両方作られうる、という是正されていなかったraceが存在した。
+//
+// 「shadow欠落」とは、shadow書込みが「もう成功する見込みが無い」ことが
+// 確定した状態(DEAD_LETTER/CANCELLED)、または最初からshadow書込みが一度も
+// 試みられていない状態(checkpoint自体が存在しない、旧データ等)を指す。
+// PENDING/RUNNING/RETRY_WAIT(進行中でまだ成功しうる)は「欠落」ではないため、
+// この期間は旧経路へのfallbackを許可しない(想像で「たぶん失敗するだろう」と
+// 先回りしない。checkpointの状態機械が示す事実だけに従う)。
+// ---------------------------------------------------------------------------
+
+export type LegacyFallbackDecision =
+  | { allowed: true }
+  | { allowed: false; reason: "FORMATION_SESSION_EXISTS"; formationSessionId: string }
+  | { allowed: false; reason: "SHADOW_WRITE_IN_PROGRESS"; checkpointStatus: string };
+
+/**
+ * 旧`/inferences/[id]/decision`routeが、指定Captureに対する直接生成
+ * (legacy fallback)を許可してよいかどうかを判定する。
+ *
+ * 判定順序:
+ *   1. 対応するFormationSessionが既に存在する → 拒否(既存B4.2 guardと同じ)。
+ *   2. FormationSessionは無いが、進行中(PENDING/RUNNING/RETRY_WAIT)の
+ *      FormationShadowCheckpointが存在する → 拒否(shadow書込みがまだ
+ *      「欠落」と確定していない。将来成功しうる)。
+ *   3. どちらにも該当しない(Sessionも無く、進行中checkpointも無い。
+ *      checkpoint自体が無い、DEAD_LETTER、CANCELLEDのいずれか) → 許可
+ *      (shadow経路が確定的に使えない、または最初から試みられていない)。
+ */
+export async function resolveLegacyFallbackEligibility(
+  client: Prisma.TransactionClient,
+  params: { captureId: string; workspaceId: string },
+): Promise<LegacyFallbackDecision> {
+  const session = await findFormationSessionForCapture(client, params);
+  if (session) {
+    return { allowed: false, reason: "FORMATION_SESSION_EXISTS", formationSessionId: session.id };
+  }
+  const inProgressCheckpoint = await client.formationShadowCheckpoint.findFirst({
+    where: {
+      captureId: params.captureId,
+      workspaceId: params.workspaceId,
+      status: { in: ["PENDING", "RUNNING", "RETRY_WAIT"] },
+    },
+    select: { status: true },
+  });
+  if (inProgressCheckpoint) {
+    return { allowed: false, reason: "SHADOW_WRITE_IN_PROGRESS", checkpointStatus: inProgressCheckpoint.status };
+  }
+  return { allowed: true };
+}
+
+// ---------------------------------------------------------------------------
 // [B4.3新設] legacy/Formation 競合検出(read-only、pure関数)。
 // 出典: HANDOFF_2026-08-29_B4.1_B4.2.md §4-3
 //       「legacy/Formation競合表示(項目6)。FormationSessionPanel.tsxは
