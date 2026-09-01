@@ -1,0 +1,282 @@
+{
+  "gate": "M1-B6C-6",
+  "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+  "executedAt": "2026-09-01T23:11:09.092Z",
+  "requirements": [
+    {
+      "id": "EV-F-001",
+      "requirement": "Capture→Session→候補→確定",
+      "acceptanceCriteria": "Source Anchor/Receiptまで追跡可",
+      "implementationPaths": [
+        "app/src/lib/formation/shadowWrite.ts",
+        "app/src/lib/formation/sourceAnchorAdapter.ts",
+        "app/src/lib/formation/transcriptSegmentMapping.ts",
+        "app/src/lib/formation/materialize.ts"
+      ],
+      "migrationOrConstraint": [
+        "20260827020000_formation_session_domain_foundation(FormationSession/FormationSourceAnchor/MaterializationReceipt基盤)",
+        "20260831050000_formation_m1b6a_source_unit(Source Anchor kind固有field)",
+        "20260901010000_formation_m1b6c1_shadow_checkpoint(shadow投影の永続checkpoint)"
+      ],
+      "testScenarios": [
+        {
+          "path": "scripts/verify_gate_m1b6a_source_unit_foundation.ts",
+          "scenario": "Source Anchor kind別AVAILABLE/UNAVAILABLE契約全体",
+          "passedCount": 23,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        },
+        {
+          "path": "scripts/verify_gate_m1b6c2_source_anchor_live_wiring.ts",
+          "scenario": "A(AUDIO_TIMECODE AVAILABLE)〜F(Merge後のAnchor継承)",
+          "passedCount": 23,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": null,
+          "cleanupOk": true
+        },
+        {
+          "path": "scripts/verify_gate_m1b3_materialize_acceptance.ts",
+          "scenario": "Capture→候補→ACCEPT→MaterializeでReceipt/Responsibilityまで到達",
+          "passedCount": 37,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        }
+      ],
+      "result": "PASS",
+      "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+      "executedAt": "2026-09-01T23:11:09.092Z"
+    },
+    {
+      "id": "EV-F-002",
+      "requirement": "question limit",
+      "acceptanceCriteria": "4問目拒否",
+      "implementationPaths": [
+        "app/src/lib/formation/coreTypes.ts",
+        "app/src/lib/formation/formationQuestionService.ts"
+      ],
+      "migrationOrConstraint": [
+        "20260827020000_formation_session_domain_foundation(FormationSession.questionCount<=3のDB CHECK制約)"
+      ],
+      "testScenarios": [
+        {
+          "path": "app/src/lib/formation/__tests__/coreInvariants.test.ts",
+          "scenario": "ordinal=4は無効(EV-F-002「4問目拒否」相当)、purテスト",
+          "passedCount": 95,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": null,
+          "cleanupOk": null
+        },
+        {
+          "path": "scripts/verify_gate_m1b5a_question_answer_acceptance.ts",
+          "scenario": "M1B5a.32: 4候補全てP0該当でも生涯上限3件までしか質問生成されない",
+          "passedCount": 37,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        }
+      ],
+      "result": "PASS",
+      "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+      "executedAt": "2026-09-01T23:11:09.092Z"
+    },
+    {
+      "id": "EV-F-003",
+      "requirement": "revision race",
+      "acceptanceCriteria": "承認Revisionが暗黙更新されない",
+      "implementationPaths": [
+        "app/src/lib/formation/materialize.ts(recordCandidateDecision)"
+      ],
+      "migrationOrConstraint": [
+        "20260827020000_formation_session_domain_foundation(FormationCandidateDecisionEvent.revisionId FK、採否対象Revisionを固定)",
+        "20260829010000_formation_materialization_invariants"
+      ],
+      "testScenarios": [
+        {
+          "path": "scripts/verify_gate_m1b3_materialize_acceptance.ts",
+          "scenario": "古いrevisionでの採否はREVISION_CONFLICT",
+          "passedCount": 37,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        }
+      ],
+      "result": "PASS",
+      "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+      "executedAt": "2026-09-01T23:11:09.092Z"
+    },
+    {
+      "id": "EV-F-004",
+      "requirement": "partial confirm",
+      "acceptanceCriteria": "acceptedだけ生成、pending保持",
+      "implementationPaths": [
+        "app/src/lib/formation/materialize.ts(materializeFormationSession)"
+      ],
+      "migrationOrConstraint": [
+        "20260830050000_formation_state_semantics_and_atomicity_guard(DEC-STATE-001、PARTIALLY_CONFIRMED状態)"
+      ],
+      "testScenarios": [
+        {
+          "path": "scripts/verify_gate_m1c2a_state_semantics_and_atomicity_guard.ts",
+          "scenario": "M1C2A.4〜6: Aのみmaterialize成功・Bがpendingのまま残りSession=PARTIALLY_CONFIRMED・Receipt Item実在",
+          "passedCount": 23,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        }
+      ],
+      "result": "PASS",
+      "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+      "executedAt": "2026-09-01T23:11:09.092Z"
+    },
+    {
+      "id": "EV-F-005",
+      "requirement": "materialize retry",
+      "acceptanceCriteria": "同一Receipt、重複Responsibility0",
+      "implementationPaths": [
+        "app/src/lib/formation/materialize.ts(materializeFormationSession、operationId requestHash idempotency)"
+      ],
+      "migrationOrConstraint": [
+        "20260829010000_formation_materialization_invariants(MaterializationReceipt idempotency制約)"
+      ],
+      "testScenarios": [
+        {
+          "path": "scripts/verify_gate_m1b31_materialization_invariants.ts",
+          "scenario": "S1(直列再送replay)・S2(並行2実行でも1件生成・同一ReceiptId)・S3(異payloadはIDEMPOTENCY_KEY_REUSED)・S4(並行決定races)",
+          "passedCount": 41,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        }
+      ],
+      "result": "PASS",
+      "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+      "executedAt": "2026-09-01T23:11:09.092Z"
+    },
+    {
+      "id": "EV-F-006",
+      "requirement": "AI outage/retry",
+      "acceptanceCriteria": "Capture/既存Event無損失",
+      "implementationPaths": [
+        "app/src/lib/formation/shadowCheckpoint.ts",
+        "app/src/lib/formation/retryOrchestration.ts",
+        "app/src/lib/formation/sessionLifecycle.ts(retryFormationSession)"
+      ],
+      "migrationOrConstraint": [
+        "20260831070000_formation_m1b6c1_shadow_checkpoint(shadow write失敗のreconciliation)",
+        "20260902010000_formation_m1b6c4_retry_orchestration(retry時のattachToSessionId)"
+      ],
+      "testScenarios": [
+        {
+          "path": "scripts/verify_gate_m1b6c1_shadow_reconciliation.ts",
+          "scenario": "B/C(本体成功+shadow失敗→RETRY_WAIT→retry成功)・F(stale RUNNING reclaim・再処理成功)",
+          "passedCount": 36,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": null,
+          "cleanupOk": true
+        },
+        {
+          "path": "scripts/verify_gate_m1b6c4_3_retry_orchestration.ts",
+          "scenario": "reconcileStuckRetryOrchestrations・attach modeでの既存Event保持",
+          "passedCount": 25,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": null,
+          "cleanupOk": true
+        },
+        {
+          "path": "scripts/verify_gate_m1b6b_session_lifecycle.ts",
+          "scenario": "D.2: retryはCandidateを削除しない(0件のまま)",
+          "passedCount": 32,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        }
+      ],
+      "result": "PASS",
+      "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+      "executedAt": "2026-09-01T23:11:09.092Z"
+    },
+    {
+      "id": "EV-F-007",
+      "requirement": "no consent",
+      "acceptanceCriteria": "AI送信/学習/生成0",
+      "implementationPaths": [
+        "app/src/lib/ai/consentPolicy.ts(checkAiPolicyAndConsent)",
+        "app/src/lib/formation/shadowCheckpoint.ts"
+      ],
+      "migrationOrConstraint": [
+        "既存consents table(TBL-022)、checkAiPolicyAndConsentがclaim直後に再評価"
+      ],
+      "testScenarios": [
+        {
+          "path": "scripts/verify_gate_m1b6c1_shadow_reconciliation.ts",
+          "scenario": "G: 同意撤回済みMEETING Captureの再評価はCANCELLED、FormationSessionは作られず、AI provider host宛の通信は0件",
+          "passedCount": 36,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": null,
+          "cleanupOk": true
+        }
+      ],
+      "result": "PASS",
+      "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+      "executedAt": "2026-09-01T23:11:09.092Z"
+    },
+    {
+      "id": "EV-F-008",
+      "requirement": "transaction fault injection",
+      "acceptanceCriteria": "孤立row0",
+      "implementationPaths": [
+        "app/src/lib/formation/shadowWrite.ts(単一db.$transaction)",
+        "app/src/lib/formation/materialize.ts(Session行FOR UPDATE)"
+      ],
+      "migrationOrConstraint": [
+        "20260830050000_formation_state_semantics_and_atomicity_guard、20260831070000_formation_m1b6c1_shadow_checkpoint"
+      ],
+      "testScenarios": [
+        {
+          "path": "scripts/verify_gate_m1b6c1_shadow_reconciliation.ts",
+          "scenario": "B.5(partial write 0、transaction原子性)・D(二重claim防止、Sessionは1件のみ)",
+          "passedCount": 36,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": null,
+          "cleanupOk": true
+        },
+        {
+          "path": "scripts/verify_gate_m1b31_materialization_invariants.ts",
+          "scenario": "S2/S4: 並行実行でもResponsibility/Receiptは1件だけ(transaction直列化)",
+          "passedCount": 41,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        },
+        {
+          "path": "scripts/verify_gate_m1c2a_state_semantics_and_atomicity_guard.ts",
+          "scenario": "M1C2A.13: ATOMICITY_BLOCKED後もResponsibilityは0件(transaction全体rollback)",
+          "passedCount": 23,
+          "failedCount": 0,
+          "blocked": false,
+          "aiNetworkDeniedOk": true,
+          "cleanupOk": true
+        }
+      ],
+      "result": "PASS",
+      "commitSha": "c1ccea94b910fec281e8462f5dc031b159a25fe5",
+      "executedAt": "2026-09-01T23:11:09.092Z"
+    }
+  ]
+}
