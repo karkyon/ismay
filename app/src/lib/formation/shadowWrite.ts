@@ -30,10 +30,17 @@ import { classifyPii } from "@/lib/formation/piiClassifier";
  * Question Policyに従ってCLARIFYING(質問あり)またはREVIEW_READY(質問なし)へ遷移する。
  * BATCH抽出経路(aiExtractJob.ts等)への同サービスの配線は未調査のため次のGateとする。
  *
- * [エラー方針] この関数はfire-and-forgetのbest-effortとして呼び出し元
- * (ai/extract.ts)から呼ばれる。内部で例外を捕捉し、失敗しても本体のCapture/
- * AiInference確定処理には一切影響させない(DOC-03 UX契約1「Capture保存はAI障害と
- * 独立して完了する」と同じ精神を、shadow書込み自身の障害にも適用する)。
+ * [エラー方針・2026-08-31是正 M1-B6C-1] 従来この関数は内部で例外を捕捉し
+ * `SHADOW_WRITE_FAILED_IGNORED`として握り潰していたが、これによりCapture=READY/
+ * AiInference=成功なのにFormationSessionが永久欠落する状態が観測不能なまま
+ * 恒久化し得た(指示書§3.1)。この関数は現在、内部で発生した例外を握り潰さず
+ * 呼び出し元へ伝播する(例外はthrowする)。「Capture保存はAI障害と独立して完了
+ * する」というDOC-03 UX契約1自体は変更しない: 本体のCapture/AiInference確定
+ * transactionは既にこの関数の呼び出しより前にcommit済みであり、この関数の
+ * 失敗が本体を巻き戻すことは無い。呼び出し元は`shadowCheckpoint.ts`の
+ * `processShadowCheckpoint`経由でこの関数を呼び、失敗を`FormationShadowCheckpoint`
+ * 行として永続記録した上でreconciliation workerが再試行する(旧来のfire-and-
+ * forget best-effortから、観測可能・再試行可能なcheckpoint方式へ置き換えた)。
  */
 
 export interface ShadowSourceCaptureContext {
@@ -256,12 +263,13 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
       candidateCount: candidates.length,
     });
   } catch (err) {
-    // [shadow] 失敗しても本体(Capture/AiInference)には一切影響させない。
-    // ここで再throwしない設計そのものがDOC-03 UX契約1の意図的な保護である。
-    debugServer.error("formation/shadowWrite", "SHADOW_WRITE_FAILED_IGNORED", {
+    // [2026-08-31是正 M1-B6C-1] 握り潰さず呼び出し元(processShadowCheckpoint)へ
+    // 伝播する。呼び出し元がcheckpoint行のstatus/lastErrorCode等へ永続記録する。
+    debugServer.error("formation/shadowWrite", "SHADOW_WRITE_FAILED", {
       captureId: capture.id,
       aiRunId,
       err,
     });
+    throw err;
   }
 }

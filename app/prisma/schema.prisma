@@ -244,15 +244,17 @@ model Capture {
   updatedAt          DateTime  @updatedAt @map("updated_at")
   deletedAt          DateTime? @map("deleted_at")
 
-  responsibilities       Responsibility[]
-  aiInferences           AiInference[]
-  aiRuns                 AiRun[]
+  responsibilities           Responsibility[]
+  aiInferences               AiInference[]
+  aiRuns                     AiRun[]
   /// 新設: 画像OCRの複数ページ結合用(2026-08-21追加)。1枚のみの場合も1件作成する
   /// (imageObjectKey単体列は旧データ互換のためのみ残す。新規アップロードは常にこちら経由)。
-  images                 CaptureImage[]
+  images                     CaptureImage[]
   /// [V5-M1-B1新設] FormationSession/FormationSourceAnchorからの複合FK参照先として必要。
-  formationSessions      FormationSession[]
-  formationSourceAnchors FormationSourceAnchor[]
+  formationSessions          FormationSession[]
+  formationSourceAnchors     FormationSourceAnchor[]
+  /// [M1-B6C-1新設] FormationShadowCheckpointからの複合FK参照先として必要。
+  formationShadowCheckpoints FormationShadowCheckpoint[]
 
   @@unique([workspaceId, createdById, clientDraftId], name: "captures_idempotency_key")
   /// [V5-M1-B1新設] FormationSession.captureId/FormationSourceAnchor.captureIdからの
@@ -649,7 +651,10 @@ model AiRun {
   startedAt     DateTime  @default(now()) @map("started_at")
   finishedAt    DateTime? @map("finished_at")
 
-  inferences AiInference[]
+  inferences        AiInference[]
+  /// [M1-B6C-1新設] このAiRunに対応するFormation shadow projection checkpoint。
+  /// 業務上は1 AiRunにつき最大1件(formation_shadow_checkpoints_ai_run_uqで保証)。
+  shadowCheckpoints FormationShadowCheckpoint[]
 
   @@map("ai_runs")
 }
@@ -2164,4 +2169,55 @@ model FormationSessionLifecycleEvent {
   @@unique([workspaceId, clientEventId], map: "formation_session_lifecycle_events_workspace_client_uq")
   @@index([workspaceId, sessionId, action, occurredAt])
   @@map("formation_session_lifecycle_events")
+}
+
+/// V5-M1-B6C-1 TBL: formation_shadow_checkpoints
+/// 出典: Claude向け ISMAY c503e72以降 M1-B6C・全残件連続実装指示(2026-08-31)
+/// §3 Gate M1-B6C-1「Shadow Reconciliation/Checkpoint」。
+///
+/// [設計方針] `writeShadowFormationSession`(shadowWrite.ts)はCapture/AiInference
+/// 本体transactionの外でbest-effort実行され、従来は失敗を`SHADOW_WRITE_FAILED_IGNORED`
+/// として握り潰していた。その結果、Capture=READY/AiInference=成功なのに
+/// FormationSessionが永久欠落する状態が起こり得た(指示書§3.1)。
+///
+/// この table は、本体transaction内(ai/extract.ts persistSuccess)でPENDING行として
+/// 必ず1件作成される「Formation shadow投影を実施すべきという事実」の永続記録である。
+/// Workerはこの行をclaimしてshadow書込みを実行し、結果(SUCCEEDED/RETRY_WAIT/
+/// DEAD_LETTER/CANCELLED)をここへ記録する。これにより、shadow書込みの失敗が
+/// 「握り潰されて見えなくなる」のではなく「観測可能な永続状態」になる。
+///
+/// key設計: `(workspaceId, aiRunId)`一意(指示書§3.2「安定key」)。aiRunIdは
+/// ai_runs.idであり、1 AiRunにつきshadow投影対象は最大1回(REALTIME/BATCHいずれの
+/// 経路もpersistSuccess経由でここを通る)。
+model FormationShadowCheckpoint {
+  id              String    @id @default(uuid())
+  workspaceId     String    @map("workspace_id")
+  captureId       String    @map("capture_id")
+  capture         Capture   @relation(fields: [captureId, workspaceId], references: [id, workspaceId])
+  aiRunId         String    @map("ai_run_id")
+  aiRun           AiRun     @relation(fields: [aiRunId], references: [id])
+  /// PENDING/RUNNING/SUCCEEDED/RETRY_WAIT/DEAD_LETTER/CANCELLED(指示書§3.2)。
+  status          String    @default("PENDING")
+  attempt         Int       @default(0)
+  maxAttempts     Int       @default(5) @map("max_attempts")
+  /// PENDING/RETRY_WAITの次回試行時刻。RUNNING行がこの時刻を大きく過ぎている場合、
+  /// Workerがcrash後の孤立RUNNINGとみなしRETRY_WAITへ回収する(§3.2「crash後に
+  /// 安全に再開できる」)。
+  nextRunAt       DateTime? @map("next_run_at")
+  lastErrorCode   String?   @map("last_error_code")
+  lastErrorDigest String?   @map("last_error_digest")
+  /// 作成時点のaiRunId+候補件数+schemaVersionから算出するdrift検知用hash。
+  /// claim時に現在のAiInference行から再計算した値と不一致なら、作成後にデータが
+  /// 変化した(想定外)とみなしCORRUPTED_CHECKPOINT_DATAでDEAD_LETTERにする
+  /// (R1-01/02と同じfail-closed方針。想像で処理を継続しない)。
+  requestHash     String    @map("request_hash")
+  completedAt     DateTime? @map("completed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  /// 同一AiRunに対するcheckpointの重複作成を防ぐ(idempotency、指示書§3.2)。
+  @@unique([workspaceId, aiRunId], map: "formation_shadow_checkpoints_ai_run_uq")
+  @@index([status, nextRunAt])
+  @@index([workspaceId, captureId])
+  @@map("formation_shadow_checkpoints")
 }

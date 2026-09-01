@@ -5,7 +5,9 @@ import { parseExtractionResultLenient } from "@/lib/ai/schema";
 import { getActiveExtractionProvider } from "@/lib/ai/config";
 import { estimateCostMicros } from "@/lib/ai/pricing";
 import type { AiExtractionProvider, AiExtractionOutcome, AiExtractionUsage } from "@/lib/ai/provider";
-import { writeShadowFormationSession, type ShadowSourceCaptureContext } from "@/lib/formation/shadowWrite";
+import type { ShadowSourceCaptureContext } from "@/lib/formation/shadowWrite";
+import { checkAiPolicyAndConsent } from "@/lib/ai/consentPolicy";
+import { createShadowCheckpoint, attemptShadowCheckpointInline } from "@/lib/formation/shadowCheckpoint";
 
 /**
  * FN-AI-01 責任候補抽出(機能別詳細設計書v1.1 3章「Worker手順」1〜7に対応)。
@@ -239,40 +241,6 @@ export async function finalizeBatchExtraction(
   return { status: "READY", inferenceCount };
 }
 
-interface PolicyCheckResult {
-  allowed: boolean;
-  reason: string;
-}
-
-async function checkAiPolicyAndConsent(captureId: string): Promise<PolicyCheckResult> {
-  const capture = await db.capture.findUniqueOrThrow({
-    where: { id: captureId },
-    include: { domain: true, consent: true },
-  });
-
-  // Domain AI policy: [推論・MVP暫定] aiPolicy.aiReferenceAllowed===false のみ明示的に拒否。
-  // 未設定(null)は許可扱い(ensureDefaultWorkspaceが作る既定Domainはaipolicy未設定のため)。
-  const policy = capture.domain?.aiPolicy as { aiReferenceAllowed?: boolean } | null | undefined;
-  if (policy?.aiReferenceAllowed === false) {
-    return { allowed: false, reason: "このDomainはAI参照が許可されていません(Domain AI policy)" };
-  }
-
-  // FN-PRV-02: MEETINGは同意必須。撤回済み・期限切れも再解析を拒否する(4.8節の例外規定)。
-  if (capture.sourceType === "MEETING") {
-    if (!capture.consent) {
-      return { allowed: false, reason: "会議録音の同意が未登録です" };
-    }
-    if (capture.consent.withdrawnAt) {
-      return { allowed: false, reason: "会議録音の同意が撤回されています" };
-    }
-    if (capture.consent.expiresAt && capture.consent.expiresAt.getTime() < Date.now()) {
-      return { allowed: false, reason: "会議録音の同意保持期限が切れています" };
-    }
-  }
-
-  return { allowed: true, reason: "" };
-}
-
 async function persistSuccess(
   captureId: string,
   processingVersion: number,
@@ -289,7 +257,7 @@ async function persistSuccess(
    */
   shadowContext?: ShadowSourceCaptureContext,
 ): Promise<number> {
-  const { count, aiRunId } = await db.$transaction(async (tx: Prisma.TransactionClient) => {
+  const { count, checkpointId } = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const run = await tx.aiRun.create({
       data: {
         captureId,
@@ -352,21 +320,33 @@ async function persistSuccess(
       });
     }
 
-    return { count: result.candidates.length, aiRunId: run.id };
+    // [M1-B6C-1新設・2026-08-31指示書§3.2]
+    // 「Capture/AiInference本体transaction内でcheckpointをPENDING登録する」。
+    // shadowContextが無い(rawText欠落等でshadow対象外)場合はcheckpoint自体を
+    // 作らない(従来のwriteShadowFormationSession呼出し省略と同じ判断基準)。
+    let checkpointId: string | null = null;
+    if (shadowContext) {
+      const checkpoint = await createShadowCheckpoint(tx, {
+        workspaceId: shadowContext.workspaceId,
+        captureId: shadowContext.id,
+        aiRunId: run.id,
+        schemaVersion: ai.schemaVersion,
+        candidateCount: result.candidates.length,
+      });
+      checkpointId = checkpoint.id;
+    }
+
+    return { count: result.candidates.length, aiRunId: run.id, checkpointId };
   });
 
-  // [V5-M1-B2] 本体のtransactionが確定した後に、best-effortでFormation Session
-  // shadow構造を書く(DOC-03 10章「M1-B1はshadow Session生成のみ」の実配線)。
-  // writeShadowFormationSession自身が内部で例外を握りつぶすため、ここでの失敗が
-  // 本関数の戻り値(count)やCapture=READY確定へ影響することは無い。
-  if (shadowContext) {
-    await writeShadowFormationSession({
-      capture: shadowContext,
-      aiRunId,
-      schemaVersion: ai.schemaVersion,
-      candidates: result.candidates,
-      captureSummary: result.captureSummary,
-    });
+  // [2026-08-31是正 M1-B6C-1] 本体transactionが確定した後、durableなcheckpoint行
+  // (PENDINGで既にDBへ記録済み)に対して即時実行を1回試みる(応答性を保つ
+  // best-effort inline attempt)。失敗してもcheckpoint行はRETRY_WAIT/DEAD_LETTERへ
+  // 遷移して残るため、shadowReconciliationJob.ts(Worker)が確実に再試行する。
+  // 従来のように失敗が完全に握り潰されて観測不能になることはない
+  // (checkpoint行が「shadow projectionがまだ完了していない」事実を永続的に示す)。
+  if (checkpointId) {
+    await attemptShadowCheckpointInline(checkpointId);
   }
 
   return count;

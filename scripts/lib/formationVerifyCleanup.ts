@@ -224,6 +224,10 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
     // (このコメントブロックの2つ上のGate M1-B4.1で初めて必要になった対応。
     // 前回の修正時、GitHub未push状態のこの箇所を素のHEADから再構成した際に
     // 誤って失われていたため、ここで再度・確実に追加する)。
+    // [M1-B6C-1新設・2026-08-31] formation_shadow_checkpointsはai_run_id(→ai_runs)と
+    // capture_id(→captures)の両方への複合/単一FKを持つため、aiRun.deleteMany/
+    // capture.deleteManyより先に削除する(formationQuestion等と同じ追随漏れ防止パターン)。
+    await step(errors, "formationShadowCheckpoint.deleteMany", () => db.formationShadowCheckpoint.deleteMany({ where: { captureId: { in: captureIds } } }), { count: 0 });
     await step(errors, "aiInference.deleteMany", () => db.aiInference.deleteMany({ where: { captureId: { in: captureIds } } }), { count: 0 });
     await step(errors, "aiRun.deleteMany", () => db.aiRun.deleteMany({ where: { captureId: { in: captureIds } } }), { count: 0 });
     await step(errors, "capture.deleteMany", () => db.capture.deleteMany({ where: { id: { in: captureIds } } }), {
