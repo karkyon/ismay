@@ -2165,7 +2165,10 @@ model FormationSessionLifecycleEvent {
   /// Answer/Merge APIと同じidempotency契約(clientEventId+requestHash)。
   clientEventId String           @map("client_event_id")
   requestHash   String           @map("request_hash")
-  /// "DEFER" | "DISMISS" | "RESUME" | "RETRY"(想像で他の値を追加しない)。
+  /// "DEFER" | "DISMISS" | "RESUME" | "RETRY" | "RESOLVE_REMAINING"(想像で
+  /// これ以外の値を追加しない)。[M1-B6C-4新設・2026-09-02指示書§6.4]
+  /// RESOLVE_REMAININGはresolveRemaining.tsから使う
+  /// (PARTIALLY_CONFIRMED残候補の一括終端決定)。
   action        String
   fromState     String           @map("from_state")
   toState       String           @map("to_state")
