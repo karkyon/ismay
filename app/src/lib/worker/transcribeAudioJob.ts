@@ -160,6 +160,10 @@ async function runTranscriptionForCapture(captureId: string): Promise<Transcript
       latencyMs: outcome.usage?.latencyMs ?? null,
       costMicros: outcome.ok ? estimateTranscriptionCostMicros(outcome.durationSeconds) : null,
       errorCode: outcome.ok ? null : outcome.message,
+      // [M1-B6C-2新設・2026-09-01] Providerが返したsegmentsをそのまま保存する。
+      // undefinedの場合(Providerがverbose_json形式のsegmentsを返さなかった)は
+      // 列をnullのままにする(空配列との違いを保つ。捏造しない)。
+      transcriptSegments: outcome.ok && outcome.segments ? (outcome.segments as unknown as object) : undefined,
       startedAt: new Date(),
       finishedAt: new Date(),
     },

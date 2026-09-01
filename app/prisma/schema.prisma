@@ -626,30 +626,39 @@ model AiInference {
 
 /// TBL-015 ai_runs - モデル実行・費用・結果 [推論]
 model AiRun {
-  id            String    @id @default(uuid())
-  captureId     String?   @map("capture_id")
-  capture       Capture?  @relation(fields: [captureId], references: [id])
+  id                 String    @id @default(uuid())
+  captureId          String?   @map("capture_id")
+  capture            Capture?  @relation(fields: [captureId], references: [id])
   /// 新設(2026-08-23・FN-PEM系対応): Captureに紐付かないAI呼び出し(PEM対話・仮説生成・
   /// 週次レビュー)のコスト集計用。captureIdがある行はcapture.workspaceId経由で辿れるが、
   /// PEM呼び出しはCaptureを持たないため、admin/ai-usage APIの集計から漏れないよう
   /// 直接workspaceIdを持たせる(MVPは1ユーザー=1 Workspace固定のため矛盾は生じない)。
-  workspaceId   String?   @map("workspace_id")
-  provider      String
-  model         String
-  promptVersion String    @map("prompt_version")
-  schemaVersion String    @map("schema_version")
-  inputTokens   Int?      @map("input_tokens")
-  outputTokens  Int?      @map("output_tokens")
-  costMicros    BigInt?   @map("cost_micros")
-  latencyMs     Int?      @map("latency_ms")
+  workspaceId        String?   @map("workspace_id")
+  provider           String
+  model              String
+  promptVersion      String    @map("prompt_version")
+  schemaVersion      String    @map("schema_version")
+  inputTokens        Int?      @map("input_tokens")
+  outputTokens       Int?      @map("output_tokens")
+  costMicros         BigInt?   @map("cost_micros")
+  latencyMs          Int?      @map("latency_ms")
   /// PENDING/SUCCEEDED/FAILED [推論]
-  status        String    @default("PENDING")
-  errorCode     String?   @map("error_code")
+  status             String    @default("PENDING")
+  errorCode          String?   @map("error_code")
   /// 新設(2026-08-21): Anthropic Batch API経由の実行はtrue(料金は50%引きで
   /// costMicros算出済み)。レポート・監査用に区別できるようにする。
-  batch         Boolean   @default(false)
-  startedAt     DateTime  @default(now()) @map("started_at")
-  finishedAt    DateTime? @map("finished_at")
+  batch              Boolean   @default(false)
+  startedAt          DateTime  @default(now()) @map("started_at")
+  finishedAt         DateTime? @map("finished_at")
+  /// [M1-B6C-2新設・2026-09-01 Gate M1-B6C-2「Source Anchor live配線」]
+  /// 文字起こしAiRun(transcribeAudioJob.ts)がProviderから受け取った
+  /// `AiTranscriptionSegment[]`をそのまま保存する。従来はProvider応答から
+  /// `outcome.text`だけを取り出しCapture.rawTextへ書き、segments自体は
+  /// 破棄していたため、AUDIO_TIMECODE Source Anchorをlive dataから
+  /// 構築する手段が無かった(指示書§4「Source Anchor adapterがlive
+  /// audio/image pipelineへ未接続」)。文字起こし以外のAiRun(抽出・PEM等)
+  /// では常にnull。
+  transcriptSegments Json?     @map("transcript_segments")
 
   inferences        AiInference[]
   /// [M1-B6C-1新設] このAiRunに対応するFormation shadow projection checkpoint。

@@ -153,6 +153,7 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
       domainId: capture.domainId,
       createdById: capture.createdById,
       rawText: capture.rawText,
+      sourceType: capture.sourceType,
     });
     return { status: "READY", inferenceCount };
   }
@@ -235,6 +236,7 @@ export async function finalizeBatchExtraction(
           domainId: capture.domainId,
           createdById: capture.createdById,
           rawText: capture.rawText,
+          sourceType: capture.sourceType,
         }
       : undefined,
   );

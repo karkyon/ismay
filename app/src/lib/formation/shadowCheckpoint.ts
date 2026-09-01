@@ -240,6 +240,7 @@ export async function processShadowCheckpoint(checkpointId: string): Promise<Pro
     domainId: capture.domainId,
     createdById: capture.createdById,
     rawText: capture.rawText,
+    sourceType: capture.sourceType,
   };
 
   // [idempotent pre-check] 既にこのAiRunに対応するFormationSessionが存在するなら

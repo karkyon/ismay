@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { db } from "@/lib/db";
-import type { Prisma } from "@/generated/prisma/client";
+import { Prisma } from "@/generated/prisma/client";
+import type { AiTranscriptionSegment } from "@/lib/ai/transcriptionProvider";
+import { locateTranscriptSegmentCharOffsets, findAudioSegmentForSpan } from "@/lib/formation/transcriptSegmentMapping";
+import { buildAudioTimecodeAnchorFields } from "@/lib/formation/sourceAnchorAdapter";
 import { debugServer } from "@/lib/debugServer";
 import type { ResponsibilityCandidate } from "@/lib/ai/schema";
 import { resolveFormationSessionTransition, isValidTextOffsetRange, capConfidenceForMissingEvidence, type FormationEventType } from "@/lib/formation/coreTypes";
@@ -49,6 +52,9 @@ export interface ShadowSourceCaptureContext {
   domainId: string | null;
   createdById: string;
   rawText: string;
+  /// [M1-B6C-2新設・2026-09-01] AUDIO_TIMECODE Anchorをsourceで絞り込むために必要
+  /// (VOICE以外のCaptureに対しては音声timecode検索自体を試みない)。
+  sourceType: string;
 }
 
 export interface WriteShadowFormationSessionParams {
@@ -135,6 +141,28 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
           where: { id: session.id },
           data: { state: toFailed, version: { increment: 1 } },
         });
+      }
+
+      // [M1-B6C-2新設・2026-09-01 Gate M1-B6C-2「Source Anchor live配線」]
+      // candidateループの外で1回だけ、このCaptureに対応する文字起こしAiRunの
+      // segmentsを取得し、rawText内での文字offsetへ位置特定しておく
+      // (候補ごとに毎回DBを読みに行く必要はない。同一Captureに対して同じ結果)。
+      // sourceType!=="VOICE"の場合、および音声だが文字起こしAiRunが見つからない
+      // 場合(このGate以前のCapture、話題分割された子Capture等)は`located`が
+      // 空配列のままとなり、AUDIO_TIMECODE Anchorは全てUNAVAILABLEになる
+      // (捏造しない。transcriptSegmentMapping.tsのモジュールコメント参照)。
+      let locatedAudioSegments: ReturnType<typeof locateTranscriptSegmentCharOffsets> = [];
+      if (capture.sourceType === "VOICE") {
+        const transcriptionAiRun = await tx.aiRun.findFirst({
+          where: { captureId: capture.id, transcriptSegments: { not: Prisma.DbNull } },
+          orderBy: { startedAt: "desc" },
+        });
+        if (transcriptionAiRun?.transcriptSegments) {
+          locatedAudioSegments = locateTranscriptSegmentCharOffsets(
+            capture.rawText,
+            transcriptionAiRun.transcriptSegments as unknown as AiTranscriptionSegment[],
+          );
+        }
       }
 
       for (const candidate of candidates) {
@@ -239,6 +267,34 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
             end: span.end,
             validRange,
           });
+
+          // [M1-B6C-2新設・2026-09-01] VOICE Captureの場合、同じevidence根拠に
+          // 対してAUDIO_TIMECODE Anchorも追加で記録する。TEXT_OFFSET Anchorを
+          // 置き換えるのではなく併記する(§4「evidenceとsegmentを対応できない
+          // 場合は捏造せずUNAVAILABLE/TEXT_OFFSET fallback」に従い、TEXT_OFFSETは
+          // 常に事実として残し、AUDIO_TIMECODEは分かる場合の追加情報として扱う)。
+          if (capture.sourceType === "VOICE") {
+            const matchedSegment = validRange ? findAudioSegmentForSpan(locatedAudioSegments, span.start, span.end) : null;
+            const audioFields = buildAudioTimecodeAnchorFields(
+              matchedSegment ? { startMs: matchedSegment.startMs, endMs: matchedSegment.endMs, text: "" } : null,
+              matchedSegment ? matchedSegment.segmentIndex : null,
+            );
+            await tx.formationSourceAnchor.create({
+              data: {
+                workspaceId: capture.workspaceId,
+                revisionId: revision.id,
+                sourceKind: "AUDIO_TIMECODE",
+                captureId: capture.id,
+                excerptHash,
+                quality: audioFields.quality,
+                unavailableReason: audioFields.unavailableReason,
+                audioStartMs: audioFields.audioStartMs,
+                audioEndMs: audioFields.audioEndMs,
+                segmentIndex: audioFields.segmentIndex,
+                piiClassification: classifyPii(excerpt),
+              },
+            });
+          }
         }
       }
 
