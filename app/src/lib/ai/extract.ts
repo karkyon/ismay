@@ -30,7 +30,7 @@ export type ExtractionRunResult =
    *  結果はまだ届いていない。呼び出し元(aiExtractJob.ts)はJobをAWAITING_BATCHへ遷移させる。 */
   | { status: "BATCH_PENDING"; batchId: string; processingVersion: number };
 
-export async function runExtractionForCapture(captureId: string): Promise<ExtractionRunResult> {
+export async function runExtractionForCapture(captureId: string, attachToSessionId?: string): Promise<ExtractionRunResult> {
   const capture = await db.capture.findUnique({
     where: { id: captureId },
     include: { domain: true },
@@ -154,7 +154,7 @@ export async function runExtractionForCapture(captureId: string): Promise<Extrac
       createdById: capture.createdById,
       rawText: capture.rawText,
       sourceType: capture.sourceType,
-    });
+    }, attachToSessionId);
     return { status: "READY", inferenceCount };
   }
 
@@ -258,6 +258,9 @@ async function persistSuccess(
    * スキップする。
    */
   shadowContext?: ShadowSourceCaptureContext,
+  /** [M1-B6C-4新設・2026-09-01指示書§6.3「retry orchestration」] retryFormationSession
+   *  経由の再解析の場合、新規Sessionを作らずこのSessionへ追記するためのID。 */
+  attachToSessionId?: string,
 ): Promise<number> {
   const { count, checkpointId } = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const run = await tx.aiRun.create({
@@ -334,6 +337,7 @@ async function persistSuccess(
         aiRunId: run.id,
         schemaVersion: ai.schemaVersion,
         candidateCount: result.candidates.length,
+        attachToSessionId,
       });
       checkpointId = checkpoint.id;
     }

@@ -228,6 +228,11 @@ export async function cleanupFormationVerifyUser(db: Db, userId: string): Promis
     // capture_id(→captures)の両方への複合/単一FKを持つため、aiRun.deleteMany/
     // capture.deleteManyより先に削除する(formationQuestion等と同じ追随漏れ防止パターン)。
     await step(errors, "formationShadowCheckpoint.deleteMany", () => db.formationShadowCheckpoint.deleteMany({ where: { captureId: { in: captureIds } } }), { count: 0 });
+    // [M1-B6C-4新設・2026-09-02] retry orchestrationがJob(jobType=AI_EXTRACT)を
+    // captureId=aggregateIdとして作成しうるため、capture.deleteManyより先に削除する
+    // (JobはCaptureへの正式なDB FKを持たないため放置してもFK違反にはならないが、
+    // test data cleanup 0件を保証するため明示的に削除する)。
+    await step(errors, "job.deleteMany(AI_EXTRACT)", () => db.job.deleteMany({ where: { jobType: "AI_EXTRACT", aggregateId: { in: captureIds } } }), { count: 0 });
     await step(errors, "aiInference.deleteMany", () => db.aiInference.deleteMany({ where: { captureId: { in: captureIds } } }), { count: 0 });
     await step(errors, "aiRun.deleteMany", () => db.aiRun.deleteMany({ where: { captureId: { in: captureIds } } }), { count: 0 });
     await step(errors, "capture.deleteMany", () => db.capture.deleteMany({ where: { id: { in: captureIds } } }), {

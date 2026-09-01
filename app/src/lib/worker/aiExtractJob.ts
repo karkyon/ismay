@@ -38,7 +38,7 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
     if (claimed.count === 0) continue;
     debugServer.state("Worker/aiExtractJob", "Job.status", { jobId: job.id, status: "RUNNING" });
 
-    const payload = job.payload as { captureId?: string } | null;
+    const payload = job.payload as { captureId?: string; attachToSessionId?: string } | null;
     const captureId = payload?.captureId;
     if (!captureId) {
       await db.job.update({
@@ -49,7 +49,7 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
     }
 
     try {
-      const result = await runExtractionForCapture(captureId);
+      const result = await runExtractionForCapture(captureId, payload?.attachToSessionId);
       debugServer.event("Worker/aiExtractJob", "runExtractionForCapture", {
         jobId: job.id,
         captureId,
@@ -58,6 +58,12 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
       if (result.status === "BATCH_PENDING") {
         // [2026-08-21追加] Anthropic Batchへ投入済み。Jobを完了扱いにせず、
         // AWAITING_BATCHへ遷移させてbatchPollJob.tsのポーリング対象にする。
+        // [M1-B6C-4新設・§6.3・既知の限界] payload.attachToSessionId(retryの場合)は
+        // ここで意図的に引き継がない。BATCH経路(finalizeBatchExtraction)へ
+        // attachToSessionIdを通す配線は本Gateのscope外(REALTIME経路のみ対応、
+        // 別Patchで拡張する)。引き継がなくても、finalizeBatchExtraction側は
+        // 単に新規Sessionを作る従来動作にfallbackするだけで、データ破損や
+        // クラッシュにはならない(グレースフルな劣化)。
         await db.job.update({
           where: { id: job.id },
           data: {

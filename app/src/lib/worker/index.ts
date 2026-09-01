@@ -4,6 +4,7 @@ import { processTranscribeAudioJobs } from "@/lib/worker/transcribeAudioJob";
 import { processOcrImageJobs } from "@/lib/worker/ocrImageJob";
 import { processAwaitingBatchJobs } from "@/lib/worker/batchPollJob";
 import { processShadowReconciliation } from "@/lib/worker/shadowReconciliationJob";
+import { reconcileStuckRetryOrchestrations } from "@/lib/formation/retryOrchestration";
 import { processNotificationScan } from "@/lib/worker/notificationScanJob";
 import { processCycleRotation } from "@/lib/worker/cycleRotationJob";
 import { processRecurrenceGeneration } from "@/lib/worker/recurrenceGenerationJob";
@@ -41,6 +42,10 @@ async function tick(): Promise<void> {
     // stale RUNNING回収+PENDING/RETRY_WAITのbatch処理を5秒tickの中で行う
     // (batchPollJob等と同じ自己スロットリング不要な軽量ポーリング)。
     const shadowReconciliationResult = await processShadowReconciliation();
+    // M1-B6C-4(2026-09-02新設・§6.3): 「Session=ANALYZINGだがretry Job投入が
+    // まだ完了していない」ものを検出し再試行する(新tableを作らず既存状態の
+    // 不整合自体をqueueとして扱う、shadow checkpointと同じ設計思想)。
+    const retryOrchestrationResult = await reconcileStuckRetryOrchestrations();
     // FN-NTF-01(2026-08-22新設): 通知スキャンは60秒間隔の自己スロットリングを
     // 内部で持つため、5秒tickの中で毎回呼び出しても実処理は間引かれる。
     const notificationResult = await processNotificationScan();
@@ -59,6 +64,7 @@ async function tick(): Promise<void> {
       batchResult.processed > 0 ||
       shadowReconciliationResult.processed > 0 ||
       shadowReconciliationResult.reclaimed > 0 ||
+      retryOrchestrationResult.reconciled > 0 ||
       notificationResult.processed > 0 ||
       cycleResult.processed > 0 ||
       recurrenceResult.processed > 0 ||
@@ -72,6 +78,7 @@ async function tick(): Promise<void> {
         batchProcessed: batchResult.processed,
         shadowCheckpointProcessed: shadowReconciliationResult.processed,
         shadowCheckpointReclaimed: shadowReconciliationResult.reclaimed,
+        retryOrchestrationReconciled: retryOrchestrationResult.reconciled,
         notificationProcessed: notificationResult.processed,
         cycleProcessed: cycleResult.processed,
         recurrenceProcessed: recurrenceResult.processed,

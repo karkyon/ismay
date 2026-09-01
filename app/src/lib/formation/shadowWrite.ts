@@ -63,10 +63,17 @@ export interface WriteShadowFormationSessionParams {
   schemaVersion: string;
   candidates: ResponsibilityCandidate[];
   captureSummary?: string;
+  /** [M1-B6C-4新設・2026-09-01指示書§6.3「retry orchestration」] 指定時、新規
+   *  FormationSessionを作らず、既存Session(RETRYで既にANALYZING状態へ遷移済み)へ
+   *  このAiRunの結果を新しいanalysis attemptとして追加する。指定Sessionが存在しない
+   *  /workspaceId・captureIdが一致しない/ANALYZING状態でない場合はthrowする
+   *  (想像で新規Sessionへfallbackしない。呼び出し元のcheckpoint機構が再試行/
+   *  DEAD_LETTER判定する)。 */
+  attachToSessionId?: string;
 }
 
 export async function writeShadowFormationSession(params: WriteShadowFormationSessionParams): Promise<void> {
-  const { capture, aiRunId, schemaVersion, candidates, captureSummary } = params;
+  const { capture, aiRunId, schemaVersion, candidates, captureSummary, attachToSessionId } = params;
 
   if (!capture.domainId) {
     // FormationSession.domainIdは必須(DOC-03 4章)。CaptureのdomainIdが未設定の場合
@@ -82,18 +89,46 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
       // 自然に弾かれる(既存captures_idempotency_key等と同じ設計)。
       const clientSessionKey = `shadow:${aiRunId}`;
 
-      const session = await tx.formationSession.create({
-        data: {
-          workspaceId: capture.workspaceId,
-          domainId: capture.domainId as string,
-          subjectUserId: capture.createdById,
-          captureId: capture.id,
-          clientSessionKey,
-          state: "DRAFT",
-        },
-      });
+      let session: { id: string; questionCount: number };
+      let sequence: number;
 
-      let sequence = 1;
+      if (attachToSessionId) {
+        // [M1-B6C-4新設・§6.3] retry attach path: 新規Sessionを作らず既存へ追記する。
+        const existing = await tx.formationSession.findFirst({
+          where: { id: attachToSessionId, workspaceId: capture.workspaceId, captureId: capture.id },
+          select: { id: true, state: true, questionCount: true },
+        });
+        if (!existing) {
+          throw new Error(`RETRY_ATTACH_SESSION_NOT_FOUND: sessionId=${attachToSessionId}`);
+        }
+        if (existing.state !== "ANALYZING") {
+          // 想像で先へ進まない: retryFormationSessionがFAILED→ANALYZINGへ遷移させた
+          // 直後のはずだが、想定外に他状態(例: 二重retry・並行操作)になっていた場合は
+          // 新candidateを誤って書き込まず失敗させる(checkpoint機構が観測・再試行する)。
+          throw new Error(`RETRY_ATTACH_SESSION_INVALID_STATE: sessionId=${attachToSessionId} state=${existing.state}`);
+        }
+        session = { id: existing.id, questionCount: existing.questionCount };
+        const lastEvent = await tx.formationSessionEvent.findFirst({
+          where: { workspaceId: capture.workspaceId, sessionId: session.id },
+          orderBy: { sequence: "desc" },
+          select: { sequence: true },
+        });
+        sequence = (lastEvent?.sequence ?? 0) + 1;
+      } else {
+        const created = await tx.formationSession.create({
+          data: {
+            workspaceId: capture.workspaceId,
+            domainId: capture.domainId as string,
+            subjectUserId: capture.createdById,
+            captureId: capture.id,
+            clientSessionKey,
+            state: "DRAFT",
+          },
+        });
+        session = { id: created.id, questionCount: created.questionCount };
+        sequence = 1;
+      }
+
       const emit = (eventType: FormationEventType, payload: object) =>
         tx.formationSessionEvent.create({
           data: {
@@ -106,19 +141,24 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
           },
         });
 
-      await emit("FORMATION_CREATED", { captureId: capture.id });
+      if (!attachToSessionId) {
+        await emit("FORMATION_CREATED", { captureId: capture.id });
 
-      // DRAFT --START_ANALYSIS--> ANALYZING。coreTypes.tsの状態機械を実際に参照することで、
-      // 正本の遷移表とshadow書込みの整合を機械的に保つ(遷移表を書き換えたときに
-      // ここが追随漏れしないよう、遷移先を直接この関数がハードコードしない)。
-      // [2026-08-30是正] 操作名をDOC-03語彙"ANALYZE"から統合正本§6.3語彙
-      // "START_ANALYSIS"へ置換。
-      const toAnalyzing = resolveFormationSessionTransition("DRAFT", "START_ANALYSIS");
-      if (!toAnalyzing) throw new Error("coreTypes不整合: DRAFT--START_ANALYSIS-->の遷移が定義されていません");
-      await tx.formationSession.update({
-        where: { id: session.id },
-        data: { state: toAnalyzing, version: { increment: 1 } },
-      });
+        // DRAFT --START_ANALYSIS--> ANALYZING。coreTypes.tsの状態機械を実際に参照することで、
+        // 正本の遷移表とshadow書込みの整合を機械的に保つ(遷移表を書き換えたときに
+        // ここが追随漏れしないよう、遷移先を直接この関数がハードコードしない)。
+        // [2026-08-30是正] 操作名をDOC-03語彙"ANALYZE"から統合正本§6.3語彙
+        // "START_ANALYSIS"へ置換。
+        const toAnalyzing = resolveFormationSessionTransition("DRAFT", "START_ANALYSIS");
+        if (!toAnalyzing) throw new Error("coreTypes不整合: DRAFT--START_ANALYSIS-->の遷移が定義されていません");
+        await tx.formationSession.update({
+          where: { id: session.id },
+          data: { state: toAnalyzing, version: { increment: 1 } },
+        });
+      }
+      // [M1-B6C-4新設・§6.3] attach path(retry)ではSessionは既にANALYZING
+      // (retryFormationSessionのFAILED--RETRY-->ANALYZING遷移による)なので、
+      // このEventだけを「新しいanalysis attemptが開始した」証跡として追記する。
       await emit("ANALYSIS_REQUESTED", { aiRunId });
 
       // ANALYZING --success--> 候補作成後、Question Policyで質問要否を判定して
@@ -303,7 +343,10 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
           tx,
           workspaceId: capture.workspaceId,
           sessionId: session.id,
-          questionCountBefore: 0,
+          // [M1-B6C-4是正・§6.3] 新規Session作成時は常に0だが、retry attach path
+          // では既存Sessionの実際のquestionCountを使う必要がある(生涯合計3問の
+          // 上限を跨いで守るため、想像で0にリセットしない)。
+          questionCountBefore: session.questionCount,
           candidates: createdCandidates,
           actorType: "SYSTEM",
           actorUserId: null,

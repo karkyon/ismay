@@ -4,6 +4,7 @@ import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { retryFormationSession } from "@/lib/formation/sessionLifecycle";
+import { orchestrateRetryAnalysis } from "@/lib/formation/retryOrchestration";
 
 /**
  * V5-M1-B6B: POST /formation-sessions/{id}/retry
@@ -11,14 +12,21 @@ import { retryFormationSession } from "@/lib/formation/sessionLifecycle";
  *       (2026-08-31) Gate M1-B6B Session Lifecycle。
  * FAILED --RETRY--> ANALYZING。
  *
- * [scope・重要] このrouteは状態遷移とEvent記録のみを行う。「同じSessionで
- * 新AiRunを作り、旧Event/Candidateを失わない」の後半(旧Event/Candidate保持)は
- * このrouteの実装(遷移のみ・削除処理を一切含まない)により自動的に満たされる。
- * 前半(新AiRunの実際の起動=既存extract.tsパイプラインの呼出し)は、AI課金を
- * 伴う実Provider呼出しのため、このPatchでは意図的に実装しない
- * (INTEGRATION-EVIDENCE-PENDING。ユーザー明示承認なしにAI Providerを呼ばない、
- * という既存方針に従う)。状態がANALYZINGへ遷移した後、実際の再抽出起動は
- * 別途手動または既存のCapture解析flowから行う想定。
+ * [M1-B6C-4 §6.3是正・2026-09-01] 従来このrouteは状態遷移とEvent記録のみを行い、
+ * 実際の再解析を起動しなかった(「別途手動または既存のCapture解析flowから行う
+ * 想定」)。retryFormationSessionのlifecycle transactionが確定した"後"に、
+ * `orchestrateRetryAnalysis`で既存のOutbox/Job基盤(relay.ts→aiExtractJob.ts→
+ * extract.ts)へ抽出Jobを冪等投入し、実際にAI再抽出(Provider stubを含む既存
+ * pipeline)が起動するところまで閉じる。「旧Event/Candidateを失わない」性質は
+ * 変更なし(retryFormationSession自体もorchestrateRetryAnalysisも削除処理を
+ * 一切含まない)。「新AiRunを同一Sessionの新analysis attemptとして記録する」は
+ * shadowWrite.tsのattachToSessionId機構で実現する(新規Session重複作成を防ぐ)。
+ *
+ * [Job投入失敗時] Session状態遷移は既に確定済みであり、それを巻き戻さない
+ * (courseypes transitionは既に確定した事実であり、Job投入の成否とは独立)。
+ * 投入に失敗した場合はレスポンスの`analysisQueued:false`で示し、
+ * `reconcileStuckRetryOrchestrations`(worker/index.tsから定期実行)が
+ * 「Session=ANALYZINGだがCaptureはFAILEDのまま」を検出して自動的に再試行する。
  */
 
 const RetryRequestSchema = z.object({
@@ -77,8 +85,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     }
   }
 
+  // [M1-B6C-4新設・§6.3] lifecycle transaction確定後にOutbox/Jobを冪等投入する。
+  // ここが失敗してもSession状態遷移は既に確定済みのため、リクエスト自体は成功
+  // として返す(analysisQueuedで実際の投入結果を示す)。
+  const orchestration = await orchestrateRetryAnalysis({ sessionId, workspaceId });
+  const analysisQueued = orchestration.ok ? orchestration.queued : false;
+
   return apiOk(
-    { fromState: result.fromState, toState: result.toState, replay: result.replay },
+    { fromState: result.fromState, toState: result.toState, replay: result.replay, analysisQueued },
     { status: result.replay ? 200 : 201 },
   );
 }

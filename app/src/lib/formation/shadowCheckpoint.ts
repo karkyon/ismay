@@ -47,6 +47,8 @@ export interface CreateShadowCheckpointParams {
   aiRunId: string;
   schemaVersion: string;
   candidateCount: number;
+  /** [M1-B6C-4新設・§6.3] retryによる新analysis attemptの場合、対象SessionのID。 */
+  attachToSessionId?: string;
 }
 
 /**
@@ -60,6 +62,7 @@ export function computeShadowCheckpointRequestHash(input: {
   aiRunId: string;
   schemaVersion: string;
   candidateCount: number;
+  attachToSessionId?: string;
 }): string {
   return createHash("sha256")
     .update(
@@ -69,6 +72,9 @@ export function computeShadowCheckpointRequestHash(input: {
         aiRunId: input.aiRunId,
         schemaVersion: input.schemaVersion,
         candidateCount: input.candidateCount,
+        // [M1-B6C-4新設・§6.3] attachToSessionIdもdrift検知対象に含める
+        // (作成時と処理時とでcheckpointの「意図」自体が変化していないことを保証する)。
+        attachToSessionId: input.attachToSessionId ?? null,
       }),
     )
     .digest("hex");
@@ -88,6 +94,7 @@ export async function createShadowCheckpoint(
       requestHash,
       status: "PENDING",
       nextRunAt: new Date(),
+      attachToSessionId: params.attachToSessionId ?? null,
     },
   });
   return { id: checkpoint.id };
@@ -243,21 +250,39 @@ export async function processShadowCheckpoint(checkpointId: string): Promise<Pro
     sourceType: capture.sourceType,
   };
 
-  // [idempotent pre-check] 既にこのAiRunに対応するFormationSessionが存在するなら
-  // (前回attemptがtx commit後・checkpoint更新前にcrashした等)、再実行せず
-  // SUCCEEDEDへ収束させる(同一aiRun replayでCandidate/Event重複0を保証)。
-  const clientSessionKey = `shadow:${checkpoint.aiRunId}`;
-  const existingSession = await db.formationSession.findUnique({
-    where: {
-      workspaceId_captureId_clientSessionKey: {
+  // [idempotent pre-check] 既にこのAiRunの結果が反映済みなら(前回attemptがtx
+  // commit後・checkpoint更新前にcrashした等)、再実行せずSUCCEEDEDへ収束させる
+  // (同一aiRun replayでCandidate/Event重複0を保証)。
+  // [M1-B6C-4新設・§6.3] attach path(retry)では新規FormationSessionを作らない
+  // ため、既存Session存在チェックではなく、対象SessionのANALYSIS_REQUESTED
+  // Eventにこのaiだけを表すことのできるaiRunIdが既に記録済みかどうかで判定する。
+  let alreadyDone = false;
+  if (checkpoint.attachToSessionId) {
+    const existingEvent = await db.formationSessionEvent.findFirst({
+      where: {
         workspaceId: checkpoint.workspaceId,
-        captureId: checkpoint.captureId,
-        clientSessionKey,
+        sessionId: checkpoint.attachToSessionId,
+        eventType: "ANALYSIS_REQUESTED",
+        payload: { path: ["aiRunId"], equals: checkpoint.aiRunId },
       },
-    },
-    select: { id: true },
-  });
-  if (existingSession) {
+      select: { id: true },
+    });
+    alreadyDone = !!existingEvent;
+  } else {
+    const clientSessionKey = `shadow:${checkpoint.aiRunId}`;
+    const existingSession = await db.formationSession.findUnique({
+      where: {
+        workspaceId_captureId_clientSessionKey: {
+          workspaceId: checkpoint.workspaceId,
+          captureId: checkpoint.captureId,
+          clientSessionKey,
+        },
+      },
+      select: { id: true },
+    });
+    alreadyDone = !!existingSession;
+  }
+  if (alreadyDone) {
     return succeed();
   }
 
@@ -280,6 +305,7 @@ export async function processShadowCheckpoint(checkpointId: string): Promise<Pro
     aiRunId: checkpoint.aiRunId,
     schemaVersion: aiRun.schemaVersion,
     candidateCount: inferences.length,
+    attachToSessionId: checkpoint.attachToSessionId ?? undefined,
   });
   if (recomputedHash !== checkpoint.requestHash) {
     return fail("DEAD_LETTER", "CORRUPTED_CHECKPOINT_DATA", classifyError("requestHash mismatch").digest);
@@ -312,6 +338,7 @@ export async function processShadowCheckpoint(checkpointId: string): Promise<Pro
       schemaVersion: aiRun.schemaVersion,
       candidates,
       captureSummary: undefined,
+      attachToSessionId: checkpoint.attachToSessionId ?? undefined,
     });
   } catch (err) {
     const { code, digest } = classifyError(err);
