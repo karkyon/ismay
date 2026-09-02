@@ -24,7 +24,10 @@ export type ErrorCode =
   /** [2026-08-27追加・V5-M1-A2] DOC-02(用語・状態・EventCode定義書) 8章
    * `409 PRIMARY_CONTEXT_CONFLICT`。ProjectContextLinkの
    * active PRIMARY一意制約(project_context_links_one_active_primary)違反時に使う。 */
-  | "PRIMARY_CONTEXT_CONFLICT";
+  | "PRIMARY_CONTEXT_CONFLICT"
+  /** [M1-C3新設・2026-09-02] 統合正本v5.0 §11.4「分解Transaction」。既に
+   * supersededByReceiptIdが設定済みのResponsibilityへ再度SPLITを要求した場合。 */
+  | "ALREADY_SPLIT";
 
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   VALIDATION_FAILED: 400,
@@ -38,6 +41,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   VERSION_CONFLICT: 409,
   IDEMPOTENCY_KEY_REUSED: 409,
   PRIMARY_CONTEXT_CONFLICT: 409,
+  ALREADY_SPLIT: 409,
   STATE_TRANSITION_INVALID: 422,
   RATE_LIMITED: 429,
   AI_TEMPORARILY_UNAVAILABLE: 503,

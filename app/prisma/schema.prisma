@@ -49,40 +49,44 @@ model User {
   updatedAt                 DateTime  @updatedAt @map("updated_at")
   deletedAt                 DateTime? @map("deleted_at")
 
-  workspaceMembers                       WorkspaceMember[]
-  sessions                               UserSession[]
-  totpSecret                             UserTotpSecret?
-  capturesCreated                        Capture[]                         @relation("CaptureCreatedBy")
-  responsibilitiesCreated                Responsibility[]                  @relation("ResponsibilityCreatedBy")
-  responsibilitiesUpdated                Responsibility[]                  @relation("ResponsibilityUpdatedBy")
-  pemObservations                        PemObservation[]
-  pemHypotheses                          PemHypothesis[]
-  pemOnboardingConversations             PemOnboardingConversation[]
-  pemWeeklyReviews                       PemWeeklyReview[]
-  pemConsentEvents                       PemConsentEvent[]
-  pemMetricConsentEvents                 PemMetricConsentEvent[]
-  pemEvidenceDeletionEvents              PemEvidenceDeletionEvent[]
-  bootstrapAssertions                    BootstrapAssertion[]
-  notifications                          Notification[]
-  auditLogsAsActor                       AuditLog[]                        @relation("AuditActorUser")
+  workspaceMembers                        WorkspaceMember[]
+  sessions                                UserSession[]
+  totpSecret                              UserTotpSecret?
+  capturesCreated                         Capture[]                         @relation("CaptureCreatedBy")
+  responsibilitiesCreated                 Responsibility[]                  @relation("ResponsibilityCreatedBy")
+  responsibilitiesUpdated                 Responsibility[]                  @relation("ResponsibilityUpdatedBy")
+  pemObservations                         PemObservation[]
+  pemHypotheses                           PemHypothesis[]
+  pemOnboardingConversations              PemOnboardingConversation[]
+  pemWeeklyReviews                        PemWeeklyReview[]
+  pemConsentEvents                        PemConsentEvent[]
+  pemMetricConsentEvents                  PemMetricConsentEvent[]
+  pemEvidenceDeletionEvents               PemEvidenceDeletionEvent[]
+  bootstrapAssertions                     BootstrapAssertion[]
+  notifications                           Notification[]
+  auditLogsAsActor                        AuditLog[]                        @relation("AuditActorUser")
   /// [V5-M1-A1新設] Context本人(観測対象)としての逆relation。
-  projectContextsOwned                   ProjectContext[]                  @relation("ProjectContextOwner")
+  projectContextsOwned                    ProjectContext[]                  @relation("ProjectContextOwner")
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
   /// 同一model内に無いため)。
-  formationSessionsAsSubject             FormationSession[]
-  formationSessionEventsAsActor          FormationSessionEvent[]
-  formationAnswerEventsAsActor           FormationAnswerEvent[]
-  formationCandidateDecisionsAsActor     FormationCandidateDecisionEvent[]
+  formationSessionsAsSubject              FormationSession[]
+  formationSessionEventsAsActor           FormationSessionEvent[]
+  formationAnswerEventsAsActor            FormationAnswerEvent[]
+  formationCandidateDecisionsAsActor      FormationCandidateDecisionEvent[]
   /// [2026-08-30新設・M1-C2A] FormationAtomicityOverride.actorUserId逆参照。
-  formationAtomicityOverridesAsActor     FormationAtomicityOverride[]
+  formationAtomicityOverridesAsActor      FormationAtomicityOverride[]
   /// [2026-08-30新設・M1-C2B] FormationCandidateMergeEvent.actorUserId逆参照。
-  formationCandidateMergeEventsAsActor   FormationCandidateMergeEvent[]
+  formationCandidateMergeEventsAsActor    FormationCandidateMergeEvent[]
   /// [M1-B6B新設・2026-08-31指示書 Session Lifecycle]
-  formationSessionLifecycleEventsAsActor FormationSessionLifecycleEvent[]
+  formationSessionLifecycleEventsAsActor  FormationSessionLifecycleEvent[]
   /// [V5-M1-A1新設] Context作成者としての逆relation。
-  projectContextsCreated                 ProjectContext[]                  @relation("ProjectContextCreatedBy")
+  projectContextsCreated                  ProjectContext[]                  @relation("ProjectContextCreatedBy")
+  /// [M1-C3新設] ResponsibilityCorrectionReceipt.actorUserId逆参照。
+  responsibilityCorrectionReceiptsAsActor ResponsibilityCorrectionReceipt[]
+  /// [M1-C3B新設] ResponsibilityMergeReceipt.actorUserId逆参照。
+  responsibilityMergeReceiptsAsActor      ResponsibilityMergeReceipt[]
 
   @@map("users")
 }
@@ -288,21 +292,21 @@ model CaptureImage {
 
 /// TBL-006 responsibilities - 全責任の共通正本
 model Responsibility {
-  id                         String                         @id @default(uuid())
-  workspaceId                String                         @map("workspace_id")
-  workspace                  Workspace                      @relation(fields: [workspaceId], references: [id])
-  domainId                   String                         @map("domain_id")
-  domain                     Domain                         @relation(fields: [domainId], references: [id])
-  originCaptureId            String?                        @map("origin_capture_id")
-  originCapture              Capture?                       @relation(fields: [originCaptureId], references: [id])
+  id                         String                           @id @default(uuid())
+  workspaceId                String                           @map("workspace_id")
+  workspace                  Workspace                        @relation(fields: [workspaceId], references: [id])
+  domainId                   String                           @map("domain_id")
+  domain                     Domain                           @relation(fields: [domainId], references: [id])
+  originCaptureId            String?                          @map("origin_capture_id")
+  originCapture              Capture?                         @relation(fields: [originCaptureId], references: [id])
   /// 新設: AI採用によって生成された場合、元のAiInference.idを保持する。
   /// 同一Capture内の候補間依存関係(blockedByCandidateIds)をResponsibilityRelationへ
   /// 変換する際、「どの候補がどのResponsibilityになったか」を突き合わせるために使う。
-  originInferenceId          String?                        @map("origin_inference_id")
+  originInferenceId          String?                          @map("origin_inference_id")
   /// 新設(2026-08-21): PERT図でのノード位置(ドラッグして手動配置した場合に保存)。
   /// null時はフロント側の自動レイアウト(トポロジカル層)に従う。
-  graphX                     Float?                         @map("graph_x")
-  graphY                     Float?                         @map("graph_y")
+  graphX                     Float?                           @map("graph_x")
+  graphY                     Float?                           @map("graph_y")
   /// TASK/COMMITMENT/DECISION/WAITING/EVENT/RISK/CONCERN/HABIT/IDEA
   /// (v1.1注記: Constraintは含まない。Goalは本テーブルに現れない)
   type                       String
@@ -311,32 +315,50 @@ model Responsibility {
   status                     String
   importance                 Int?
   /// 0〜1
-  confidence                 Decimal?                       @db.Decimal(4, 3)
+  confidence                 Decimal?                         @db.Decimal(4, 3)
   /// USER/AI/IMPORT/SYSTEM
-  sourceKind                 String                         @map("source_kind")
-  hardDeadlineAt             DateTime?                      @map("hard_deadline_at")
-  targetAt                   DateTime?                      @map("target_at")
-  startAfterAt               DateTime?                      @map("start_after_at")
-  completedAt                DateTime?                      @map("completed_at")
+  sourceKind                 String                           @map("source_kind")
+  hardDeadlineAt             DateTime?                        @map("hard_deadline_at")
+  targetAt                   DateTime?                        @map("target_at")
+  startAfterAt               DateTime?                        @map("start_after_at")
+  completedAt                DateTime?                        @map("completed_at")
   /// FN-WK-03「今日の最低ライン」(2026-08-22新設)。最大3件まで固定できる
   /// (件数上限はAPI側で強制する)。Reality Mode変更時の差分表示は未実装(将来対応)。
-  pinned                     Boolean                        @default(false)
-  pinnedAt                   DateTime?                      @map("pinned_at")
-  version                    Int                            @default(0)
-  eventSequenceCounter       Int                            @default(0) @map("event_sequence_counter")
+  pinned                     Boolean                          @default(false)
+  pinnedAt                   DateTime?                        @map("pinned_at")
+  version                    Int                              @default(0)
+  eventSequenceCounter       Int                              @default(0) @map("event_sequence_counter")
   executionEvents            ResponsibilityExecutionEvent[]
   executionSessionIdentities ExecutionSessionIdentity[]
   /// [2026-08-25新設・Completion Gate 2.1、v4.0 8.1節] Correction/lifecycle記録。
   lifecycleEvents            ResponsibilityLifecycleEvent[]
   /// [2026-08-26新設・Undo Receipt] Bulk Complete Undoの正本レシート。
   bulkCompleteReceipts       BulkCompleteReceipt[]
-  createdById                String                         @map("created_by")
-  createdBy                  User                           @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])
-  updatedById                String                         @map("updated_by")
-  updatedBy                  User                           @relation("ResponsibilityUpdatedBy", fields: [updatedById], references: [id])
-  createdAt                  DateTime                       @default(now()) @map("created_at")
-  updatedAt                  DateTime                       @updatedAt @map("updated_at")
-  deletedAt                  DateTime?                      @map("deleted_at")
+  createdById                String                           @map("created_by")
+  createdBy                  User                             @relation("ResponsibilityCreatedBy", fields: [createdById], references: [id])
+  updatedById                String                           @map("updated_by")
+  updatedBy                  User                             @relation("ResponsibilityUpdatedBy", fields: [updatedById], references: [id])
+  createdAt                  DateTime                         @default(now()) @map("created_at")
+  updatedAt                  DateTime                         @updatedAt @map("updated_at")
+  deletedAt                  DateTime?                        @map("deleted_at")
+  /// [M1-C3新設・2026-09-02] このResponsibilityがSPLIT Correctionにより分割済みの
+  /// 場合、対応するResponsibilityCorrectionReceipt.id。出典: 統合正本仕様書v5.0
+  /// §11.4「本人が承認した場合のみ、元候補又は責任にSPLIT Correctionを追記し…
+  /// 元責任の履歴は削除しない」。
+  /// [設計判断] 元Responsibilityは物理削除せず、この列のみ設定する。既存statusの
+  /// 値集合(COMMON_STATUS/TYPE_SPECIFIC_STATUS、responsibility.ts)に「分割済み」に
+  /// 対応する語彙が無いため、想像で近い意味の既存値(NOT_NEEDED等)を流用せず、
+  /// statusは変更しない(履歴を読む側はこの列の有無で分割済みかを判定する)。
+  supersededByReceiptId      String?                          @map("superseded_by_receipt_id")
+  supersededByReceipt        ResponsibilityCorrectionReceipt? @relation("ResponsibilityCorrectionSuperseded", fields: [supersededByReceiptId, workspaceId], references: [id, workspaceId])
+  /// [M1-C3B新設・2026-09-02] このResponsibilityがMERGE Correctionにより
+  /// 統合済み(=別のResponsibilityへ吸収された側)の場合、対応する
+  /// ResponsibilityMergeReceipt.id。Split用のsupersededByReceiptIdとは独立した列
+  /// (N:1というMergeの入力形がSPLITの1:Nと非対称なため、別テーブル・別列とする。
+  /// formation_candidate_merge_events(Candidate Merge専用)がformation_candidate_
+  /// lineagesとは別テーブルである既存パターンと同じ設計判断)。
+  supersededByMergeReceiptId String?                          @map("superseded_by_merge_receipt_id")
+  supersededByMergeReceipt   ResponsibilityMergeReceipt?      @relation("ResponsibilityMergeSuperseded", fields: [supersededByMergeReceiptId, workspaceId], references: [id, workspaceId])
 
   taskDetail                  TaskDetail?
   commitmentDetail            CommitmentDetail?
@@ -344,8 +366,8 @@ model Responsibility {
   waitingDetail               WaitingDetail?
   constraints                 Constraint[]
   recurrenceRule              RecurrenceRule?
-  relationsFrom               ResponsibilityRelation[]     @relation("RelationFrom")
-  relationsTo                 ResponsibilityRelation[]     @relation("RelationTo")
+  relationsFrom               ResponsibilityRelation[]            @relation("RelationFrom")
+  relationsTo                 ResponsibilityRelation[]            @relation("RelationTo")
   evidences                   Evidence[]
   embedding                   ResponsibilityEmbedding?
   tags                        ResponsibilityTag[]
@@ -355,6 +377,20 @@ model Responsibility {
   projectContextLinkEvents    ProjectContextLinkEvent[]
   /// [V5-M1-B1新設] MaterializationReceiptItemからの複合FK参照先として必要。
   materializationReceiptItems MaterializationReceiptItem[]
+  /// [M1-C3新設] このResponsibilityを元(source)としたSPLIT Correction Receipt。
+  /// 通常0または1件(既に分割済みなら再分割は拒否するため)だが、DB制約としては
+  /// 複数許容し、application層(responsibilityCorrection.ts)で1回のみに制限する。
+  correctionsAsSource         ResponsibilityCorrectionReceipt[]   @relation("ResponsibilityCorrectionSource")
+  /// [M1-C3新設] このResponsibilityがSPLIT操作の結果として新規生成された場合の
+  /// ResultItem行(1対1、rcri_workspace_new_resp_uqで保証)。
+  correctionResultAsNew       ResponsibilityCorrectionResultItem?
+  /// [M1-C3B新設] このResponsibilityがMERGE操作の結果として新規生成された場合の
+  /// Receipt(1対1、mrr_new_resp_workspace_uqで保証)。
+  mergeReceiptAsNew           ResponsibilityMergeReceipt?
+  /// [M1-C3B新設] このResponsibilityがMERGE操作のsourceとして使われた場合の
+  /// SourceItem(1 Responsibilityにつき生涯1回のみMerge対象になれる、
+  /// mrsi_workspace_source_uqで保証)。
+  mergeSourceItemAsSource     ResponsibilityMergeSourceItem?
 
   /// [2026-08-24追加・Phase 0A是正2] ResponsibilityExecutionEventからの複合FK
   /// (responsibilityId, workspaceId)の参照先として必要(v4.0 4.1節「tenantを跨ぐ
@@ -2239,4 +2275,156 @@ model FormationShadowCheckpoint {
   @@index([status, nextRunAt])
   @@index([workspaceId, captureId])
   @@map("formation_shadow_checkpoints")
+}
+
+/// V5-M1-C3 TBL: responsibility_correction_receipts
+/// 出典: 統合正本仕様書v5.0 §11.4「分解Transaction」
+/// 「本人が承認した場合のみ、元候補又は責任にSPLIT Correctionを追記し、
+/// 新しいResponsibility群とRelationを同一transactionで作る。元責任の履歴は
+/// 削除しない。」EVAL・受入テスト仕様書 EV-A-004「split transaction |
+/// relation/source/receipt整合、部分失敗0」。
+///
+/// [対象範囲の明記] このtableはmaterialize済み(post-materialize)Responsibility
+/// 本体のSPLIT Correctionのみを扱う。Formation Candidate(materialize前)の
+/// 分解は既存の`formation_candidate_lineages`(splitCorrection.ts)が別途担当する
+/// (両者は対象そのものが異なるため、混同せず独立したtableとする)。
+///
+/// [scope宣言・M1-C3] このGateではSPLITのみを実装する。correctionTypeの値として
+/// "MERGE"を予約するが、Merge transaction本体(複数source統合)は別Gateで実装する
+/// (既存のformation_candidate_lineages.correctionKindがMERGE/SPLITを先行予約して
+/// から実装した既存パターンと同じ、想像で先行実装しない)。
+model ResponsibilityCorrectionReceipt {
+  id                     String         @id @default(uuid())
+  workspaceId            String         @map("workspace_id")
+  /// [tenant境界の二重防御] 既存BulkCompleteReceipt等と同じ複合FK参照方式。
+  sourceResponsibilityId String         @map("source_responsibility_id")
+  sourceResponsibility   Responsibility @relation("ResponsibilityCorrectionSource", fields: [sourceResponsibilityId, workspaceId], references: [id, workspaceId])
+  /// "SPLIT"(このGateで実装) | "MERGE"(値のみ予約、transaction本体は別Gate)。
+  correctionType         String         @map("correction_type")
+  /// SPLIT実行時点で固定した元Responsibilityのversion(splitCorrection.tsの
+  /// expectedRevisionと同じ楽観ロック設計。他の同時更新との競合を検出する)。
+  expectedVersion        Int            @map("expected_version")
+  /// project-contexts/[id]/links/route.tsと同じIdempotency-Keyヘッダ契約
+  /// (DEC-11「mutationはidempotencyKeyを持つ」)。
+  idempotencyKey         String         @map("idempotency_key")
+  /// 同一idempotencyKeyで異なるpayloadが再送された場合の409
+  /// (IDEMPOTENCY_KEY_REUSED)判定に使う。
+  requestPayloadHash     String         @map("request_payload_hash")
+  /// 本人が任意で入力する分割理由(Session Lifecycle DEFER/DISMISSと同じく理由任意)。
+  reasonCode             String?        @map("reason_code")
+  actorUserId            String         @map("actor_user_id")
+  actorUser              User           @relation(fields: [actorUserId], references: [id])
+  occurredAt             DateTime       @default(now()) @map("occurred_at")
+
+  /// [M1-C3新設] このSPLITで新規生成されたResponsibility群(N件、N>=2)。
+  resultItems                ResponsibilityCorrectionResultItem[]
+  /// [M1-C3新設] 元Responsibility.supersededByReceiptIdからの逆参照
+  /// (通常1件のみ。application層で1 Responsibilityにつき1 Receiptのみに制限)。
+  supersededResponsibilities Responsibility[]                     @relation("ResponsibilityCorrectionSuperseded")
+
+  /// [重要・前回是正] Responsibility.supersededByReceiptIdからの複合FK
+  /// (supersededByReceiptId, workspaceId)参照先として必要。この複合uniqueが
+  /// 無いとPrisma検証がP1012(「参照先が一意criterionを持たない」)で失敗する
+  /// (既存の全複合FK参照先modelと同じ命名規則・同じ理由)。
+  @@unique([id, workspaceId], map: "rcr_id_workspace_uq")
+  @@unique([workspaceId, idempotencyKey], map: "rcr_idempotency_uq")
+  @@index([workspaceId, sourceResponsibilityId])
+  @@map("responsibility_correction_receipts")
+}
+
+/// V5-M1-C3 TBL: responsibility_correction_result_items
+/// ResponsibilityCorrectionReceipt 1件(1回のSPLIT操作)につき、新規生成された
+/// Responsibility群を1行ずつ記録する(N>=2)。MaterializationReceiptItemと
+/// 同じ「Receipt本体1行+結果item複数行」設計を踏襲する。
+model ResponsibilityCorrectionResultItem {
+  id                  String                          @id @default(uuid())
+  workspaceId         String                          @map("workspace_id")
+  receiptId           String                          @map("receipt_id")
+  receipt             ResponsibilityCorrectionReceipt @relation(fields: [receiptId, workspaceId], references: [id, workspaceId])
+  newResponsibilityId String                          @map("new_responsibility_id")
+  newResponsibility   Responsibility                  @relation(fields: [newResponsibilityId, workspaceId], references: [id, workspaceId])
+  createdAt           DateTime                        @default(now()) @map("created_at")
+
+  /// 1 Responsibilityは高々1つのSPLIT結果としてしか生まれない
+  /// (Responsibility.correctionResultAsNewを1対1relationにするための一意制約)。
+  /// [P1012回避・BulkCompleteUndoConsumptionの教訓踏襲] 列順序を@relation(fields:
+  /// [newResponsibilityId, workspaceId], ...)と完全一致させる。
+  @@unique([newResponsibilityId, workspaceId], map: "rcri_new_resp_workspace_uq")
+  @@index([workspaceId, receiptId])
+  @@map("responsibility_correction_result_items")
+}
+
+/// V5-M1-C3B TBL: responsibility_merge_receipts
+/// 複数のmaterialize済みResponsibilityを1つの新Responsibilityへ統合する
+/// MERGE Correctionの正本レシート。出典: 統合正本仕様書v5.0 §12.8「本人が
+/// ACCEPT/EDIT/REJECT/MERGE/SPLITした結果をFeedbackとして蓄積する」
+/// (MERGE操作自体の存在を前提とする記述)、§11.4の分解Transaction原則を
+/// 統合方向にも適用する(元の履歴を削除せずCorrectionを追記する)。
+///
+/// [対象範囲の明記] このtableはmaterialize済み(post-materialize)Responsibility
+/// 本体のMERGEのみを扱う。Formation Candidate(materialize前)のMergeは既存の
+/// `formation_candidate_lineages`/`formation_candidate_merge_events`
+/// (mergeCorrection.ts)が別途担当する(対象そのものが異なる)。
+///
+/// [設計判断・独立テーブルとする理由] SplitはResponsibilityCorrectionReceipt
+/// (1 source→N result)を使うが、Mergeは逆にN source→1 resultであり、
+/// sourceを表す列の形がSplitと非対称(N:1 vs 1:N)。この非対称性は
+/// `splitCorrection.ts`のコメントでも「入力形がSPLITと非対称なため別途検討」と
+/// 指摘されていた。既存のformation_candidate_merge_events(Candidate Merge専用の
+/// 独立テーブル、formation_candidate_lineagesとは別)と同じ設計判断を踏襲し、
+/// Splitとは独立したReceipt/SourceItemテーブルを新設する(既存のSplit実装・
+/// migrationへの変更を避け、想像で無理に共通化しない)。
+model ResponsibilityMergeReceipt {
+  id                  String         @id @default(uuid())
+  workspaceId         String         @map("workspace_id")
+  /// MERGE操作の結果として新規生成された1件のResponsibility。
+  newResponsibilityId String         @map("new_responsibility_id")
+  newResponsibility   Responsibility @relation(fields: [newResponsibilityId, workspaceId], references: [id, workspaceId])
+  /// project-contexts/[id]/links/route.tsと同じIdempotency-Keyヘッダ契約。
+  idempotencyKey      String         @map("idempotency_key")
+  requestPayloadHash  String         @map("request_payload_hash")
+  reasonCode          String?        @map("reason_code")
+  actorUserId         String         @map("actor_user_id")
+  actorUser           User           @relation(fields: [actorUserId], references: [id])
+  occurredAt          DateTime       @default(now()) @map("occurred_at")
+
+  /// [M1-C3B新設] このMERGEに統合されたsource Responsibility群(N>=2)。
+  sourceItems                ResponsibilityMergeSourceItem[]
+  /// [M1-C3B新設] Responsibility.supersededByMergeReceiptIdからの逆参照。
+  supersededResponsibilities Responsibility[]                @relation("ResponsibilityMergeSuperseded")
+
+  /// [重要・Split前回是正の教訓踏襲] Responsibility.supersededByMergeReceiptIdからの
+  /// 複合FK参照先として必要(この複合uniqueが無いとP1012になる)。
+  @@unique([id, workspaceId], map: "mrr_id_workspace_uq")
+  @@unique([workspaceId, idempotencyKey], map: "mrr_idempotency_uq")
+  /// [P1012回避・1:1relation] Responsibility.mergeReceiptAsNewの参照先として、
+  /// @relation(fields: [newResponsibilityId, workspaceId], ...)と列順序を
+  /// 完全一致させたunique制約が必要。
+  @@unique([newResponsibilityId, workspaceId], map: "mrr_new_resp_workspace_uq")
+  @@map("responsibility_merge_receipts")
+}
+
+/// V5-M1-C3B TBL: responsibility_merge_source_items
+/// ResponsibilityMergeReceipt 1件(1回のMERGE操作)が統合したsource
+/// Responsibility群を1行ずつ記録する(N>=2)。
+model ResponsibilityMergeSourceItem {
+  id                     String                     @id @default(uuid())
+  workspaceId            String                     @map("workspace_id")
+  receiptId              String                     @map("receipt_id")
+  receipt                ResponsibilityMergeReceipt @relation(fields: [receiptId, workspaceId], references: [id, workspaceId])
+  sourceResponsibilityId String                     @map("source_responsibility_id")
+  sourceResponsibility   Responsibility             @relation(fields: [sourceResponsibilityId, workspaceId], references: [id, workspaceId])
+  /// MERGE実行時点で固定した各sourceのversion(splitCorrection.tsの
+  /// expectedRevisionと同じ楽観ロック設計。source1件ごとに個別のversionを持つ)。
+  expectedVersion        Int                        @map("expected_version")
+  createdAt              DateTime                   @default(now()) @map("created_at")
+
+  /// [核心制約] 1 Responsibilityは生涯高々1回しかMerge対象(source)になれない
+  /// (Responsibility.mergeSourceItemAsSourceを1対1relationにするための一意制約。
+  /// 既にMerge済み/Split済みのResponsibilityを別のMergeへ再度含めることを、
+  /// アプリケーション層のsupersededByReceiptId/supersededByMergeReceiptId検査に
+  /// 加え、DB制約でも二重に防ぐ)。
+  @@unique([sourceResponsibilityId, workspaceId], map: "mrsi_source_workspace_uq")
+  @@index([workspaceId, receiptId])
+  @@map("responsibility_merge_source_items")
 }
