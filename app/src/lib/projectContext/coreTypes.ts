@@ -140,3 +140,32 @@ export function hasConflictingActiveLinkForSamePair(
     (link) => link.unlinkedAt === null && link.responsibilityId === targetResponsibilityId,
   );
 }
+
+/**
+ * [M1-A4新設] External Reference Conflict Queueの状態(DOC-04 4章、
+ * EV-C-005「external snapshot conflict | conflict queue、LWW 0」)。
+ * この2値のみを正本とする(想像で他の値を追加しない)。
+ */
+export const EXTERNAL_REFERENCE_CONFLICT_STATUSES = ["PENDING", "RESOLVED"] as const;
+export type ExternalReferenceConflictStatus = (typeof EXTERNAL_REFERENCE_CONFLICT_STATUSES)[number];
+
+export function isValidExternalReferenceConflictStatus(
+  value: string,
+): value is ExternalReferenceConflictStatus {
+  return (EXTERNAL_REFERENCE_CONFLICT_STATUSES as readonly string[]).includes(value);
+}
+
+/**
+ * [M1-A4新設] Conflict解決時の選択(KEEP_LOCAL=既存観測を維持、
+ * APPLY_REMOTE=新しい値を採用)。本人が明示的に選ぶことで、LWW
+ * (無条件で新しい値を採用)を回避する(DOC-04 4章「last-write-winsしない」)。
+ */
+export const EXTERNAL_REFERENCE_CONFLICT_RESOLUTION_ACTIONS = ["KEEP_LOCAL", "APPLY_REMOTE"] as const;
+export type ExternalReferenceConflictResolutionAction =
+  (typeof EXTERNAL_REFERENCE_CONFLICT_RESOLUTION_ACTIONS)[number];
+
+export function isValidExternalReferenceConflictResolutionAction(
+  value: string,
+): value is ExternalReferenceConflictResolutionAction {
+  return (EXTERNAL_REFERENCE_CONFLICT_RESOLUTION_ACTIONS as readonly string[]).includes(value);
+}

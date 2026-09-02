@@ -27,7 +27,11 @@ export type ErrorCode =
   | "PRIMARY_CONTEXT_CONFLICT"
   /** [M1-C3新設・2026-09-02] 統合正本v5.0 §11.4「分解Transaction」。既に
    * supersededByReceiptIdが設定済みのResponsibilityへ再度SPLITを要求した場合。 */
-  | "ALREADY_SPLIT";
+  | "ALREADY_SPLIT"
+  /** [M1-A4新設・2026-09-02] 統合正本v5.0 §21.3 Conflict分類に明記されている
+   * 正式語彙。外部からのsourceVersionがreference.lastObservedVersionと異なる
+   * (=conflict queueへ積まれた)場合に使う。DOC-04 4章「last-write-winsしない」。 */
+  | "EXTERNAL_VERSION_CONFLICT";
 
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   VALIDATION_FAILED: 400,
@@ -42,6 +46,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   IDEMPOTENCY_KEY_REUSED: 409,
   PRIMARY_CONTEXT_CONFLICT: 409,
   ALREADY_SPLIT: 409,
+  EXTERNAL_VERSION_CONFLICT: 409,
   STATE_TRANSITION_INVALID: 422,
   RATE_LIMITED: 429,
   AI_TEMPORARILY_UNAVAILABLE: 503,

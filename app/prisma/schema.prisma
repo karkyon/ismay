@@ -87,6 +87,8 @@ model User {
   responsibilityCorrectionReceiptsAsActor ResponsibilityCorrectionReceipt[]
   /// [M1-C3B新設] ResponsibilityMergeReceipt.actorUserId逆参照。
   responsibilityMergeReceiptsAsActor      ResponsibilityMergeReceipt[]
+  /// [M1-A4新設] ExternalReferenceConflict.resolvedById逆参照。
+  externalReferenceConflictsResolved      ExternalReferenceConflict[]
 
   @@map("users")
 }
@@ -1606,10 +1608,17 @@ model ExternalContextReference {
   direction            String
   syncPolicy           String         @map("sync_policy")
   status               String
+  /// [M1-A4新設・2026-09-02] DOC-04 8.4節論理Entityに明記されているが未実装
+  /// だった列。conflict無く採用された最新のsourceVersion(conflict発生時は
+  /// 更新しない。§4「conflict queueがある場合のみ…last-write-winsしない」)。
+  lastObservedVersion  String?        @map("last_observed_version")
+  lastSyncedAt         DateTime?      @map("last_synced_at")
   createdAt            DateTime       @default(now()) @map("created_at")
   updatedAt            DateTime       @updatedAt @map("updated_at")
 
   snapshotRevisions ProjectContextSnapshotRevision[]
+  /// [M1-A4新設]
+  conflicts         ExternalReferenceConflict[]
 
   /// [tenant境界二重防御] ProjectContextSnapshotRevisionからの複合FK参照先。
   @@unique([id, workspaceId], map: "ecr_id_workspace_uq")
@@ -1634,8 +1643,55 @@ model ProjectContextSnapshotRevision {
   capturedAt    DateTime                 @default(now()) @map("captured_at")
   expiresAt     DateTime?                @map("expires_at")
 
+  /// [M1-A4新設] このSnapshotがconflictとして検出された場合の記録
+  /// (ExternalReferenceConflict.newSnapshotRevisionIdからの逆参照)。
+  conflictsAsNew ExternalReferenceConflict[] @relation("ConflictNewSnapshot")
+
   @@unique([referenceId, workspaceId, revision], map: "pcsr_reference_revision_uq")
+  /// [M1-A4新設] ExternalReferenceConflict.newSnapshotRevisionIdからの複合FK
+  /// (id, workspaceId)参照先として必要(既存の他複合FK参照先modelと同じ命名規則)。
+  @@unique([id, workspaceId], map: "pcsr_id_workspace_uq")
   @@map("project_context_snapshot_revisions")
+}
+
+/// V5-M1-A4 TBL: external_reference_conflicts
+/// 出典: DOC-04(Project Context・外部連携境界仕様書) 4章「双方向: 明示sync
+/// policy、version/etag、conflict queueがある場合のみ…last-write-winsしない」、
+/// EVAL・受入テスト仕様書 EV-C-005「external snapshot conflict | conflict
+/// queue、LWW 0」。
+///
+/// [対象範囲の明記] このtableは「外部から新しいsourceVersionが提示され、それが
+/// reference.lastObservedVersionと異なる場合、無条件上書き(LWW)せずqueueへ積み、
+/// 本人が解決するまで保持する」という契約のみを実装する。実際に外部Providerへ
+/// HTTPで問い合わせてsourceVersionを取得する経路(Connector/Webhook)は、
+/// 統合正本仕様書29章6項「External connector別scope、credential、replay防止」が
+/// 未確定事項に指定されているため、このGateのscope外とする(想像で実装しない)。
+/// 新しいsourceVersionの提示自体は、本人が外部の現在値を確認して手動登録する
+///経路、または将来のConnector実装が呼び出す共通経路のいずれでも同じAPIを使う。
+model ExternalReferenceConflict {
+  id                      String                         @id @default(uuid())
+  workspaceId             String                         @map("workspace_id")
+  referenceId             String                         @map("reference_id")
+  reference               ExternalContextReference       @relation(fields: [referenceId, workspaceId], references: [id, workspaceId])
+  /// conflict検出時点でreferenceが保持していたlastObservedVersion
+  /// (初回同期後で他に観測が無い場合はnull)。
+  previousObservedVersion String?                        @map("previous_observed_version")
+  /// 新たに提示されたが、conflictのため未採用のversion。
+  newSourceVersion        String                         @map("new_source_version")
+  newSnapshotRevisionId   String                         @map("new_snapshot_revision_id")
+  newSnapshotRevision     ProjectContextSnapshotRevision @relation("ConflictNewSnapshot", fields: [newSnapshotRevisionId, workspaceId], references: [id, workspaceId])
+  /// "PENDING" | "RESOLVED"(想像で他の値を追加しない)。
+  status                  String                         @default("PENDING")
+  /// 解決時のみ非null。"KEEP_LOCAL"(既存観測を維持) | "APPLY_REMOTE"(新しい
+  /// 値を採用)。
+  resolutionAction        String?                        @map("resolution_action")
+  resolvedById            String?                        @map("resolved_by")
+  resolvedByUser          User?                          @relation(fields: [resolvedById], references: [id])
+  resolvedAt              DateTime?                      @map("resolved_at")
+  detectedAt              DateTime                       @default(now()) @map("detected_at")
+
+  @@index([workspaceId, referenceId, status])
+  @@map("external_reference_conflicts")
 }
 
 /// V5-DOC-04 2章 TBL: project_context_embeddings(1 current/model)
