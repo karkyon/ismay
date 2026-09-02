@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
 import { runExtractionForCapture } from "@/lib/ai/extract";
+import { checkAiJobConsentAllowed } from "@/lib/pem/aiJobConsentGate";
 
 /**
  * jobs テーブル(TBL-026)の AI_EXTRACT ジョブをポーリング処理する。
@@ -44,6 +45,24 @@ export async function processAiExtractJobs(): Promise<{ processed: number }> {
       await db.job.update({
         where: { id: job.id },
         data: { status: "DEAD_LETTER", lastError: "payload.captureIdが不正です" },
+      });
+      continue;
+    }
+
+    // [PEM-CONSENT-JOB-CANCEL新設・2026-09-02] DOC-09(Consent・Data Governance
+    // 仕様書) 9章「既存Jobも実行前cancel」。AI Provider呼び出し直前に、Captureの
+    // 作成者のPEM_AI_PROCESSING同意を再評価する。Job enqueue時点では同意が
+    // あっても、実行までの間(バッチ待ち等)に撤回された場合はここで検知する。
+    const consentCheck = await checkAiJobConsentAllowed(captureId);
+    if (!consentCheck.allowed) {
+      await db.job.update({
+        where: { id: job.id },
+        data: { status: "CANCELLED", lastError: `PEM consent check failed: ${consentCheck.reason}` },
+      });
+      debugServer.state("Worker/aiExtractJob", "Job.status", {
+        jobId: job.id,
+        status: "CANCELLED",
+        reason: consentCheck.reason,
       });
       continue;
     }
