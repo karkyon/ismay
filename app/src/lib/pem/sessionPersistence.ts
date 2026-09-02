@@ -31,7 +31,8 @@ export const SESSION_DERIVATION_VERSION = "v1";
 export const SESSION_REVISION_STATUSES = ["OPEN", "CLOSED_CONFIRMED", "CLOSED_UNCONFIRMED"] as const;
 export type SessionRevisionStatus = (typeof SESSION_REVISION_STATUSES)[number];
 
-/** v4.0 7.3節の確定終了トリガー + TIMEOUT(推定終了。タイムアウトWorker未実装のため未到達)。 */
+/** v4.0 7.3節の確定終了トリガー + TIMEOUT(推定終了。PEM-SESSION-TIMEOUTで
+ * 実装済み。worker/sessionTimeoutJob.ts参照)。 */
 export const SESSION_END_REASONS = [
   "INTERRUPT",
   "DEFER",
@@ -193,4 +194,90 @@ export async function getExecutionPresence(
     select: { status: true },
   });
   return deriveExecutionPresence(latestRevision?.status ?? null);
+}
+
+/**
+ * [PEM-SESSION-TIMEOUT新設] v4.0 7.1節「timeoutは`CLOSED_UNCONFIRMED`として
+ * Sessionだけを閉じ、責任状態を変えない」。開いたまま一定時間経過したSessionを
+ * 検出し、TIMEOUT終了として新しいRevisionを追記する(insert-only、既存
+ * projectAndPersistExecutionSessionsと同じ設計)。
+ *
+ * [未確定事項の扱い] v4.0原本にタイムアウト閾値の具体的数値は明記されていない
+ * (SESSION_REVISION_STATUSES同様「正式な記載が無い」状況)。想像で数値を断定
+ * せず、呼び出し元(Worker)が既定値または環境変数由来の値を明示的に渡す設計に
+ * する(このファイル自体はデフォルト値を持たない純粋なパラメータ受け取り関数)。
+ *
+ * [決定論性] endedAtは「タイムアウト検出時のnow」ではなく「startedAt+
+ * timeoutMs」に固定する。これによりtimeoutMsが変わらない限り、同じセッションに
+ * 対して複数回この関数を呼んでも同一のendedAt/rawElapsedSecondsを生成できる
+ * (projectAndPersistExecutionSessionsの決定論性方針を踏襲)。
+ *
+ * DOC-05(Execution Event・Session Projection仕様書) 14.2節
+ * 「SESSION_TIMEOUT_CLOSEをExecution Ledgerへ保存しない」に従い、
+ * ResponsibilityExecutionEventは作成しない(Session Revisionのみ追記する)。
+ *
+ * @param timeoutMs 呼び出し元が指定するタイムアウト閾値(ミリ秒)。
+ * @param now 判定基準時刻(テスト容易性のため注入可能。既定は実行時のnow)。
+ */
+export async function closeTimedOutSessions(
+  timeoutMs: number,
+  now: Date = new Date(),
+): Promise<{ closedCount: number }> {
+  if (!(timeoutMs > 0)) {
+    throw new Error("closeTimedOutSessions: timeoutMsは正の数である必要があります");
+  }
+  const cutoff = new Date(now.getTime() - timeoutMs);
+
+  // 最新Revisionがstatus="OPEN"かつstartedAtがcutoffより前のSessionIdentityを
+  // 検出する。ExecutionSessionRevisionはinsert-onlyのため「最新」はrevision最大だが、
+  // まず候補を広く絞り込み(status="OPEN"のrevisionを1件以上持つ)、各Identityごとに
+  // 本当に「最新」revisionがOPENのままかを個別に再確認する(下のループ内)。
+  const candidates = await db.executionSessionIdentity.findMany({
+    where: {
+      revisions: {
+        some: { status: "OPEN", startedAt: { lt: cutoff } },
+      },
+    },
+    select: { id: true },
+  });
+
+  let closedCount = 0;
+  for (const identity of candidates) {
+    const latestRevision = await db.executionSessionRevision.findFirst({
+      where: { sessionIdentityId: identity.id },
+      orderBy: { revision: "desc" },
+    });
+    // 最新revisionが既にOPENでない(他の経路で先にクローズ済み)、またはstartedAtが
+    // cutoff以降(まだタイムアウトに達していない)なら対象外。
+    if (!latestRevision || latestRevision.status !== "OPEN") continue;
+    if (latestRevision.startedAt >= cutoff) continue;
+
+    const endedAt = new Date(latestRevision.startedAt.getTime() + timeoutMs);
+    const rawElapsedSeconds = Math.round(timeoutMs / 1000);
+
+    await db.executionSessionRevision.create({
+      data: {
+        sessionIdentityId: identity.id,
+        revision: latestRevision.revision + 1,
+        derivationVersion: SESSION_DERIVATION_VERSION,
+        status: "CLOSED_UNCONFIRMED",
+        startedAt: latestRevision.startedAt,
+        endedAt,
+        endReason: "TIMEOUT",
+        rawElapsedSeconds,
+        correctedActiveSeconds: null,
+        measurementMode: "EXECUTION_LEDGER_ONLY",
+        // 推定終了(実際の終了イベントが無い)のためHIGH/MEDIUMを名乗らずLOWにする。
+        measurementQuality: "LOW",
+        // 統合正本v5.0 16.7節の正式語彙(coreTypes.ts QUALITY_REASON_CODES参照)。
+        qualityReasonCodes: ["AUTO_TIMEOUT_ESTIMATE"],
+        timeZoneId: null,
+        utcOffsetMinutes: null,
+        supersedesRevisionId: latestRevision.id,
+      },
+    });
+    closedCount++;
+  }
+
+  return { closedCount };
 }

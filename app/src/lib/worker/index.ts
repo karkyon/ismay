@@ -9,6 +9,7 @@ import { processNotificationScan } from "@/lib/worker/notificationScanJob";
 import { processCycleRotation } from "@/lib/worker/cycleRotationJob";
 import { processRecurrenceGeneration } from "@/lib/worker/recurrenceGenerationJob";
 import { processPemObservation } from "@/lib/worker/pemObserverJob";
+import { processSessionTimeouts } from "@/lib/worker/sessionTimeoutJob";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -56,6 +57,9 @@ async function tick(): Promise<void> {
     // FN-PEM-02(2026-08-23新設): 観察イベント取り込み60秒間隔・集計再計算1時間間隔の
     // 自己スロットリング(pemObserverJob.ts参照)。
     const pemResult = await processPemObservation();
+    // PEM-SESSION-TIMEOUT(2026-09-02新設): 開いたままのExecution Sessionを
+    // 1時間間隔の自己スロットリングでタイムアウトクローズする(sessionTimeoutJob.ts参照)。
+    const sessionTimeoutResult = await processSessionTimeouts();
     if (
       relayResult.relayed > 0 ||
       jobResult.processed > 0 ||
@@ -68,7 +72,8 @@ async function tick(): Promise<void> {
       notificationResult.processed > 0 ||
       cycleResult.processed > 0 ||
       recurrenceResult.processed > 0 ||
-      pemResult.processed > 0
+      pemResult.processed > 0 ||
+      sessionTimeoutResult.processed > 0
     ) {
       debugServer.event("Worker/tick", "tick完了", {
         ...relayResult,
@@ -83,6 +88,7 @@ async function tick(): Promise<void> {
         cycleProcessed: cycleResult.processed,
         recurrenceProcessed: recurrenceResult.processed,
         pemProcessed: pemResult.processed,
+        sessionTimeoutProcessed: sessionTimeoutResult.processed,
       });
     }
   } catch (err) {

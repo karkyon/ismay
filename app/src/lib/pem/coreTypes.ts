@@ -129,6 +129,26 @@ export const EXCLUDED_FROM_EXECUTION_LEDGER = [
   "SYSTEM_INFERRED_DEFER", // v4.0 6.3節: 「SYSTEM_INFERRED_DEFERは設けない」ため恒久的に禁止
 ] as const;
 
+/**
+ * [M1-PEM-SESSION-TIMEOUT新設] 品質理由コード(統合正本仕様書v5.0 16.7節)。
+ * 「品質理由には少なくとも`DUPLICATE_SUSPECTED / RAPID_REPEAT / CLOCK_CONFLICT /
+ * USER_CONFIRMED / MANUALLY_CORRECTED / HEARTBEAT_ONLY / AUTO_TIMEOUT_ESTIMATE /
+ * IMPORTED_LEGACY`を含む」。正本が「少なくとも」としているため、既存の
+ * sessionPersistence.ts由来の`NEGATIVE_DURATION_DETECTED`(異常到着検出、
+ * この8値のリストには無い独自追加)はそのまま残し、このRegistryとは別に扱う。
+ */
+export const QUALITY_REASON_CODES = [
+  "DUPLICATE_SUSPECTED",
+  "RAPID_REPEAT",
+  "CLOCK_CONFLICT",
+  "USER_CONFIRMED",
+  "MANUALLY_CORRECTED",
+  "HEARTBEAT_ONLY",
+  "AUTO_TIMEOUT_ESTIMATE",
+  "IMPORTED_LEGACY",
+] as const;
+export type QualityReasonCode = (typeof QUALITY_REASON_CODES)[number];
+
 /** PEM Consent種別(v4.0 16.1節)。 */
 export const PEM_CONSENT_TYPES = [
   "PEM_DATA_COLLECTION",
