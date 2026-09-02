@@ -9,16 +9,24 @@
  * 参照・判定されていなかった(定義されているだけで未配線)。本ファイルが、
  * このConsent種別を実際に使う最初の実装になる。
  *
- * [scope宣言] DOC-09受入条件の後半「既存Jobも実行前cancel」のみを実装する。
- * 前半「撤回と同時に新規Job enqueue不可」は、Capture作成API
- * (captures/route.ts他、audio/image route等の複数経路)全体への影響範囲の
- * 特定・検証に別途時間を要するため、このGateのscope外とし次回以降に回す
- * (想像で影響範囲を過小評価して同時に手を広げない)。
+ * [Gate PEM-CONSENT-JOB-CANCELで実装済み] 受入条件の後半「既存Jobも実行前
+ * cancel」。`aiExtractJob.ts`のJob claim後・AI Provider呼び出し直前で
+ * `checkAiJobConsentAllowed`を呼ぶ。
  *
- * [scope宣言・対象Job] このGateでは`aiExtractJob.ts`(AI_EXTRACT)のみが
- * この関数を呼ぶ。`ocrImageJob.ts`/`transcribeAudioJob.ts`/`batchPollJob.ts`
- * も同じConsent種別の対象になり得るが、それぞれのJob構造を個別に確認して
- * からでなければ安全に組み込めないため、このGateでは変更しない。
+ * [Gate PEM-CONSENT-ENQUEUE-GATEで追加] 受入条件の前半「撤回と同時に新規Job
+ * enqueue不可」。Capture作成/解析要求/文字起こし・OCR完了後の自動チェーンの
+ * 計4経路(captures/route.ts、captures/[id]/analyze/route.ts、
+ * transcribeAudioJob.ts、ocrImageJob.ts)全てで、CaptureAnalysisRequested.v1
+ * (=AI_EXTRACT Jobの発生源)を発行する直前に`isAiProcessingConsentGrantedForUser`
+ * または`checkAiJobConsentAllowed`を呼ぶ。
+ *
+ * [scope宣言・対象Job] `aiExtractJob.ts`(AI_EXTRACT)の実行前チェックのみ実装
+ * 済み。`ocrImageJob.ts`/`transcribeAudioJob.ts`/`batchPollJob.ts`自体の
+ * AI呼び出し(音声文字起こし・OCR自体)の実行前チェックは、これらがPEM_AI_
+ * PROCESSING以外の目的(音声/画像入力自体の変換であり、Formation解析とは
+ * 別の処理)に用いられるため対象外とする(そのAI呼び出し自体を止める根拠が
+ * 正本に無い)。これらのJobが完了後に自動発行するCaptureAnalysisRequested.v1
+ * (=その後のFormation解析への連鎖)だけをゲートする。
  */
 import { db } from "@/lib/db";
 import { buildPemAuthorizationContext } from "./authorizationBoundary";
@@ -51,4 +59,17 @@ export async function checkAiJobConsentAllowed(captureId: string): Promise<AiJob
     return { allowed: false, reason: "CONSENT_WITHDRAWN" };
   }
   return { allowed: true };
+}
+
+/**
+ * [PEM-CONSENT-ENQUEUE-GATE新設・2026-09-02] DOC-09 9章「撤回と同時に新規Job
+ * enqueue不可」の前半部分。まだCaptureが作成されていない時点(POST /captures本体)
+ * でも呼べるよう、userId起点でPEM_AI_PROCESSING同意の有無だけを判定する軽量版。
+ * captureIdが既に確定している場合はcheckAiJobConsentAllowed(captureId)を使う方が
+ * tenant/所有者を検証できるため望ましいが、Capture作成前のゲート判定という
+ * 性質上、そちらは使えない箇所(captures/route.ts)向けに用意する。
+ */
+export async function isAiProcessingConsentGrantedForUser(userId: string): Promise<boolean> {
+  const ctx = await buildPemAuthorizationContext(userId, userId);
+  return isConsentGranted(ctx, "PEM_AI_PROCESSING");
 }

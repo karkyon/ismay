@@ -5,6 +5,7 @@ import { debugServer } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { isAiProcessingConsentGrantedForUser } from "@/lib/pem/aiJobConsentGate";
 
 /**
  * API-CAP-03: POST /captures/{id}/analyze 解析再要求
@@ -33,6 +34,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // FN-PRV-02: source_type=MEETINGは同意登録(consent_id確定)まで解析キューへ投入しない
   if (capture.sourceType === "MEETING" && !capture.consentId) {
     return apiError("STATE_TRANSITION_INVALID", "会議録音は同意登録が完了するまで解析できません");
+  }
+
+  // [PEM-CONSENT-ENQUEUE-GATE新設・2026-09-02] DOC-09 9章「撤回と同時に新規
+  // Job enqueue不可」。本人による明示的な解析要求も、PEM_AI_PROCESSING同意が
+  // 無い場合は拒否する。
+  const aiProcessingConsentGranted = await isAiProcessingConsentGrantedForUser(auth.user.userId);
+  if (!aiProcessingConsentGranted) {
+    return apiError("CONSENT_REQUIRED", "AI解析にはPEM_AI_PROCESSING同意が必要です");
   }
   if (capture.sourceType !== "VOICE" && !capture.rawText) {
     return apiError("STATE_TRANSITION_INVALID", "本文が未保存のため解析できません");

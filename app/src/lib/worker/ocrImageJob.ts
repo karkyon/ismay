@@ -4,6 +4,7 @@ import { debugServer } from "@/lib/debugServer";
 import { downloadImageObject } from "@/lib/storage";
 import { getActiveOcrProvider } from "@/lib/ai/config";
 import { estimateCostMicros } from "@/lib/ai/pricing";
+import { checkAiJobConsentAllowed } from "@/lib/pem/aiJobConsentGate";
 import type { AiOcrOutcome, AiOcrImageInput } from "@/lib/ai/ocrProvider";
 
 /**
@@ -245,10 +246,17 @@ async function applyOcrOutcome(
 
   // OCR成功: rawTextへ書き込み、QUEUEDへ進めたうえで即AI抽出キューへ自動投入する
   // (transcribeAudioJob.tsと同じ「保存→自動解析」チェーンを画像でも実現する)。
+  // [PEM-CONSENT-ENQUEUE-GATE新設・2026-09-02] DOC-09 9章「撤回と同時に新規
+  // Job enqueue不可」。OCR自体(画像→テキスト変換)はPEM_AI_PROCESSING対象外
+  // (Formation解析ではない別処理)として実行するが、その後の自動連鎖
+  // (CaptureAnalysisRequested.v1発行)だけをここでゲートする。
+  const consentCheck = await checkAiJobConsentAllowed(captureId);
+  const aiProcessingConsentGranted = consentCheck.allowed;
+
   await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const updated = await tx.capture.update({
       where: { id: captureId },
-      data: { rawText: outcome.text, processingStatus: "QUEUED", version: { increment: 1 } },
+      data: { rawText: outcome.text, processingStatus: aiProcessingConsentGranted ? "QUEUED" : "SAVED", version: { increment: 1 } },
     });
     await tx.eventLog.create({
       data: {
@@ -259,17 +267,19 @@ async function applyOcrOutcome(
         actorType: "SYSTEM",
       },
     });
-    await tx.outboxEvent.create({
-      data: {
-        eventName: "CaptureAnalysisRequested.v1",
-        eventVersion: "1",
-        aggregateId: captureId,
-        aggregateVersion: updated.version,
-        payload: { captureId, workspaceId, sourceType: "IMAGE" },
-      },
-    });
+    if (aiProcessingConsentGranted) {
+      await tx.outboxEvent.create({
+        data: {
+          eventName: "CaptureAnalysisRequested.v1",
+          eventVersion: "1",
+          aggregateId: captureId,
+          aggregateVersion: updated.version,
+          payload: { captureId, workspaceId, sourceType: "IMAGE" },
+        },
+      });
+    }
   });
-  debugServer.event("ocrImageJob", "OCR完了・AI抽出キューへ自動投入", { captureId });
+  debugServer.event("ocrImageJob", "OCR完了・AI抽出キューへ自動投入", { captureId, aiProcessingConsentGranted });
 
   return { status: "READY" };
 }

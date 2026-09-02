@@ -6,6 +6,7 @@ import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { isAiProcessingConsentGrantedForUser } from "@/lib/pem/aiJobConsentGate";
 
 // API・イベント設計書v1.1 4.1節: 「本文最大100,000文字」
 const MAX_RAW_TEXT_LENGTH = 100_000;
@@ -99,7 +100,13 @@ export async function POST(req: NextRequest) {
   // 誰も押さない限りAI抽出が永遠に走らなかった)。TEXT/IMPORT/同意済みMEETINGは
   // 保存と同時に自動でCaptureAnalysisRequested.v1を発行する。VOICE(文字起こし未実装)と
   // 未同意MEETINGのみ、従来通りSAVEDのまま留め、手動/別APIでの解析要求を待つ。
-  const shouldAutoQueue = sourceType !== "VOICE" && sourceType !== "MEETING";
+  // [PEM-CONSENT-ENQUEUE-GATE新設・2026-09-02] DOC-09 9章「撤回と同時に新規
+  // Job enqueue不可」。PEM_AI_PROCESSING同意が無い場合、Capture自体の保存は
+  // 許可するが(単なるデータ保存はAI処理と無関係)、AI解析イベントの自動発行は
+  // 行わない(processingStatus="SAVED"のまま留める。後で同意した後にPOST
+  // /captures/{id}/analyzeで明示的に解析要求できる)。
+  const aiProcessingConsentGranted = await isAiProcessingConsentGrantedForUser(auth.user.userId);
+  const shouldAutoQueue = sourceType !== "VOICE" && sourceType !== "MEETING" && aiProcessingConsentGranted;
 
   const created = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const capture = await tx.capture.create({

@@ -31,7 +31,11 @@ export type ErrorCode =
   /** [M1-A4新設・2026-09-02] 統合正本v5.0 §21.3 Conflict分類に明記されている
    * 正式語彙。外部からのsourceVersionがreference.lastObservedVersionと異なる
    * (=conflict queueへ積まれた)場合に使う。DOC-04 4章「last-write-winsしない」。 */
-  | "EXTERNAL_VERSION_CONFLICT";
+  | "EXTERNAL_VERSION_CONFLICT"
+  /** [PEM-CONSENT-ENQUEUE-GATE新設・2026-09-02] DOC-02(用語・状態・EventCode
+   * 定義書) 8章「403 CONSENT_REQUIRED | 必須同意なし」。PEM_AI_PROCESSING同意が
+   * GRANTEDでない状態でAI解析(Formation抽出)を要求した場合に使う。 */
+  | "CONSENT_REQUIRED";
 
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   VALIDATION_FAILED: 400,
@@ -47,6 +51,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   PRIMARY_CONTEXT_CONFLICT: 409,
   ALREADY_SPLIT: 409,
   EXTERNAL_VERSION_CONFLICT: 409,
+  CONSENT_REQUIRED: 403,
   STATE_TRANSITION_INVALID: 422,
   RATE_LIMITED: 429,
   AI_TEMPORARILY_UNAVAILABLE: 503,

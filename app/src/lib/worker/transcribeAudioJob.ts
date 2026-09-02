@@ -3,6 +3,7 @@ import type { Prisma } from "@/generated/prisma/client";
 import { debugServer } from "@/lib/debugServer";
 import { downloadAudioObject } from "@/lib/storage";
 import { getActiveTranscriptionProvider, getActiveSegmentProvider } from "@/lib/ai/config";
+import { isAiProcessingConsentGrantedForUser } from "@/lib/pem/aiJobConsentGate";
 import { estimateTranscriptionCostMicros } from "@/lib/ai/openaiTranscriptionProvider";
 import { estimateCostMicros } from "@/lib/ai/pricing";
 import type { AiTextSegment } from "@/lib/ai/segmentProvider";
@@ -191,6 +192,12 @@ async function processCompletedTranscription(
   capture: { id: string; workspaceId: string; domainId: string | null; createdById: string; processingPriority: string; sourceCapturedAt: Date | null; consentId: string | null },
   rawText: string,
 ): Promise<void> {
+  // [PEM-CONSENT-ENQUEUE-GATE新設・2026-09-02] DOC-09 9章「撤回と同時に新規
+  // Job enqueue不可」。文字起こし自体(音声→テキスト変換)はPEM_AI_PROCESSING
+  // 対象外(Formation解析ではない別処理)として実行するが、その後の自動連鎖
+  // (CaptureAnalysisRequested.v1発行)だけをここでゲートする。
+  const aiProcessingConsentGranted = await isAiProcessingConsentGrantedForUser(capture.createdById);
+
   let segments: AiTextSegment[] | null = null;
 
   if (rawText.length >= SEGMENT_MIN_TEXT_LENGTH) {
@@ -202,7 +209,7 @@ async function processCompletedTranscription(
     await db.$transaction(async (tx: Prisma.TransactionClient) => {
       const updated = await tx.capture.update({
         where: { id: capture.id },
-        data: { rawText, processingStatus: "QUEUED", version: { increment: 1 } },
+        data: { rawText, processingStatus: aiProcessingConsentGranted ? "QUEUED" : "SAVED", version: { increment: 1 } },
       });
       await tx.eventLog.create({
         data: {
@@ -213,17 +220,22 @@ async function processCompletedTranscription(
           actorType: "SYSTEM",
         },
       });
-      await tx.outboxEvent.create({
-        data: {
-          eventName: "CaptureAnalysisRequested.v1",
-          eventVersion: "1",
-          aggregateId: capture.id,
-          aggregateVersion: updated.version,
-          payload: { captureId: capture.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
-        },
-      });
+      if (aiProcessingConsentGranted) {
+        await tx.outboxEvent.create({
+          data: {
+            eventName: "CaptureAnalysisRequested.v1",
+            eventVersion: "1",
+            aggregateId: capture.id,
+            aggregateVersion: updated.version,
+            payload: { captureId: capture.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
+          },
+        });
+      }
     });
-    debugServer.event("transcribeAudioJob", "文字起こし完了・AI抽出キューへ自動投入(分割なし)", { captureId: capture.id });
+    debugServer.event("transcribeAudioJob", "文字起こし完了・AI抽出キューへ自動投入(分割なし)", {
+      captureId: capture.id,
+      aiProcessingConsentGranted,
+    });
     return;
   }
 
@@ -235,7 +247,7 @@ async function processCompletedTranscription(
       where: { id: capture.id },
       data: {
         rawText: rawText.slice(firstSegment.startChar, firstSegment.endChar),
-        processingStatus: "QUEUED",
+        processingStatus: aiProcessingConsentGranted ? "QUEUED" : "SAVED",
         version: { increment: 1 },
       },
     });
@@ -248,15 +260,17 @@ async function processCompletedTranscription(
         actorType: "SYSTEM",
       },
     });
-    await tx.outboxEvent.create({
-      data: {
-        eventName: "CaptureAnalysisRequested.v1",
-        eventVersion: "1",
-        aggregateId: capture.id,
-        aggregateVersion: updated.version,
-        payload: { captureId: capture.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
-      },
-    });
+    if (aiProcessingConsentGranted) {
+      await tx.outboxEvent.create({
+        data: {
+          eventName: "CaptureAnalysisRequested.v1",
+          eventVersion: "1",
+          aggregateId: capture.id,
+          aggregateVersion: updated.version,
+          payload: { captureId: capture.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
+        },
+      });
+    }
 
     for (const segment of segments!.slice(1)) {
       const child = await tx.capture.create({
@@ -266,7 +280,7 @@ async function processCompletedTranscription(
           createdById: capture.createdById,
           sourceType: "VOICE",
           rawText: rawText.slice(segment.startChar, segment.endChar),
-          processingStatus: "QUEUED",
+          processingStatus: aiProcessingConsentGranted ? "QUEUED" : "SAVED",
           processingPriority: capture.processingPriority,
           sourceCapturedAt: capture.sourceCapturedAt,
           consentId: capture.consentId,
@@ -278,19 +292,21 @@ async function processCompletedTranscription(
           aggregateType: "Capture",
           aggregateId: child.id,
           eventType: "CAPTURE_SAVED",
-          afterJson: { sourceType: "VOICE", processingStatus: "QUEUED", splitFromCaptureId: capture.id, title: segment.title },
+          afterJson: { sourceType: "VOICE", processingStatus: child.processingStatus, splitFromCaptureId: capture.id, title: segment.title },
           actorType: "SYSTEM",
         },
       });
-      await tx.outboxEvent.create({
-        data: {
-          eventName: "CaptureAnalysisRequested.v1",
-          eventVersion: "1",
-          aggregateId: child.id,
-          aggregateVersion: child.version,
-          payload: { captureId: child.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
-        },
-      });
+      if (aiProcessingConsentGranted) {
+        await tx.outboxEvent.create({
+          data: {
+            eventName: "CaptureAnalysisRequested.v1",
+            eventVersion: "1",
+            aggregateId: child.id,
+            aggregateVersion: child.version,
+            payload: { captureId: child.id, workspaceId: capture.workspaceId, sourceType: "VOICE" },
+          },
+        });
+      }
     }
   });
   debugServer.event("transcribeAudioJob", "文字起こし完了・話題分割してAI抽出キューへ自動投入", {
