@@ -258,7 +258,13 @@ async function main(): Promise<void> {
       sessionId: session.id,
       workspaceId: fx.workspaceId,
       operationId: `op-${RUN_ID}-${key}`,
-      expectedVersion: decision.sessionVersion,
+      // [Gate PATTERN-SCHEMA-01 verify script是正・2026-09-03]
+      // recordCandidateDecision()の戻り値には`sessionVersion`という
+      // フィールドは存在しない({ok, decisionEventId, sessionState}のみ)。
+      // recordCandidateDecision自身もFormationSession.versionを更新しない
+      // (materialize.ts本体を読んで確認済み)ため、session作成時点の
+      // versionをそのまま使う(既定値0のまま変化しない)。
+      expectedVersion: session.version,
       actorUserId: fx.userId,
     });
     if (!materialized.ok) {
