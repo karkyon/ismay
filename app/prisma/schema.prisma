@@ -67,6 +67,12 @@ model User {
   auditLogsAsActor                        AuditLog[]                        @relation("AuditActorUser")
   /// [V5-M1-A1新設] Context本人(観測対象)としての逆relation。
   projectContextsOwned                    ProjectContext[]                  @relation("ProjectContextOwner")
+  /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePattern.ownerSubjectUserId
+  /// (DOC-06 §5「ownerSubjectUserId」)からの逆relation。
+  casePatternsOwned                       CasePattern[]                     @relation("CasePatternOwner")
+  /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePatternFeedbackEvent.actorUserId
+  /// からの逆relation。
+  casePatternFeedbackEvents               CasePatternFeedbackEvent[]
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
@@ -153,6 +159,8 @@ model Workspace {
   projectContexts       ProjectContext[]
   /// [V5-M1-B1新設]
   formationSessions     FormationSession[]
+  /// [PATTERN-SCHEMA-01新設・2026-09-03]
+  casePatterns          CasePattern[]
 
   @@map("workspaces")
 }
@@ -403,6 +411,10 @@ model Responsibility {
   /// [PEM-RECOMPUTE-QUEUE新設・2026-09-03] ProjectionRecomputeJobからの複合FK
   /// (responsibilityId, workspaceId)の参照先として必要。
   projectionRecomputeJobs ProjectionRecomputeJob[]
+
+  /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePatternSourceLink.responsibilityId
+  /// (provenance参照、optional)からの複合FK参照先として必要。
+  casePatternSourceLinks CasePatternSourceLink[]
 
   /// [2026-08-24追加・Phase 0A是正2] ResponsibilityExecutionEventからの複合FK
   /// (responsibilityId, workspaceId)の参照先として必要(v4.0 4.1節「tenantを跨ぐ
@@ -1611,6 +1623,10 @@ model ProjectContext {
   linkEvents         ProjectContextLinkEvent[]
   externalReferences ExternalContextReference[]
   embeddings         ProjectContextEmbedding[]
+  /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePatternSourceLink.contextIdからの
+  /// 複合FK参照先として必要(DOC-06 §3「Case Patternの独立単位はProject Context
+  /// instance」)。
+  casePatternSourceLinks CasePatternSourceLink[]
 
   /// [tenant境界二重防御] 既存Responsibility/BulkCompleteReceipt等と同じ複合unique方式。
   @@unique([id, workspaceId], map: "project_contexts_id_workspace_uq")
@@ -1843,6 +1859,9 @@ model FormationSession {
   candidateMergeEvents FormationCandidateMergeEvent[]
   /// [M1-B6B新設・2026-08-31指示書 Session Lifecycle]
   lifecycleEvents      FormationSessionLifecycleEvent[]
+  /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePatternSourceLink.formationSessionId
+  /// (provenance参照、optional)からの複合FK参照先として必要。
+  casePatternSourceLinks CasePatternSourceLink[]
 
   /// Idempotency-Key再送検出用(DOC-03 7章 POST /formation-sessions)。
   @@unique([workspaceId, captureId, clientSessionKey], map: "formation_sessions_idempotency_uq")
@@ -2560,4 +2579,216 @@ model ResponsibilityMergeSourceItem {
   @@unique([sourceResponsibilityId, workspaceId], map: "mrsi_source_workspace_uq")
   @@index([workspaceId, receiptId])
   @@map("responsibility_merge_source_items")
+}
+
+// =====================================================================
+// V5-M4 Case Pattern Catalog(PATTERN-SCHEMA-01)
+// 出典: ISMAY-V5-DOC-06(Metric・Granularity・Case Pattern Catalog) §5「Case
+// Patternデータ契約」、§6「可変Window・確度」、§7「提案契約」、§10「受入条件」。
+// M4-PATTERN-FOUNDATION(commit 390c380)で実装済みのcasePatternMath.ts(確度
+// 計算式の純粋関数)を、実際の永続化スキーマへ接続する。Detector(CHG-043)・
+// 提案API/UI(§7)・Formation Candidate接続(CHG-044)・embedding値populate/ANN
+// (§8)はこのGateのscope外(PATTERN-DETECT-01以降)。
+//
+// [DR-1/DR-2設計決定・2026-09-03、カルキョンさん指示に基づく]
+// - CasePatternSourceLinkはDOC-06 §5の明示契約通りpatternRevisionId(revision
+//   単位)へ接続する(patternId単位への変更は禁止)。「同一source Eventの再処理で
+//   sampleSizeが増えない」は対象revision内のunique制約で満たし、revision横断の
+//   加算は行わない(過去revisionに同じ根拠が履歴として存在することは問題ない)。
+// - source Event同一性は、既存コードベースに実在する
+//   targetType/targetId多態パターン(AuditLog.targetType/targetId、
+//   PemEvidenceDeletionEvent.targetType/targetId)を再利用し、
+//   sourceEventKind/sourceEventIdとして設計する。sourceEventKindの初期値は
+//   MATERIALIZATION_RECEIPT_ITEM(Responsibility確定後の occurrence。
+//   MaterializationReceiptItemは既にworkspaceId+candidateIdでglobal一意な
+//   安定id)とFORMATION_CANDIDATE_REVISION(materialize前のFormation Candidate
+//   段階でのoccurrence、FormationCandidateRevisionもimmutable・一意なid)の
+//   2種。responsibilityId/formationSessionIdは同一性の代用ではなく、あくまで
+//   provenance参照(非正規化された高速join用)として残す。
+// - CasePatternFeedbackEvent.suggestionIdは、DOC-06 §5に列として明記されて
+//   いるものの、対応するSuggestion entity自体は正本上このGateのscope外
+//   (PATTERN-DETECT-01以降の提案API §7)のため、想像で先行実装しない。今は
+//   FK制約の無い文字列として保持し、Suggestion entity実装時に正式なFKへ
+//   移行するmigrationを追加する(契約差分として明示)。「採否は提案Revisionに
+//   固定」(§7)は、patternRevisionIdへの不変参照で満たす。
+
+/// V5-DOC-06 §5 TBL: case_patterns(identity、可変集計値のキャッシュ)
+/// FormationCandidateIdentityと同じidentity/revision分離パターン。
+model CasePattern {
+  id                   String    @id @default(uuid())
+  workspaceId          String    @map("workspace_id")
+  workspace            Workspace @relation(fields: [workspaceId], references: [id])
+  /// DOC-06 §5「ownerSubjectUserId」。DOC-02 4章subjectUserId原則(Case Pattern
+  /// はProject Context本人=観測対象のスコープで管理する)。
+  ownerSubjectUserId   String    @map("owner_subject_user_id")
+  ownerSubjectUser     User      @relation("CasePatternOwner", fields: [ownerSubjectUserId], references: [id])
+  /// Detector(PATTERN-DETECT-01以降)が生成する安定キー。生成アルゴリズム自体は
+  /// このGateのscope外(想像で発明しない)。ここではworkspace+本人内で一意な
+  /// 文字列として扱う。
+  patternKey           String    @map("pattern_key")
+  title                String
+  /// NONE/CANDIDATE_DISPLAY/ACTIVE/STRONG_SUGGESTION。casePatternMath.ts
+  /// CASE_PATTERN_STAGES(390c380で実装済み)と同一語彙・同一意味(DOC-06 §6の
+  /// 4段階表そのものであり、別語彙のstatusとの混在は無い)。
+  status               String    @default("NONE")
+  /// DOC-06 §6「発生日時の連続差分の中央値」。2 instance未満はNULL。
+  observedIntervalDays Decimal?  @map("observed_interval_days") @db.Decimal(10, 4)
+  windowFrom           DateTime? @map("window_from")
+  confidence           Decimal   @default(0) @db.Decimal(5, 4)
+  /// FormationCandidateIdentity.currentRevisionと同じ「最新revisionへの高速
+  /// 参照キャッシュ、正本はrevision行そのもの」パターン。revision追加と同一
+  /// transactionでのみ更新する(lib/patterns/casePatternRevisionService.ts参照)。
+  currentRevision      Int       @default(0) @map("current_revision")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  revisions      CasePatternRevision[]
+  feedbackEvents CasePatternFeedbackEvent[]
+
+  @@unique([workspaceId, ownerSubjectUserId, patternKey], map: "case_patterns_owner_key_uq")
+  @@unique([id, workspaceId], map: "case_patterns_id_workspace_uq")
+  @@index([workspaceId, status])
+  @@map("case_patterns")
+}
+
+/// V5-DOC-06 §5 TBL: case_pattern_revisions(immutable、revision単調増加)
+model CasePatternRevision {
+  id                     String      @id @default(uuid())
+  workspaceId            String      @map("workspace_id")
+  patternId              String      @map("pattern_id")
+  pattern                CasePattern @relation(fields: [patternId, workspaceId], references: [id, workspaceId])
+  revision               Int
+  representativeText     String      @map("representative_text")
+  /// 分解案の下書き(Formation Candidate接続はCHG-044、PATTERN-DETECT-01以降)。
+  decompositionTemplate  Json        @map("decomposition_template")
+  /// このrevision作成時点のstage閾値等(DOC-06 §6の数式パラメータのスナップ
+  /// ショット。将来閾値が変わっても過去revisionの判定根拠を再現できるようにする)。
+  thresholds             Json
+  schemaVersion          String      @map("schema_version")
+  createdAt              DateTime    @default(now()) @map("created_at")
+
+  sourceLinks        CasePatternSourceLink[]
+  evidenceAggregates CasePatternEvidenceAggregate[]
+  embeddings         CasePatternEmbedding[]
+  feedbackEvents     CasePatternFeedbackEvent[]
+
+  @@unique([patternId, revision], map: "case_pattern_revisions_pattern_revision_uq")
+  @@unique([id, workspaceId], map: "case_pattern_revisions_id_workspace_uq")
+  @@map("case_pattern_revisions")
+}
+
+/// V5-DOC-06 §5 TBL: case_pattern_source_links
+/// DR-2: sourceEventKind/sourceEventId(既存targetType/targetId多態パターンの
+/// 再利用)がsource Eventの同一性を担う。responsibilityId/formationSessionIdは
+/// provenance参照のみ(同一性の代用にしない)。
+model CasePatternSourceLink {
+  id                 String              @id @default(uuid())
+  workspaceId        String              @map("workspace_id")
+  patternRevisionId  String              @map("pattern_revision_id")
+  patternRevision    CasePatternRevision @relation(fields: [patternRevisionId, workspaceId], references: [id, workspaceId])
+  contextId          String              @map("context_id")
+  context            ProjectContext      @relation(fields: [contextId, workspaceId], references: [id, workspaceId])
+  /// MATERIALIZATION_RECEIPT_ITEM | FORMATION_CANDIDATE_REVISION
+  /// (CASE_PATTERN_SOURCE_EVENT_KINDS、lib/patterns/coreTypes.ts参照)。
+  sourceEventKind    String              @map("source_event_kind")
+  /// sourceEventKindに応じてMaterializationReceiptItem.idまたは
+  /// FormationCandidateRevision.idを指す(いずれもimmutable・一意)。この2表への
+  /// 正式なPrisma @relationは意図的に張らない(sourceEventKindによって参照先が
+  /// 分岐するpolymorphic keyのため。既存AuditLog.targetId等と同じ設計)。
+  sourceEventId      String              @map("source_event_id")
+  /// provenance参照(非正規化、高速join用)。同一性の代用にしない。
+  responsibilityId   String?             @map("responsibility_id")
+  responsibility     Responsibility?     @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  formationSessionId String?             @map("formation_session_id")
+  formationSession   FormationSession?   @relation(fields: [formationSessionId, workspaceId], references: [id, workspaceId])
+  sourceOccurredAt   DateTime            @map("source_occurred_at")
+  /// DOC-06 §3「同一instance由来の複数Responsibilityは合計重み上限1.0へ正規化」。
+  /// 正規化アルゴリズム自体はDetector(PATTERN-DETECT-01)のscope。
+  independenceGroup  String              @map("independence_group")
+  independenceWeight Decimal             @default(1) @map("independence_weight") @db.Decimal(4, 3)
+  /// casePatternMath.ts CasePatternOccurrence.qualityWeightと同じ値域[0,1]。
+  qualityWeight      Decimal             @default(1) @map("quality_weight") @db.Decimal(3, 2)
+  createdAt          DateTime            @default(now()) @map("created_at")
+  /// DOC-09 §19.3「Primary Evidenceを無断UPDATEせず、Deletion EventとAvailability
+  /// Projectionで利用可否を表す」。nullなら有効(集計対象)、非nullなら再計算時に
+  /// 除外する(受入条件PS-07「Evidence削除後の再計算でraw/weighted/confidenceが
+  /// 減少する」)。
+  excludedAt         DateTime?           @map("excluded_at")
+  excludedReason     String?             @map("excluded_reason")
+
+  /// 受入条件PS-01/PS-02: 同一revision内で同一source Eventの重複計上を防ぐ。
+  /// revision横断では加算しない(過去revisionの同じ根拠行は別revisionの別行)。
+  @@unique([patternRevisionId, sourceEventKind, sourceEventId], map: "case_pattern_source_links_revision_event_uq")
+  @@index([workspaceId, contextId])
+  @@index([patternRevisionId, excludedAt])
+  @@map("case_pattern_source_links")
+}
+
+/// V5-DOC-06 §5 TBL: case_pattern_evidence_aggregates
+/// revision単位のスナップショット集計(SourceLink行の再計算結果)。
+model CasePatternEvidenceAggregate {
+  id                   String              @id @default(uuid())
+  workspaceId          String              @map("workspace_id")
+  revisionId           String              @map("revision_id")
+  revision             CasePatternRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  /// DOC-06 §2 Metric Catalogのkey(metricDefinitionRegistry.tsに登録済みの
+  /// キーのみを許可する、というapplication層検証は別Gate)。
+  metricKey            String              @map("metric_key")
+  rawSampleSize        Int                 @map("raw_sample_size")
+  distinctContextCount Int                 @map("distinct_context_count")
+  weightedSupport      Decimal             @map("weighted_support") @db.Decimal(10, 6)
+  /// HIGH/MEDIUM/LOW/UNKNOWN別の内訳等(DOC-06 §3品質summary)。
+  qualitySummary       Json                @map("quality_summary")
+  computedAt           DateTime            @default(now()) @map("computed_at")
+
+  @@unique([revisionId, metricKey], map: "case_pattern_evidence_aggregates_revision_metric_uq")
+  @@map("case_pattern_evidence_aggregates")
+}
+
+/// V5-DOC-06 §5 TBL: case_pattern_feedback_events(append-only)
+/// DOC-06 §7「ACCEPT/PARTIAL_ACCEPT/REJECT/LATER/NOT_RELEVANTを記録する。
+/// 採否は提案Revisionに固定する」。
+model CasePatternFeedbackEvent {
+  id                String              @id @default(uuid())
+  workspaceId       String              @map("workspace_id")
+  patternId         String              @map("pattern_id")
+  pattern           CasePattern         @relation(fields: [patternId, workspaceId], references: [id, workspaceId])
+  /// 「採否は提案Revisionに固定」を満たすための不変参照。
+  patternRevisionId String              @map("pattern_revision_id")
+  patternRevision   CasePatternRevision @relation(fields: [patternRevisionId, workspaceId], references: [id, workspaceId])
+  /// [契約差分・DECISION未確定] Suggestion entity自体がこのGateのscope外
+  /// (PATTERN-DETECT-01以降の提案API §7)のため、FK制約の無い文字列として
+  /// 保持する。Suggestion entity実装時に正式なFKへ移行するmigrationを追加
+  /// すること(想像でSuggestion entityを先行実装しない)。
+  suggestionId      String              @map("suggestion_id")
+  /// ACCEPT/PARTIAL_ACCEPT/REJECT/LATER/NOT_RELEVANT(CASE_PATTERN_FEEDBACK_VERDICTS)。
+  verdict           String
+  actorUserId       String              @map("actor_user_id")
+  actorUser         User                @relation(fields: [actorUserId], references: [id])
+  occurredAt        DateTime            @default(now()) @map("occurred_at")
+
+  @@index([workspaceId, patternId])
+  @@index([patternRevisionId])
+  @@map("case_pattern_feedback_events")
+}
+
+/// V5-DOC-06 §5 TBL: case_pattern_embeddings
+/// 既存ProjectContextEmbedding/ResponsibilityEmbeddingと同じ
+/// Unsupported("vector(1536)")方式を踏襲する(CHG-045「model/dimensions/
+/// sourceVersionを必須化」)。DOC-06 §8「Pattern数は少ないためexact cosine。
+/// ANNを既定で作らない」— 本Gateではこの列の実値populate・embedding
+/// provider選定・ANN実装は一切行わない(スキーマ列のみ用意)。
+model CasePatternEmbedding {
+  id            String              @id @default(uuid())
+  workspaceId   String              @map("workspace_id")
+  revisionId    String              @map("revision_id")
+  revision      CasePatternRevision @relation(fields: [revisionId, workspaceId], references: [id, workspaceId])
+  model         String
+  dimensions    Int
+  sourceVersion Int                 @map("source_version")
+  embedding     Unsupported("vector(1536)")
+  updatedAt     DateTime            @updatedAt @map("updated_at")
+
+  @@unique([workspaceId, revisionId, model], map: "case_pattern_embeddings_revision_model_uq")
+  @@map("case_pattern_embeddings")
 }
