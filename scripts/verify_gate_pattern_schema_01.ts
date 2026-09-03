@@ -75,6 +75,7 @@ async function main(): Promise<void> {
   const guard = installAiNetworkDenyGuard();
 
   const { db } = await import("../app/src/lib/db");
+  const { cleanupFormationVerifyUser } = await import("./lib/formationVerifyCleanup");
   const { recordCandidateDecision, materializeFormationSession: materializeFormationSessionReal } = await import(
     "../app/src/lib/formation/materialize"
   );
@@ -94,6 +95,17 @@ async function main(): Promise<void> {
   const userIds: string[] = [];
 
   async function cleanupTestUser(userId: string): Promise<void> {
+    // [2026-09-03是正・実DB受入試験でのFK違反修正]
+    // 当初はcleanup手順を自前で再実装していたが、formationAtomicityAssessment/
+    // formationAtomicityOverride(materializeFormationSessionのAtomicity
+    // Materialize Guardが候補ごとに自動生成する)の削除が漏れており、
+    // formation_atomicity_assessments_revision_id_workspace_id_fkey違反で
+    // cleanup全体が連鎖的に失敗していた(このリポジトリで複数回発生している
+    // 既知のFK順序バグパターンを、既存の確立されたcleanupFormationVerifyUser
+    // を再利用せず自前再実装したことで再現してしまった)。
+    // Case Pattern系のテーブルだけこの関数で個別に削除し、Formation Session/
+    // Responsibility/ProjectContext/Capture等は既存の確立されたヘルパーへ
+    // 委譲する(想像で再実装せず、既に正しいものを再利用する)。
     const membership = await db.workspaceMember.findFirst({ where: { userId }, select: { workspaceId: true } }).catch(() => null);
     const workspaceId = membership?.workspaceId ?? null;
 
@@ -119,63 +131,18 @@ async function main(): Promise<void> {
         }
         await db.casePattern.deleteMany({ where: { id: { in: patternIds } } }).catch(() => null);
       }
-
-      const captures = await db.capture.findMany({ where: { workspaceId }, select: { id: true } }).catch(() => []);
-      const captureIds = captures.map((c) => c.id);
-      const sessions = captureIds.length
-        ? await db.formationSession.findMany({ where: { captureId: { in: captureIds } }, select: { id: true } }).catch(() => [])
-        : [];
-      const sessionIds = sessions.map((s) => s.id);
-
-      if (sessionIds.length > 0) {
-        const identities = await db.formationCandidateIdentity
-          .findMany({ where: { sessionId: { in: sessionIds } }, select: { id: true } })
-          .catch(() => []);
-        const identityIds = identities.map((i) => i.id);
-        if (identityIds.length > 0) {
-          await db.materializationReceiptItem.deleteMany({ where: { candidateId: { in: identityIds } } }).catch(() => null);
-          await db.formationCandidateDecisionEvent.deleteMany({ where: { candidateId: { in: identityIds } } }).catch(() => null);
-          await db.formationCandidateRevision.deleteMany({ where: { candidateId: { in: identityIds } } }).catch(() => null);
-        }
-        await db.formationCandidateIdentity.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.materializationReceipt.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationSessionLifecycleEvent.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationSessionEvent.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationSession.deleteMany({ where: { id: { in: sessionIds } } }).catch(() => null);
-      }
-
-      const responsibilities = await db.responsibility
-        .findMany({ where: { workspaceId, originCaptureId: { in: captureIds } }, select: { id: true } })
-        .catch(() => []);
-      const responsibilityIds = responsibilities.map((r) => r.id);
-      if (responsibilityIds.length > 0) {
-        await db.eventLog.deleteMany({ where: { aggregateType: "Responsibility", aggregateId: { in: responsibilityIds } } }).catch(() => null);
-        await db.outboxEvent.deleteMany({ where: { aggregateId: { in: responsibilityIds } } }).catch(() => null);
-        await db.$executeRawUnsafe(`DELETE FROM responsibility_embeddings WHERE responsibility_id = ANY($1::text[])`, responsibilityIds).catch(() => null);
-      }
-      await db.responsibility.deleteMany({ where: { workspaceId, originCaptureId: { in: captureIds } } }).catch(() => null);
-
-      const contexts = await db.projectContext.findMany({ where: { workspaceId }, select: { id: true } }).catch(() => []);
-      const contextIds = contexts.map((c) => c.id);
-      if (contextIds.length > 0) {
-        await db.projectContextEmbedding.deleteMany({ where: { contextId: { in: contextIds } } }).catch(() => null);
-        await db.eventLog.deleteMany({ where: { aggregateId: { in: contextIds } } }).catch(() => null);
-        await db.outboxEvent.deleteMany({ where: { aggregateId: { in: contextIds } } }).catch(() => null);
-        await db.projectContext.deleteMany({ where: { id: { in: contextIds } } }).catch(() => null);
-      }
-
-      await db.eventLog.deleteMany({ where: { aggregateId: { in: captureIds } } }).catch(() => null);
-      await db.outboxEvent.deleteMany({ where: { aggregateId: { in: captureIds } } }).catch(() => null);
-      await db.aiInference.deleteMany({ where: { captureId: { in: captureIds } } }).catch(() => null);
-      await db.aiRun.deleteMany({ where: { captureId: { in: captureIds } } }).catch(() => null);
-      await db.capture.deleteMany({ where: { id: { in: captureIds } } }).catch(() => null);
     }
 
-    await db.workspaceMember.deleteMany({ where: { userId } }).catch(() => null);
-    if (workspaceId) {
-      await db.workspace.deleteMany({ where: { id: workspaceId } }).catch(() => null);
+    // --- Formation Session/Responsibility/ProjectContext/Capture/User/Workspace ---
+    // 既存の確立されたヘルパー(formationAtomicityAssessment/Override等の正しい
+    // FK削除順序を含む)へ委譲する。
+    const result = await cleanupFormationVerifyUser(db, userId);
+    if (result.errors.length > 0) {
+      console.log(`  [cleanup警告] cleanupFormationVerifyUserでエラー${result.errors.length}件:`);
+      for (const e of result.errors) {
+        console.log(`    - ${e.step}: ${String(e.error)}`);
+      }
     }
-    await db.user.deleteMany({ where: { id: userId } }).catch(() => null);
   }
 
   async function makeFixture(suffix: string) {
