@@ -6,6 +6,7 @@ import { debugServer } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { enqueueCaseDetect } from "@/lib/patterns/caseDetectQueue";
 
 /**
  * 統合正本仕様書21.2節: DELETE /project-contexts/{id}/links/{responsibilityId}
@@ -98,6 +99,18 @@ export async function DELETE(
         payload: { contextId, responsibilityId, role: activeLink.role },
       },
     });
+
+    // [PATTERN-DETECT-01B新設・2026-09-03] PRIMARY link解除は、この本人の
+    // Case Pattern occurrence集合が1件減る契機(DR-A、PD-08「unlink後に
+    // raw/weighted/confidence減少」)のため、検出Jobをenqueueする。
+    // SUPPORTING/REFERENCEの解除はoccurrence計上に影響しない(DR-A)ため対象外。
+    if (activeLink.role === "PRIMARY") {
+      await enqueueCaseDetect(tx, {
+        workspaceId,
+        ownerSubjectUserId: context.ownerSubjectUserId,
+        reasonCode: "PRIMARY_UNLINKED",
+      });
+    }
   });
 
   return apiOk({ unlinked: true });

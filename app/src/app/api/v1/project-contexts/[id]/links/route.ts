@@ -13,6 +13,7 @@ import {
   hasConflictingActivePrimaryLink,
   hasConflictingActiveLinkForSamePair,
 } from "@/lib/projectContext/coreTypes";
+import { enqueueCaseDetect } from "@/lib/patterns/caseDetectQueue";
 
 /**
  * V5-M1-A2 API-C04相当(パスは統合正本21.2節に合わせ`/links`): POST /project-contexts/{id}/links
@@ -154,6 +155,18 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           payload: { contextId, responsibilityId, role },
         },
       });
+
+      // [PATTERN-DETECT-01B新設・2026-09-03] PRIMARY link作成は、この本人の
+      // Case Pattern候補occurrenceが1件増える可能性がある契機(DR-A)のため、
+      // 検出Jobをenqueueする(既存PENDING/PROCESSING行があればcoalescing)。
+      // SUPPORTING/REFERENCEはoccurrenceとして計上されない(DR-A)ため対象外。
+      if (role === "PRIMARY") {
+        await enqueueCaseDetect(tx, {
+          workspaceId,
+          ownerSubjectUserId: context.ownerSubjectUserId,
+          reasonCode: "PRIMARY_LINKED",
+        });
+      }
 
       return link;
     });

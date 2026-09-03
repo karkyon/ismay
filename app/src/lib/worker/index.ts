@@ -11,6 +11,7 @@ import { processRecurrenceGeneration } from "@/lib/worker/recurrenceGenerationJo
 import { processPemObservation } from "@/lib/worker/pemObserverJob";
 import { processSessionTimeouts } from "@/lib/worker/sessionTimeoutJob";
 import { processRecomputeQueue } from "@/lib/worker/recomputeQueueJob";
+import { processCaseDetectQueue } from "@/lib/worker/caseDetectQueueJob";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -66,6 +67,11 @@ async function tick(): Promise<void> {
     // (recomputeQueueJob.ts参照)。shadowReconciliation同様、自己スロットリング
     // 不要な軽量ポーリングのため5秒tickの中で毎回呼ぶ。
     const recomputeQueueResult = await processRecomputeQueue();
+    // PATTERN-DETECT-01B(2026-09-03新設): PRIMARY link作成/解除でmark stale
+    // されたCase Pattern検出Jobを、FOR UPDATE SKIP LOCKEDでバッチclaimし
+    // 処理する(caseDetectQueueJob.ts参照)。recomputeQueue同様、自己スロット
+    // リング不要な軽量ポーリングのため5秒tickの中で毎回呼ぶ。
+    const caseDetectQueueResult = await processCaseDetectQueue();
     if (
       relayResult.relayed > 0 ||
       jobResult.processed > 0 ||
@@ -81,7 +87,9 @@ async function tick(): Promise<void> {
       pemResult.processed > 0 ||
       sessionTimeoutResult.processed > 0 ||
       recomputeQueueResult.processed > 0 ||
-      recomputeQueueResult.deadLettered > 0
+      recomputeQueueResult.deadLettered > 0 ||
+      caseDetectQueueResult.processed > 0 ||
+      caseDetectQueueResult.deadLettered > 0
     ) {
       debugServer.event("Worker/tick", "tick完了", {
         ...relayResult,
@@ -99,6 +107,8 @@ async function tick(): Promise<void> {
         sessionTimeoutProcessed: sessionTimeoutResult.processed,
         recomputeQueueProcessed: recomputeQueueResult.processed,
         recomputeQueueDeadLettered: recomputeQueueResult.deadLettered,
+        caseDetectQueueProcessed: caseDetectQueueResult.processed,
+        caseDetectQueueDeadLettered: caseDetectQueueResult.deadLettered,
       });
     }
   } catch (err) {

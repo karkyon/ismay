@@ -73,6 +73,9 @@ model User {
   /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePatternFeedbackEvent.actorUserId
   /// からの逆relation。
   casePatternFeedbackEvents               CasePatternFeedbackEvent[]
+  /// [PATTERN-DETECT-01B新設・2026-09-03] CasePatternDetectJob.ownerSubjectUserId
+  /// からの逆relation。
+  casePatternDetectJobsOwned              CasePatternDetectJob[]             @relation("CasePatternDetectJobOwner")
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
@@ -161,6 +164,8 @@ model Workspace {
   formationSessions     FormationSession[]
   /// [PATTERN-SCHEMA-01新設・2026-09-03]
   casePatterns          CasePattern[]
+  /// [PATTERN-DETECT-01B新設・2026-09-03]
+  casePatternDetectJobs CasePatternDetectJob[]
 
   @@map("workspaces")
 }
@@ -2805,4 +2810,65 @@ model CasePatternEmbedding {
 
   @@unique([workspaceId, revisionId, model], map: "case_pattern_embeddings_revision_model_uq")
   @@map("case_pattern_embeddings")
+}
+
+// =====================================================================
+// V5-M4 Case Pattern Detect Queue(PATTERN-DETECT-01B)
+// 出典: Claude向け_ISMAY_0fcea2b以降_再監査是正・PATTERN-DETECT連続実装指示_2026-09-03.md
+// §6 PATTERN-DETECT-01B「既存ProjectionRecomputeJobのlease、heartbeat、
+// coalescing、generation、retry、dead-letterを再利用する」。
+//
+// [設計判断・2026-09-03] ProjectionRecomputeJob(pem/recomputeQueue.ts)は
+// (workspaceId, responsibilityId, projectionType)単位のqueueだが、Case
+// Pattern検出はDOC-06 §5「CasePatternの識別は(workspaceId,
+// ownerSubjectUserId, patternKey)」の通りResponsibility単位ではなく
+// 本人(ownerSubjectUserId)単位で行う(1本人の複数occurrenceを横断して
+// クラスタリングするため)。この単位の違いにより、既存
+// ProjectionRecomputeJobテーブルを流用(projectionTypeに値を追加する等)
+// するのではなく、同じ設計パターン(lease/generation/backoff/dead-letter)
+// を再実装した専用テーブルとする(指示書「コピー後に乖離させず共通化可能性を
+// 検討する。ただし既存queueを壊す大規模リファクタは別Gate」に従い、
+// queueの状態機械ロジック自体はrecomputeQueue.tsと可能な限り同一の設計に
+// 揃える。テーブル統合は将来の別Gateで検討する)。
+//
+// [scope注記・2026-09-03] このGateではqueueインフラ(enqueue/claim/complete/
+// fail/generation)とtrigger配線(PRIMARY link作成・解除)のみを実装する。
+// 実際の検出アルゴリズム(集計・クラスタリング)はPATTERN-DETECT-01C/01Dで
+// 実装するため、Job処理ハンドラは現時点ではno-opプレースホルダとする
+// (caseDetectQueueJob.ts参照。想像でクラスタリングアルゴリズムを
+// 先行実装しない)。Correction・Evidence deletion・Pattern definition/
+// model version変更からのenqueueは、対象サブシステムの精査を要するため
+// 本Gateでは配線せず、別途整理のうえ後続Gateで追加する(DECISION_REQUIREDでは
+// なく、単純に本Gateのscopeを絞った上での延期)。
+model CasePatternDetectJob {
+  id                 String    @id @default(uuid())
+  workspaceId        String    @map("workspace_id")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id])
+  /// DOC-06 §5のCase Pattern識別単位(本人)。この本人の全occurrenceを
+  /// 横断して検出処理を再実行する、という単位でのqueueとなる。
+  ownerSubjectUserId String    @map("owner_subject_user_id")
+  ownerSubjectUser   User      @relation("CasePatternDetectJobOwner", fields: [ownerSubjectUserId], references: [id])
+  /// PENDING/PROCESSING/DONE/FAILED/DEAD_LETTER(ProjectionRecomputeJobと同じ語彙)。
+  status             String    @default("PENDING")
+  /// coalescing時に増加。PROCESSING中に増加した場合、claim時に保持した
+  /// generationと完了時の値が食い違うため、Workerの結果をDONE確定させず
+  /// PENDINGへ差し戻す(PD-07「古いWorker結果のcommit0」)。
+  generation         Int       @default(1)
+  attempt            Int       @default(0)
+  maxAttempts        Int       @default(8) @map("max_attempts")
+  leaseOwner         String?   @map("lease_owner")
+  leaseExpiresAt     DateTime? @map("lease_expires_at")
+  nextAttemptAt      DateTime  @default(now()) @map("next_attempt_at")
+  /// PRIMARY_LINKED/PRIMARY_UNLINKED(本Gateで配線する2種のみ。指示書が
+  /// 列挙するCORRECTION/EVIDENCE_DELETION/DEFINITION_CHANGEは後続Gateで追加)。
+  reasonCode         String    @map("reason_code")
+  lastErrorCode      String?   @map("last_error_code")
+  lastErrorDigest    String?   @map("last_error_digest")
+  completedAt        DateTime? @map("completed_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([workspaceId, ownerSubjectUserId, status])
+  @@map("case_pattern_detect_jobs")
 }
