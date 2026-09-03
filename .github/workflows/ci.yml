@@ -12,6 +12,25 @@ name: CI
 #   - APIキー必須のAI呼び出しを伴う試験: 費用が発生するため無料Gateの対象外。
 # これらは指示書の方針通り、対象外である理由を明記した上で除外している
 # (想像で除外しているのではなく、実行環境上の制約が根拠)。
+#
+# Gate Q-CI-02 (2026-09-03追補)
+# 出典: Claude向け_ISMAY_03c9f6b以降_最新CI是正・PATTERN-SCHEMA-01確定指示_2026-09-03.md
+#
+# `src/lib/db.ts` は `export const db = ... createClient()` でモジュール読込時に
+# 即座にPrismaClientを構築する設計であり、DATABASE_URL未設定だとその場でthrowする。
+# `next build`の「Collecting page data」フェーズは全routeモジュールをimportして
+# 静的解析するため、DATABASE_URLが無いとbuildそのものが失敗する(実行時のfail-fast
+# を弱めたわけではなく、buildプロセスがモジュールをロードする際に必然的に発生する)。
+#
+# `@prisma/adapter-pg`の`PrismaPg`(実体`PrismaPgAdapterFactory`)のconstructorは
+# 接続文字列を保持するだけで、実際のTCP接続は非同期`connect()`が呼ばれた時点
+# (Prisma Clientが実際にqueryを発行する時)まで発生しない
+# (node_modules/@prisma/adapter-pg/dist/index.js で確認済み)。そのため、
+# 到達不能なダミーURLをbuild時にだけ与えても実接続は発生せず、構文的に妥当な
+# DATABASE_URLの「形」だけがあればよい。秘密値・実運用の接続先は一切含めない。
+#
+# `db.ts`自体は変更していない(実行時のfail-fastを弱める修正は指示書で明示的に
+# 禁止されている)。
 
 on:
   push:
@@ -26,6 +45,12 @@ jobs:
     defaults:
       run:
         working-directory: app
+    env:
+      # Gate Q-CI-02: build時の静的解析(next build の「Collecting page data」)が
+      # src/lib/db.ts の即時PrismaClient構築をthrowさせないためだけの、
+      # 到達不能なダミー接続文字列。秘密値ではない。実DB接続はこのCIでは発生しない
+      # (上記コメント参照)。
+      DATABASE_URL: "postgresql://ismay_ci:ismay_ci@127.0.0.1:5432/ismay_ci?schema=public"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
