@@ -1,0 +1,59 @@
+name: CI
+
+# Gate Q-CI-01 (2026-09-03)
+# 出典: Claude向け_ISMAY_390c380以降_監査是正・次工程連続実装指示_2026-09-03.md
+#
+# 対象範囲: prisma validate/generate, tsc --noEmit, eslint, 全pure/invariant test
+# (24ファイル・343テスト、find+xargsで自動網羅、将来ファイル追加にも自動追従), production build。
+#
+# 対象外(このCIでは実行しない):
+#   - DB verify script (scripts/verify_gate_*.ts): postgres(pgvector拡張込み)が
+#     このワークフローに未提供のため。実行にはDATABASE_URL接続先が必要。
+#   - APIキー必須のAI呼び出しを伴う試験: 費用が発生するため無料Gateの対象外。
+# これらは指示書の方針通り、対象外である理由を明記した上で除外している
+# (想像で除外しているのではなく、実行環境上の制約が根拠)。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality:
+    name: tsc / eslint / tests / build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Prisma validate
+        run: npx prisma validate
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      - name: TypeScript check (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Pure / invariant tests (all __tests__/*.test.ts, no DB, no network)
+        run: npm run test:all
+
+      - name: Production build
+        run: npm run build

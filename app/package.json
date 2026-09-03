@@ -2,6 +2,9 @@
   "name": "app",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "next dev -p 13000",
     "build": "next build",
@@ -22,11 +25,20 @@
     "test:pem-8-9-10": "tsx src/lib/pem/__tests__/phase8_9_10Invariants.test.ts",
     "test:pem-completion-gate-1": "tsx src/lib/pem/__tests__/completionGate1Invariants.test.ts",
     "test:pem-completion-gate-2-1": "tsx src/lib/pem/__tests__/completionGate2_1Invariants.test.ts",
+    "test:pem": "tsx src/lib/pem/__tests__/phase0gInvariants.test.ts && tsx src/lib/pem/__tests__/phase0sInvariants.test.ts && tsx src/lib/pem/__tests__/phase0aInvariants.test.ts && tsx src/lib/pem/__tests__/phase0bInvariants.test.ts && tsx src/lib/pem/__tests__/phase0c1Invariants.test.ts && tsx src/lib/pem/__tests__/phase0c2Invariants.test.ts && tsx src/lib/pem/__tests__/phase0d1Invariants.test.ts && tsx src/lib/pem/__tests__/phase0eInvariants.test.ts && tsx src/lib/pem/__tests__/phase0aFix1Invariants.test.ts && tsx src/lib/pem/__tests__/phase0aFix2Invariants.test.ts && tsx src/lib/pem/__tests__/phase0b2Invariants.test.ts && tsx src/lib/pem/__tests__/phase0c1_2Invariants.test.ts && tsx src/lib/pem/__tests__/phase8_9_10Invariants.test.ts && tsx src/lib/pem/__tests__/completionGate1Invariants.test.ts && tsx src/lib/pem/__tests__/completionGate2_1Invariants.test.ts",
     "test:project-context": "tsx src/lib/projectContext/__tests__/coreInvariants.test.ts",
-    "test:formation": "tsx src/lib/formation/__tests__/coreInvariants.test.ts",
+    "test:formation-core": "tsx src/lib/formation/__tests__/coreInvariants.test.ts",
+    "test:formation-atomicity": "tsx src/lib/formation/__tests__/atomicityAssessment.test.ts",
+    "test:formation-pii": "tsx src/lib/formation/__tests__/piiClassifier.test.ts",
+    "test:formation-question-policy": "tsx src/lib/formation/__tests__/questionPolicy.test.ts",
+    "test:formation-source-anchor": "tsx src/lib/formation/__tests__/sourceAnchorAdapter.test.ts",
+    "test:formation-transcript-mapping": "tsx src/lib/formation/__tests__/transcriptSegmentMapping.test.ts",
+    "test:formation": "tsx src/lib/formation/__tests__/coreInvariants.test.ts && tsx src/lib/formation/__tests__/atomicityAssessment.test.ts && tsx src/lib/formation/__tests__/piiClassifier.test.ts && tsx src/lib/formation/__tests__/questionPolicy.test.ts && tsx src/lib/formation/__tests__/sourceAnchorAdapter.test.ts && tsx src/lib/formation/__tests__/transcriptSegmentMapping.test.ts",
     "test:ai-schema": "tsx src/lib/ai/__tests__/lenientExtractionParse.test.ts",
+    "test:ai-transcription": "tsx src/lib/ai/__tests__/openaiTranscriptionParse.test.ts",
+    "test:ai": "tsx src/lib/ai/__tests__/lenientExtractionParse.test.ts && tsx src/lib/ai/__tests__/openaiTranscriptionParse.test.ts",
     "test:pattern-math": "tsx src/lib/patterns/__tests__/casePatternMath.test.ts",
-    "test:pem": "tsx src/lib/pem/__tests__/phase0gInvariants.test.ts && tsx src/lib/pem/__tests__/phase0sInvariants.test.ts && tsx src/lib/pem/__tests__/phase0aInvariants.test.ts && tsx src/lib/pem/__tests__/phase0bInvariants.test.ts && tsx src/lib/pem/__tests__/phase0c1Invariants.test.ts && tsx src/lib/pem/__tests__/phase0c2Invariants.test.ts && tsx src/lib/pem/__tests__/phase0d1Invariants.test.ts && tsx src/lib/pem/__tests__/phase0eInvariants.test.ts && tsx src/lib/pem/__tests__/phase0aFix1Invariants.test.ts && tsx src/lib/pem/__tests__/phase0aFix2Invariants.test.ts && tsx src/lib/pem/__tests__/phase0b2Invariants.test.ts && tsx src/lib/pem/__tests__/phase0c1_2Invariants.test.ts && tsx src/lib/pem/__tests__/phase8_9_10Invariants.test.ts && tsx src/lib/pem/__tests__/completionGate1Invariants.test.ts && tsx src/lib/pem/__tests__/completionGate2_1Invariants.test.ts"
+    "test:all": "find src/lib -path '*/__tests__/*.test.ts' -type f -print0 | sort -z | xargs -0 -n1 node --import tsx"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",
