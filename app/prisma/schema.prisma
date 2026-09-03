@@ -315,6 +315,12 @@ model Responsibility {
   title                      String
   description                String?
   status                     String
+  /// [M1-OUTCOME新設・2026-09-03] 統合正本仕様書v5.0 §7.4「NOT_NEEDEDへ、単なる
+  /// 不要化と履行断念を混在させてはならない。状態とは別にLifecycle Outcome
+  /// Reasonを記録する」。status="NOT_NEEDED"の時のみ設定される
+  /// (responsibility.ts LIFECYCLE_OUTCOME_REASONS参照)。既存データは
+  /// migrationでUNKNOWN_LEGACYへbackfillする(§27.1)。
+  outcomeReasonCode          String?                          @map("outcome_reason_code")
   importance                 Int?
   /// 0〜1
   confidence                 Decimal?                         @db.Decimal(4, 3)

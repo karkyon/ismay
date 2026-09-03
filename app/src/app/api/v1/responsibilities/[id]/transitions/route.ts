@@ -11,6 +11,9 @@ import {
   transitionsForType,
   isTypeSpecificTerminalStatus,
   ACTIONS_REQUIRING_REASON,
+  ACTIONS_REQUIRING_OUTCOME_REASON,
+  isValidLifecycleOutcomeReason,
+  SELECTABLE_LIFECYCLE_OUTCOME_REASONS,
 } from "@/lib/responsibility";
 import { recordExecutionLedgerEvent } from "@/lib/pem/executionLedger";
 import { projectAndPersistExecutionSessions } from "@/lib/pem/sessionPersistence";
@@ -47,6 +50,9 @@ const TransitionSchema = z.object({
   ]),
   occurredAt: z.string().datetime(),
   reason: z.string().max(2000).optional(),
+  // [M1-OUTCOME新設] MARK_NOT_NEEDED時に必須の選択式Reason Code。
+  // 自由入力(reason)とは別に、正本§7.4の7語彙から選ぶ(下でrefineする)。
+  outcomeReasonCode: z.string().max(64).optional(),
   completedScope: z.string().max(2000).optional(),
   remainingWork: z.string().max(2000).optional(),
   newTargetAt: z.string().datetime().optional(),
@@ -98,6 +104,35 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return apiError("VALIDATION_FAILED", "この操作には理由(reason)の入力が必要です", {
       fieldErrors: { reason: "reasonを指定してください" },
     });
+  }
+
+  // [M1-OUTCOME新設・統合正本v5.0 §7.4] MARK_NOT_NEEDEDはLifecycle Outcome
+  // Reason Codeの選択が必須。自由入力metadataではなく選択式の正式語彙にする
+  // (「単なる不要化」と「履行断念」等を区別できるようにする)。
+  if (ACTIONS_REQUIRING_OUTCOME_REASON.includes(action)) {
+    if (!parsed.data.outcomeReasonCode) {
+      return apiError(
+        "VALIDATION_FAILED",
+        "この操作には理由区分(outcomeReasonCode)の選択が必要です",
+        {
+          fieldErrors: {
+            outcomeReasonCode: `次のいずれかを指定してください: ${SELECTABLE_LIFECYCLE_OUTCOME_REASONS.join(", ")}`,
+          },
+        },
+      );
+    }
+    if (!isValidLifecycleOutcomeReason(parsed.data.outcomeReasonCode) || parsed.data.outcomeReasonCode === "UNKNOWN_LEGACY") {
+      // UNKNOWN_LEGACYは既存データの移行専用であり、本人が新規に選ぶことはできない。
+      return apiError(
+        "VALIDATION_FAILED",
+        "指定された理由区分は無効です",
+        {
+          fieldErrors: {
+            outcomeReasonCode: `次のいずれかを指定してください: ${SELECTABLE_LIFECYCLE_OUTCOME_REASONS.join(", ")}`,
+          },
+        },
+      );
+    }
   }
 
   const { id } = await ctx.params;
@@ -156,6 +191,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // MITIGATED/OCCURRED/CLOSED等)に到達した時点を「完了日時」として記録する。REOPENでは解除する。
   const reachesTerminal = nextStatus === "COMPLETED" || isTypeSpecificTerminalStatus(existing.type, nextStatus);
   const completedAtValue = reachesTerminal ? new Date() : action === "REOPEN" ? null : undefined;
+  // [M1-OUTCOME新設] NOT_NEEDEDへ遷移する時のみ設定する。REOPEN等で他の状態へ
+  // 戻る場合はクリアする(統合正本v5.0 §7.4の意味論はNOT_NEEDED状態に紐づく
+  // ものであり、他状態へ遷移した後も古いreasonが残ると誤解を招くため)。
+  const outcomeReasonCodeValue =
+    nextStatus === "NOT_NEEDED" ? parsed.data.outcomeReasonCode : action === "REOPEN" ? null : undefined;
 
   const result = await db.$transaction(async (tx: Prisma.TransactionClient) => {
     const updateResult = await tx.responsibility.updateMany({
@@ -163,6 +203,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       data: {
         status: nextStatus,
         completedAt: completedAtValue,
+        outcomeReasonCode: outcomeReasonCodeValue,
         targetAt: newTargetAt ? new Date(newTargetAt) : undefined,
         updatedById: auth.user.userId,
         version: { increment: 1 },
@@ -258,5 +299,5 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     });
   }
 
-  return apiOk({ id: result.id, status: result.status, version: result.version });
+  return apiOk({ id: result.id, status: result.status, version: result.version, outcomeReasonCode: result.outcomeReasonCode });
 }

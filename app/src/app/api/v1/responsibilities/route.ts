@@ -215,6 +215,8 @@ export async function GET(req: NextRequest) {
       type: true,
       title: true,
       status: true,
+      // [M1-OUTCOME新設] NOT_NEEDEDの理由区分を一覧でも表示できるようにする。
+      outcomeReasonCode: true,
       importance: true,
       domainId: true,
       hardDeadlineAt: true,

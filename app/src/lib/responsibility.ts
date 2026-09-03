@@ -259,3 +259,41 @@ export function isTypeSpecificTerminalStatus(type: string, status: string): bool
 
 /** reasonの入力(選択理由)を必須とするアクション。DECISION完了条件「選択と理由が記録」に対応。 */
 export const ACTIONS_REQUIRING_REASON: readonly TransitionAction[] = ["DECIDE"];
+
+/**
+ * [M1-OUTCOME新設・2026-09-03] Lifecycle Outcome Reason(統合正本仕様書v5.0
+ * §7.4「NOT_NEEDEDへ、単なる不要化と履行断念を混在させてはならない。状態とは
+ * 別にLifecycle Outcome Reasonを記録する」)。
+ *
+ * 正本が明記する7語彙 + 移行用のUNKNOWN_LEGACY(§27.1「既存NOT_NEEDEDは放棄か
+ * 不要かを推測せずUNKNOWN_LEGACY理由とする」)。想像で他の値を追加しない。
+ */
+export const LIFECYCLE_OUTCOME_REASONS = [
+  "NO_LONGER_NEEDED",
+  "DUPLICATE",
+  "SUPERSEDED",
+  "ABANDONED_BY_USER",
+  "CANCELLED_EXTERNALLY",
+  "SCOPE_REMOVED",
+  "CREATED_BY_MISTAKE",
+  /** 移行専用。本人が明示的に選択することはない(§27.1参照)。 */
+  "UNKNOWN_LEGACY",
+] as const;
+export type LifecycleOutcomeReason = (typeof LIFECYCLE_OUTCOME_REASONS)[number];
+
+/** 本人が新規にMARK_NOT_NEEDEDする際に選択可能な語彙(UNKNOWN_LEGACYを除く)。 */
+export const SELECTABLE_LIFECYCLE_OUTCOME_REASONS: readonly LifecycleOutcomeReason[] =
+  LIFECYCLE_OUTCOME_REASONS.filter((r) => r !== "UNKNOWN_LEGACY");
+
+export function isValidLifecycleOutcomeReason(value: string): value is LifecycleOutcomeReason {
+  return (LIFECYCLE_OUTCOME_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * outcomeReasonCode(選択式Reason Code)を必須とするアクション。§7.4の要求は
+ * 「NOT_NEEDEDへの遷移」全般を指すため、MARK_NOT_NEEDEDのみが対象となる
+ * (CANCELLEDは現行コードで到達経路が未実装、v5§7.2「CANCELLEDは現行で到達
+ * 経路が未実装であるため、v5実装時に終了理由と共に遷移を確定する」との
+ * 記載通り、このGateでは対象に含めない=想像で新しい遷移経路を作らない)。
+ */
+export const ACTIONS_REQUIRING_OUTCOME_REASON: readonly TransitionAction[] = ["MARK_NOT_NEEDED"];
