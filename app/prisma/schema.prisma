@@ -2674,6 +2674,13 @@ model CasePatternRevision {
 
   @@unique([patternId, revision], map: "case_pattern_revisions_pattern_revision_uq")
   @@unique([id, workspaceId], map: "case_pattern_revisions_id_workspace_uq")
+  /// [PATTERN-SCHEMA-02B是正・2026-09-03] CasePatternFeedbackEventが
+  /// (patternRevisionId, patternId, workspaceId)の複合FKでこのrevisionを
+  /// 参照するための参照用unique。既存の(id, workspaceId)一意制約だけでは
+  /// 「このrevisionが本当にこのpatternIdに属するか」をDBが保証できず、
+  /// 別Patternのpattern_idと組み合わせた不整合行が挿入できてしまっていた
+  /// (指示書§3.1)。
+  @@unique([id, patternId, workspaceId], map: "case_pattern_revisions_id_pattern_ws_uq")
   @@map("case_pattern_revisions")
 }
 
@@ -2754,8 +2761,15 @@ model CasePatternFeedbackEvent {
   patternId         String              @map("pattern_id")
   pattern           CasePattern         @relation(fields: [patternId, workspaceId], references: [id, workspaceId])
   /// 「採否は提案Revisionに固定」を満たすための不変参照。
+  /// [PATTERN-SCHEMA-02B是正・2026-09-03] 従来は(patternRevisionId, workspaceId)
+  /// のみでcase_pattern_revisionsを参照しており、pattern_idとの整合性は
+  /// DBレベルで一切検証されていなかった。そのため同一workspace内で
+  /// 「patternIdはPattern Aだがpattern_revisionIdはPattern Bのrevision」という
+  /// 不整合行が挿入可能だった(指示書§3.1、DOC-06 §7「採否は提案Revisionに固定」
+  /// への違反)。複合FK(patternRevisionId, patternId, workspaceId)へ変更し、
+  /// DBレベルでこの不整合を拒否する。
   patternRevisionId String              @map("pattern_revision_id")
-  patternRevision   CasePatternRevision @relation(fields: [patternRevisionId, workspaceId], references: [id, workspaceId])
+  patternRevision   CasePatternRevision @relation(fields: [patternRevisionId, patternId, workspaceId], references: [id, patternId, workspaceId])
   /// [契約差分・DECISION未確定] Suggestion entity自体がこのGateのscope外
   /// (PATTERN-DETECT-01以降の提案API §7)のため、FK制約の無い文字列として
   /// 保持する。Suggestion entity実装時に正式なFKへ移行するmigrationを追加

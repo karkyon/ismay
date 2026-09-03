@@ -585,6 +585,83 @@ async function main(): Promise<void> {
     }
 
     // ================================================================
+    // PS-11: [PATTERN-SCHEMA-02B是正・2026-09-03] case_pattern_feedback_events
+    // のpattern_idとpattern_revision_idの不整合をDB複合FKで拒否する
+    // (指示書§3.1)。従来は(pattern_revision_id, workspace_id) -> revisions
+    // という単純FKのみで、pattern_idとrevisionの対応がDBレベルで一切
+    // 検証されていなかった。同一workspace内の別Patternのpattern_idと
+    // pattern_revision_idを混在させたINSERTが拒否されることを確認する。
+    // ================================================================
+    {
+      const fx = await makeFixture("ps11");
+      const patternA = await db.casePattern.create({
+        data: { workspaceId: fx.workspaceId, ownerSubjectUserId: fx.userId, patternKey: `pk-${RUN_ID}-ps11a`, title: "PS-11検証パターンA" },
+      });
+      const patternB = await db.casePattern.create({
+        data: { workspaceId: fx.workspaceId, ownerSubjectUserId: fx.userId, patternKey: `pk-${RUN_ID}-ps11b`, title: "PS-11検証パターンB" },
+      });
+      const revA = await createCasePatternRevision({
+        workspaceId: fx.workspaceId,
+        patternId: patternA.id,
+        representativeText: "検証用A",
+        decompositionTemplate: {},
+        thresholds: {},
+        schemaVersion: "1.0",
+      });
+      const revB = await createCasePatternRevision({
+        workspaceId: fx.workspaceId,
+        patternId: patternB.id,
+        representativeText: "検証用B",
+        decompositionTemplate: {},
+        thresholds: {},
+        schemaVersion: "1.0",
+      });
+
+      let mismatchRejected = false;
+      try {
+        // pattern_id=Pattern A、pattern_revision_id=Pattern Bのrevisionという
+        // 不整合行を、raw SQLでPrisma層の型チェックを迂回して直接試みる
+        // (Prisma Clientの型定義自体はpatternIdとpatternRevisionIdを別々の
+        // scalarとして受け付けてしまうため、型では防げず、DB制約でのみ防げる
+        // ことを確認する必要がある)。
+        await db.$executeRawUnsafe(
+          `INSERT INTO case_pattern_feedback_events
+             (id, workspace_id, pattern_id, pattern_revision_id, suggestion_id, verdict, actor_user_id, occurred_at)
+           VALUES (gen_random_uuid()::text, $1, $2, $3, 'ps11-mismatch', 'ACCEPT', $4, now())`,
+          fx.workspaceId,
+          patternA.id,
+          revB.revisionId,
+          fx.userId,
+        );
+      } catch (err) {
+        mismatchRejected = true;
+        void err;
+      }
+      ok(
+        "[PS-11] pattern_idとpattern_revision_idが別Patternの組み合わせのINSERTは複合FKで拒否される",
+        mismatchRejected,
+      );
+
+      let matchSucceeded = false;
+      try {
+        await db.casePatternFeedbackEvent.create({
+          data: {
+            workspaceId: fx.workspaceId,
+            patternId: patternA.id,
+            patternRevisionId: revA.revisionId,
+            suggestionId: "ps11-match",
+            verdict: "ACCEPT",
+            actorUserId: fx.userId,
+          },
+        });
+        matchSucceeded = true;
+      } catch (err) {
+        console.log("  [PS-11 debug] matching insert failed unexpectedly:", err);
+      }
+      ok("[PS-11] pattern_idとpattern_revision_idが一致する正常なFeedbackEventは成功する", matchSucceeded);
+    }
+
+    // ================================================================
     // PS-09: Case Pattern golden dataset誤差1e-6以内
     // [参照のみ] casePatternMath.tsの純粋関数自体はM4-PATTERN-FOUNDATION
     // (commit 390c380)のsrc/lib/patterns/__tests__/casePatternMath.test.ts
