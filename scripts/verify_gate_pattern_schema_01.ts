@@ -238,7 +238,28 @@ async function main(): Promise<void> {
         type: "TASK",
         title: `検証用候補 ${key}`,
         description: null,
-        proposedFields: { candidateId: "c1", type: "TASK", title: `検証用候補 ${key}`, evidenceSpans: [], confidence: 0.9, dateMentions: [], unknowns: [], blockedByCandidateIds: [], suggestedTags: [] },
+        proposedFields: {
+          candidateId: "c1",
+          type: "TASK",
+          title: `検証用候補 ${key}`,
+          // [Gate PATTERN-SCHEMA-01 verify script是正・2026-09-03]
+          // materializeFormationSessionはAtomicity Materialize Guardを持ち、
+          // completionCondition欠落のTASKはassessAtomicity()でNEEDS_CLARIFICATION
+          // と判定されmaterializeが拒否される(atomicityAssessment.ts確認済み)。
+          // このverify scriptはAtomicity判定自体の検証が目的ではないため、
+          // ATOMIC判定されるよう明示的にcompletionConditionを供給する。
+          completionCondition: "検証用の完了条件",
+          // ResponsibilityCandidateSchema(src/lib/ai/schema.ts)は
+          // evidenceSpansを z.array(EvidenceSpanSchema).min(1) で必須化しており、
+          // 空配列はCORRUPTED_CANDIDATE_DATAで拒否される(実DB受入試験の実行結果で
+          // 判明)。rawTextの一部を指す最小限のspanを1件供給する。
+          evidenceSpans: [{ start: 0, end: 4 }],
+          confidence: 0.9,
+          dateMentions: [],
+          unknowns: [],
+          blockedByCandidateIds: [],
+          suggestedTags: [],
+        },
         confidence: 0.9,
         schemaVersion: "1.0",
       },
