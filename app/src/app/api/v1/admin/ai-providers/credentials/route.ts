@@ -5,6 +5,7 @@ import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { requireAdminConsoleRole } from "@/lib/auth/roleGuard";
 import { AI_CAPABILITIES, listAvailableProviderKeys } from "@/lib/ai/registry";
 import { encryptApiKey, last4Of } from "@/lib/ai/credentialCrypto";
 
@@ -15,6 +16,10 @@ import { encryptApiKey, last4Of } from "@/lib/ai/credentialCrypto";
  * APIキー本体は平文でDBへ保存せず、AES-256-GCM暗号化(lib/ai/credentialCrypto.ts、
  * 環境変数AI_CREDENTIAL_ENCRYPTION_KEYが必要)して保存する。GET応答には末尾4文字のみ
  * 含め、平文キー全体は一切返さない(登録済みかどうかの確認用途に限定)。
+ *
+ * [Gate SECURITY-RBAC-01是正・2026-09-03] APIキーの登録・削除という特に機微な操作
+ * のため、../route.tsと同じrequireAdminConsoleRole(OWNER/ADMINのみ)を追加した。
+ * 詳細な根拠は../route.tsのコメント参照。
  */
 
 const RegisteredProviderKeys = Array.from(new Set(AI_CAPABILITIES.flatMap((c) => listAvailableProviderKeys(c))));
@@ -60,6 +65,15 @@ export async function PUT(req: NextRequest) {
 
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
 
+  const roleOk = await requireAdminConsoleRole({
+    userId: auth.user.userId,
+    workspaceId,
+    action: "ADMIN_AI_CREDENTIAL_REGISTER",
+  });
+  if (!roleOk) {
+    return apiError("ACCESS_DENIED", "この操作には管理者権限(OWNER/ADMIN)が必要です");
+  }
+
   const saved = await db.aiProviderCredential.upsert({
     where: { workspaceId_providerKey: { workspaceId, providerKey } },
     create: {
@@ -104,6 +118,15 @@ export async function DELETE(req: NextRequest) {
   }
   const { providerKey } = parsed.data;
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+
+  const roleOk = await requireAdminConsoleRole({
+    userId: auth.user.userId,
+    workspaceId,
+    action: "ADMIN_AI_CREDENTIAL_DELETE",
+  });
+  if (!roleOk) {
+    return apiError("ACCESS_DENIED", "この操作には管理者権限(OWNER/ADMIN)が必要です");
+  }
 
   await db.aiProviderCredential.deleteMany({ where: { workspaceId, providerKey } });
   debugServer.state("DELETE /admin/ai-providers/credentials", "AiProviderCredential", {

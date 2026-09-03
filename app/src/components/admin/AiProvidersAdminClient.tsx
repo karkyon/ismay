@@ -219,6 +219,7 @@ export function AiProvidersAdminClient() {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setError("");
     const [providersRes, usageRes] = await Promise.all([
       debugFetch("/api/v1/admin/ai-providers"),
       debugFetch("/api/v1/admin/ai-usage"),
@@ -228,6 +229,11 @@ export function AiProvidersAdminClient() {
       debugLog.state("AiProvidersAdminClient", "capabilities", body.data.capabilities);
       setCapabilities(body.data.capabilities);
       setCredentials(body.data.credentials);
+    } else {
+      // [Gate SECURITY-RBAC-01是正] 管理API側でOWNER/ADMIN以外を拒否するようになった
+      // ため、拒否時に画面が無言で空表示になるのを避け、理由をそのまま表示する。
+      const body = await providersRes.json().catch(() => null);
+      setError(body?.error?.message ?? "設定の取得に失敗しました");
     }
     if (usageRes.ok) {
       const body = await usageRes.json();

@@ -5,6 +5,7 @@ import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { requireAdminConsoleRole } from "@/lib/auth/roleGuard";
 import {
   AI_CAPABILITIES,
   DEFAULT_PROVIDER_KEY,
@@ -17,12 +18,13 @@ import {
  * MOD-10 Admin / MOD-06 AI Gateway: AIプロバイダー切替・モデル選択(2026-08-20新設、
  * 同日追補でAPIキー登録・運用コスト可視化に対応)。
  *
- * [設計判断・未確認事項] システム基本設計書・要件定義書にMOD-10 Adminの認可モデル
- * (管理者ロール)の定義が無く、Userテーブルにもrole/isAdmin相当の列が存在しない
- * (schema.prisma確認済み)。ISMAYは現状カルキョンさん個人のワークスペース運用のため、
- * 本APIは新たな管理者ロールを追加せず、他の全APIと同じrequireAuth(Workspace所属)を
- * 認可条件とした。複数メンバーでの運用を始める場合は、WorkspaceMember.role等による
- * 管理者限定化が別途必要になる(TBD候補として台帳への追加を推奨)。
+ * [Gate SECURITY-RBAC-01是正・2026-09-03] 従来requireAuth(Workspace所属)のみで
+ * 認可していたが、統合正本仕様書v5.0 §20.2にWorkspaceMember.roleの正式語彙
+ * (OWNER/ADMIN/MEMBER/VIEWER/SERVICE)が明記されていること、DOC-11 API・Event
+ * 仕様書§21.1が「管理APIはrole guard」を明示的に要求していることを確認したため、
+ * requireAdminConsoleRole(OWNER/ADMINのみ許可)を追加した。現状はメンバー招待機能が
+ * 未実装のため各Workspaceの唯一のmemberは常にOWNERであり、既存の単一利用者運用に
+ * 挙動変化は無い(招待機能実装時の先行防御)。
  */
 
 const CAPABILITY_ENUM = z.enum(AI_CAPABILITIES);
@@ -41,6 +43,15 @@ export async function GET(req: NextRequest) {
   }
 
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+
+  const roleOk = await requireAdminConsoleRole({
+    userId: auth.user.userId,
+    workspaceId,
+    action: "ADMIN_AI_PROVIDERS_VIEW",
+  });
+  if (!roleOk) {
+    return apiError("ACCESS_DENIED", "この操作には管理者権限(OWNER/ADMIN)が必要です");
+  }
 
   const [configRows, credentialRows] = await Promise.all([
     db.aiProviderConfig.findMany({ where: { workspaceId } }),
@@ -125,6 +136,15 @@ export async function PATCH(req: NextRequest) {
   }
 
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+
+  const roleOk = await requireAdminConsoleRole({
+    userId: auth.user.userId,
+    workspaceId,
+    action: "ADMIN_AI_PROVIDERS_UPDATE",
+  });
+  if (!roleOk) {
+    return apiError("ACCESS_DENIED", "この操作には管理者権限(OWNER/ADMIN)が必要です");
+  }
 
   const updated = await db.aiProviderConfig.upsert({
     where: { workspaceId_capability: { workspaceId, capability } },

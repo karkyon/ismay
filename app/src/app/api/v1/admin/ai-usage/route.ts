@@ -3,9 +3,14 @@ import { db } from "@/lib/db";
 import { requireAuth } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { requireAdminConsoleRole } from "@/lib/auth/roleGuard";
 
 /**
  * GET /api/v1/admin/ai-usage: AI運用コスト・利用状況の可視化(2026-08-20新設、同日追補)。
+ *
+ * [Gate SECURITY-RBAC-01是正・2026-09-03] 運用コスト・APIキー登録状況が間接的に
+ * わかる情報のため、../ai-providers/route.tsと同じrequireAdminConsoleRole
+ * (OWNER/ADMINのみ)を追加した。詳細な根拠は../ai-providers/route.tsのコメント参照。
  * 「一般的なAI APIツールと同じようなUI/UX、使用量・頻度・効率・効果の視覚的確認」への対応。
  *
  * 市販ツール(OpenAI Usage Dashboard、Anthropic Console、Langfuse等)を参考に、
@@ -28,6 +33,15 @@ export async function GET(req: NextRequest) {
   }
 
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+
+  const roleOk = await requireAdminConsoleRole({
+    userId: auth.user.userId,
+    workspaceId,
+    action: "ADMIN_AI_USAGE_VIEW",
+  });
+  if (!roleOk) {
+    return apiError("ACCESS_DENIED", "この操作には管理者権限(OWNER/ADMIN)が必要です");
+  }
 
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
