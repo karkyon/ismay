@@ -145,6 +145,26 @@ async function main(): Promise<void> {
     }
   }
 
+  // [2026-09-03是正・実DB受入試験で「remaining=3」判明]
+  // 他の確立されたverify script(例: verify_gate_m1a4_external_reference_conflict.ts)
+  // には必ず存在するSWEEP(過去の失敗run由来の孤立テストユーザーを本編実行前に
+  // 一括回収する)ステップが、このscriptには欠落していた。このGate開発中の
+  // 複数回の失敗run(case_patternsテーブル未作成・VERSION_CONFLICT・
+  // CORRUPTED_CANDIDATE_DATA)がそれぞれ孤立ユーザーを残しており、最終的な
+  // 「test用Userが1件も残っていない」assertionがそれらを検出していた
+  // (今回実行分のfixtureは正しく削除できていた=cleanupFormationVerifyUserの
+  // エラーは0件だった)。既存の確立されたSWEEPパターンをそのまま追加する。
+  const orphans = await db.user.findMany({
+    where: { email: { startsWith: EMAIL_PREFIX, endsWith: "@example.invalid" } },
+    select: { id: true },
+  });
+  if (orphans.length > 0) {
+    console.log(`[SWEEP] 過去実行の孤立テストユーザー${orphans.length}件を削除します...`);
+    for (const o of orphans) {
+      await cleanupTestUser(o.id);
+    }
+  }
+
   async function makeFixture(suffix: string) {
     const email = `${EMAIL_PREFIX}${RUN_ID}-${suffix}@example.invalid`;
     const user = await db.user.create({
