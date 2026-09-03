@@ -165,7 +165,7 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 | 項目 | 状態 |
 |---|---|
 | メールアドレス確認 | **未実装**。登録時に暫定的に即時検証済み扱い(`register/route.ts`にコメント明記)。Notification基盤(provider)未確定のため |
-| 管理者ロール(RBAC) | **意図的に未実装**。個人利用(1ユーザー1Workspace)を前提とし、`requireAuth`のみで認可。複数ユーザー・ロール分離が必要になった場合の拡張ポイントとしてコード内に明記済み |
+| 管理者ロール(RBAC) | **実装済み**(Gate SECURITY-RBAC-01)。統合正本仕様書v5.0 §20.2の正式語彙(`OWNER/ADMIN/MEMBER/VIEWER/SERVICE`)に基づき、管理API5エンドポイント(`/api/v1/admin/ai-providers`GET/PATCH、`/api/v1/admin/ai-providers/credentials`PUT/DELETE、`/api/v1/admin/ai-usage`GET)をOWNER/ADMINへ限定(`lib/auth/roleGuard.ts`)。拒否時はAuditLogへ記録。現状メンバー招待機能が未実装のため、各Workspaceの唯一のmemberは常にOWNERであり、単一利用者運用に挙動変化はない(招待機能実装への先行防御)。`/api/v1/audit-logs`は本人スコープの自己監査ログのため対象外(意図的) |
 | 30日Purge Job | **未実装**。アカウント削除はsoft delete(`deletedAt`)まで。物理削除ジョブは別途スケジュール実装が必要 |
 | Case Pattern永続化(6 table)・Detector・提案API・UI | **未実装**。確度計算式(`casePatternMath.ts`)のみ存在。DOC-06 §5の永続化スキーマ着手前に複数の設計判断(trigger条件・embedding model選定・Formation Candidateとの接続方式)を要する |
 | Metric Catalog(v4.0 10.3節の残り9指標) | **意図的に保留**。登録済みは1指標のみ。分子・分母・除外・品質等の完全な文言が業務判断待ちとコード内に明記済み |

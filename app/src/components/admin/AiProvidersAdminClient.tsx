@@ -203,8 +203,13 @@ const CAPABILITY_LABEL: Record<string, string> = {
  * /admin/ai-providers: FR-AI-07「AIモデルを交換可能にする」に基づくAIプロバイダー・
  * モデル切替、APIキー登録、運用コスト可視化の統合画面(2026-08-20新設・同日追補)。
  *
- * [既知の制約] 現状Userに管理者ロールの概念が無いため、Workspaceに所属する認証済み
- * ユーザーであれば誰でも変更できる(他の全画面と同じ認可レベル)。
+ * [Gate SECURITY-RBAC-01是正・2026-09-03] このUIが呼び出す5エンドポイント
+ * (GET/PATCH ai-providers、PUT/DELETE ai-providers/credentials、GET ai-usage)は
+ * `lib/auth/roleGuard.ts`のrequireAdminConsoleRoleによりWorkspaceMember.role
+ * (統合正本仕様書v5.0 §20.2: OWNER/ADMIN/MEMBER/VIEWER/SERVICE)がOWNER/ADMINの
+ * memberのみに限定されている(旧コメント「管理者ロールの概念が無い」は陳腐化のため
+ * 削除)。拒否時は403 ACCESS_DENIED・AuditLog記録。現状メンバー招待機能が未実装の
+ * ため、各Workspaceの唯一のmemberは常にOWNERであり、実際の挙動は変わらない。
  */
 export function AiProvidersAdminClient() {
   const [capabilities, setCapabilities] = useState<CapabilityConfig[]>([]);
