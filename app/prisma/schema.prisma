@@ -400,6 +400,10 @@ model Responsibility {
   /// mrsi_workspace_source_uqで保証)。
   mergeSourceItemAsSource     ResponsibilityMergeSourceItem?
 
+  /// [PEM-RECOMPUTE-QUEUE新設・2026-09-03] ProjectionRecomputeJobからの複合FK
+  /// (responsibilityId, workspaceId)の参照先として必要。
+  projectionRecomputeJobs ProjectionRecomputeJob[]
+
   /// [2026-08-24追加・Phase 0A是正2] ResponsibilityExecutionEventからの複合FK
   /// (responsibilityId, workspaceId)の参照先として必要(v4.0 4.1節「tenantを跨ぐ
   /// FK参照を禁止する」の機械的保証。既存の単一列idはunique(=PK)のため、
@@ -1281,6 +1285,73 @@ model ExecutionSessionRevision {
 
   @@unique([sessionIdentityId, revision], map: "esr_identity_revision_uq")
   @@map("execution_session_revisions")
+}
+
+/// TBL(PEM-RECOMPUTE-QUEUE新設・2026-09-03) projection_recompute_jobs
+/// 出典: ISMAY_統合正本仕様書_v5_0 §22.3「Recompute Queueは
+/// PENDING/PROCESSINGだけを対象とする部分一意制約、FOR UPDATE SKIP LOCKED、
+/// lease、heartbeat、指数backoff、attempt上限、dead letter、generationを持つ。
+/// coalescing時にgenerationを増加し、古いWorker結果をcommitさせない。」、
+/// DOC-05(Execution Event・Session Projection仕様書) 8章「Projection Jobは
+/// (workspaceId,responsibilityId,sourceGlobalSequence,derivationVersion)で
+/// 冪等。障害時は最後の成功checkpointから再開。新Correctionは影響範囲を
+/// mark staleし、read APIはprojectionStatus=FRESH/STALE/REBUILDING/FAILED
+/// を返す。再計算中も原Eventを表示可能にする。」
+///
+/// [scope宣言] projectionType列でProjection種別を汎化するが、実装済みの
+/// ハンドラは現時点でEXECUTION_SESSION(sessionPersistence.tsの
+/// projectAndPersistExecutionSessions、既存の内容不変チェックにより冪等)のみ。
+/// 再計算処理そのものは既存実装をそのまま呼び出し、想像で新しい再計算
+/// アルゴリズムを作らない。このtableは「いつ・何を再計算すべきか」という
+/// queue管理層のみを追加する(recomputeQueue.ts参照)。
+///
+/// [部分一意制約] (workspace_id, responsibility_id, projection_type)について
+/// status IN ('PENDING','PROCESSING')の行は高々1件(PostgreSQL部分unique index、
+/// migration.sqlで作成。Prisma schemaの@@uniqueは条件付きindexを表現できない)。
+model ProjectionRecomputeJob {
+  id                     String         @id @default(uuid())
+  workspaceId            String         @map("workspace_id")
+  responsibilityId       String         @map("responsibility_id")
+  responsibility         Responsibility @relation(fields: [responsibilityId, workspaceId], references: [id, workspaceId])
+  /// このProjectionの主体(PemAuthorizationContext.subjectUserId再構築用に非正規化)。
+  subjectUserId          String         @map("subject_user_id")
+  /// 現時点はEXECUTION_SESSIONのみ(recomputeQueue.ts RECOMPUTE_HANDLERS参照)。
+  projectionType         String         @map("projection_type")
+  /// PENDING/PROCESSING/DONE/FAILED/DEAD_LETTER(正本§22.3。FAILEDは
+  /// 現時点未使用の予約値、再試行可能な失敗はPENDINGへ戻すため実際には
+  /// PENDING⇄PROCESSING⇄{DONE,DEAD_LETTER}のみを遷移する)。
+  status                 String         @default("PENDING")
+  /// coalescing(enqueueRecomputeの再呼出し)時に増加。PROCESSING中に増加した
+  /// 場合、claim時に保持したgenerationと完了時の値が食い違うため、Workerの
+  /// 結果をDONE確定させずPENDINGへ差し戻す(正本§22.3「古いWorker結果を
+  /// commitさせない」)。
+  generation             Int            @default(1)
+  attempt                Int            @default(0)
+  maxAttempts            Int            @default(8) @map("max_attempts")
+  leaseOwner             String?        @map("lease_owner")
+  leaseExpiresAt         DateTime?      @map("lease_expires_at")
+  /// PENDING行の次回claim対象時刻(指数backoff・coalescing時の前倒しに使う)。
+  nextAttemptAt          DateTime       @default(now()) @map("next_attempt_at")
+  /// DOC-05 8章「最後の成功checkpointから再開」の記録用(直近成功時点で
+  /// 反映していたresponsibilitySequence最大値)。現行の再計算処理は毎回全件を
+  /// 見る完全再計算のため実際の再開起点としては未使用だが、将来の差分再計算
+  /// 実装や運用調査のため保存する(想像で使い道を発明しない、記録のみ)。
+  lastCheckpointSequence Int?           @map("last_checkpoint_sequence")
+  derivationVersion      String         @map("derivation_version")
+  /// mark stale理由。CORRECTION/DELAYED_EVENT/MANUAL_REBUILD/
+  /// DERIVATION_VERSION_CHANGE(正本§22.3「Correction、遅延Event、Embedding
+  /// model変更、Pattern Definition変更」から、本Gate対象範囲=Session
+  /// Projectionに実際に該当するもののみ列挙)。
+  reasonCode             String         @map("reason_code")
+  lastErrorCode          String?        @map("last_error_code")
+  lastErrorDigest        String?        @map("last_error_digest")
+  completedAt            DateTime?      @map("completed_at")
+  createdAt              DateTime       @default(now()) @map("created_at")
+  updatedAt              DateTime       @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([workspaceId, responsibilityId, projectionType, status])
+  @@map("projection_recompute_jobs")
 }
 
 /// TBL(PEM Phase 0C-1-2) reason_prompts - Reason Prompt識別子

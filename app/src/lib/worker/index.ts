@@ -10,6 +10,7 @@ import { processCycleRotation } from "@/lib/worker/cycleRotationJob";
 import { processRecurrenceGeneration } from "@/lib/worker/recurrenceGenerationJob";
 import { processPemObservation } from "@/lib/worker/pemObserverJob";
 import { processSessionTimeouts } from "@/lib/worker/sessionTimeoutJob";
+import { processRecomputeQueue } from "@/lib/worker/recomputeQueueJob";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -60,6 +61,11 @@ async function tick(): Promise<void> {
     // PEM-SESSION-TIMEOUT(2026-09-02新設): 開いたままのExecution Sessionを
     // 1時間間隔の自己スロットリングでタイムアウトクローズする(sessionTimeoutJob.ts参照)。
     const sessionTimeoutResult = await processSessionTimeouts();
+    // PEM-RECOMPUTE-QUEUE(2026-09-03新設): Correction等でmark staleされた
+    // Projection再計算Jobを、FOR UPDATE SKIP LOCKEDでバッチclaimし処理する
+    // (recomputeQueueJob.ts参照)。shadowReconciliation同様、自己スロットリング
+    // 不要な軽量ポーリングのため5秒tickの中で毎回呼ぶ。
+    const recomputeQueueResult = await processRecomputeQueue();
     if (
       relayResult.relayed > 0 ||
       jobResult.processed > 0 ||
@@ -73,7 +79,9 @@ async function tick(): Promise<void> {
       cycleResult.processed > 0 ||
       recurrenceResult.processed > 0 ||
       pemResult.processed > 0 ||
-      sessionTimeoutResult.processed > 0
+      sessionTimeoutResult.processed > 0 ||
+      recomputeQueueResult.processed > 0 ||
+      recomputeQueueResult.deadLettered > 0
     ) {
       debugServer.event("Worker/tick", "tick完了", {
         ...relayResult,
@@ -89,6 +97,8 @@ async function tick(): Promise<void> {
         recurrenceProcessed: recurrenceResult.processed,
         pemProcessed: pemResult.processed,
         sessionTimeoutProcessed: sessionTimeoutResult.processed,
+        recomputeQueueProcessed: recomputeQueueResult.processed,
+        recomputeQueueDeadLettered: recomputeQueueResult.deadLettered,
       });
     }
   } catch (err) {

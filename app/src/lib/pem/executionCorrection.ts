@@ -26,7 +26,8 @@ import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db";
 import type { Prisma } from "@/generated/prisma/client";
 import { recordExecutionLedgerEvent } from "./executionLedger";
-import { projectAndPersistExecutionSessions } from "./sessionPersistence";
+import { projectAndPersistExecutionSessions, SESSION_DERIVATION_VERSION } from "./sessionPersistence";
+import { enqueueRecompute } from "./recomputeQueue";
 import type { PemAuthorizationContext } from "./authorizationBoundary";
 
 export interface RevokeCompleteEventParams {
@@ -132,6 +133,24 @@ export async function revokeCompleteEvent(
 
     if (reopenEvent) {
       await projectAndPersistExecutionSessions(tx, ctx, resp.id);
+      // [PEM-RECOMPUTE-QUEUE新設・2026-09-03] DOC-05 8章「新Correctionは影響
+      // 範囲をmark staleし…」。上の同一transaction内で既に同期的に再計算済み
+      // だが、Correction発生という事実自体をqueueへ記録することで、
+      // (a) GET /responsibilities/:id/execution-sessions のprojectionStatusが
+      //     「Correctionにより再計算対象になった」ことを追跡可能な状態として
+      //     可視化でき、(b) 将来SPLIT/MERGE等より波及範囲が大きいCorrection
+      //     種別を追加した際、同期再計算が困難なケースでもこのqueueへ
+      //     enqueueするだけで同じ回収経路(Worker)に乗せられる。
+      // insert-only projectAndPersistExecutionSessionsは冪等(内容不変なら
+      // Revision追記なし)のため、Workerが直後に空振り実行しても安全。
+      await enqueueRecompute(tx, {
+        workspaceId,
+        responsibilityId: resp.id,
+        subjectUserId: ctx.subjectUserId,
+        derivationVersion: SESSION_DERIVATION_VERSION,
+        projectionType: "EXECUTION_SESSION",
+        reasonCode: "CORRECTION",
+      });
     }
 
     await tx.responsibility.update({
