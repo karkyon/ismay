@@ -131,6 +131,10 @@ async function main(): Promise<void> {
   const { cleanupFormationVerifyUser } = await import("./lib/formationVerifyCleanup");
   const { createCasePatternRevision } = await import("../app/src/lib/patterns/casePatternRevisionService");
   const { embedAndStoreCasePatternRevision, matchCasePattern } = await import("../app/src/lib/patterns/casePatternMatching");
+  // [PATTERN-DETECT-02A是正・P1-2対応] matchCasePatternの引数がcandidateText(string)から
+  // candidate(CasePatternDetectionCandidateInput)へ変更されたため、fake providerの
+  // vectorsByTextキーもbuildCasePatternEmbeddingText()適用後の実際の送信テキストへ揃える。
+  const { buildCasePatternEmbeddingText } = await import("../app/src/lib/patterns/casePatternEmbeddingText");
 
   const createdFixtures: { userId: string; workspaceId: string }[] = [];
 
@@ -265,11 +269,12 @@ async function main(): Promise<void> {
       sharedPatternId = pat.patternId;
 
       const closeText = "close-candidate";
+      const closeCandidate = { representativeText: closeText, decompositionTemplate: null };
       const closeProvider = makeFakeEmbeddingProvider({
-        vectorsByText: new Map([[closeText, makeVectorWithSimilarityToBase(0.97)]]),
+        vectorsByText: new Map([[buildCasePatternEmbeddingText(closeCandidate), makeVectorWithSimilarityToBase(0.97)]]),
       });
       const closeResult = await matchCasePattern(
-        { workspaceId: sharedFx.workspaceId, ownerSubjectUserId: sharedFx.userId, candidateText: closeText },
+        { workspaceId: sharedFx.workspaceId, ownerSubjectUserId: sharedFx.userId, candidate: closeCandidate },
         { getProvider: async () => closeProvider },
       );
       ok("[基本] 明確に近い候補(sim≒0.97)はMATCHED", closeResult.kind === "MATCHED", `kind=${closeResult.kind}`);
@@ -279,11 +284,12 @@ async function main(): Promise<void> {
       }
 
       const farText = "far-candidate";
+      const farCandidate = { representativeText: farText, decompositionTemplate: null };
       const farProvider = makeFakeEmbeddingProvider({
-        vectorsByText: new Map([[farText, orthogonalVector()]]),
+        vectorsByText: new Map([[buildCasePatternEmbeddingText(farCandidate), orthogonalVector()]]),
       });
       const farResult = await matchCasePattern(
-        { workspaceId: sharedFx.workspaceId, ownerSubjectUserId: sharedFx.userId, candidateText: farText },
+        { workspaceId: sharedFx.workspaceId, ownerSubjectUserId: sharedFx.userId, candidate: farCandidate },
         { getProvider: async () => farProvider },
       );
       ok("[基本] 明確に遠い候補(直交ベクトル)はNO_MATCH", farResult.kind === "NO_MATCH", `kind=${farResult.kind}`);
@@ -312,11 +318,12 @@ async function main(): Promise<void> {
       });
 
       const closeText = "revscope-close-candidate";
+      const closeCandidate = { representativeText: closeText, decompositionTemplate: null };
       const closeProvider = makeFakeEmbeddingProvider({
-        vectorsByText: new Map([[closeText, makeVectorWithSimilarityToBase(0.97)]]),
+        vectorsByText: new Map([[buildCasePatternEmbeddingText(closeCandidate), makeVectorWithSimilarityToBase(0.97)]]),
       });
       const result = await matchCasePattern(
-        { workspaceId: fx.workspaceId, ownerSubjectUserId: fx.userId, candidateText: closeText },
+        { workspaceId: fx.workspaceId, ownerSubjectUserId: fx.userId, candidate: closeCandidate },
         { getProvider: async () => closeProvider },
       );
       ok(
@@ -342,11 +349,12 @@ async function main(): Promise<void> {
       );
 
       const closeText = "owner-isolation-candidate";
+      const closeCandidate = { representativeText: closeText, decompositionTemplate: null };
       const closeProvider = makeFakeEmbeddingProvider({
-        vectorsByText: new Map([[closeText, makeVectorWithSimilarityToBase(0.97)]]),
+        vectorsByText: new Map([[buildCasePatternEmbeddingText(closeCandidate), makeVectorWithSimilarityToBase(0.97)]]),
       });
       const result = await matchCasePattern(
-        { workspaceId: fxOwner.workspaceId, ownerSubjectUserId: fxOther.userId, candidateText: closeText },
+        { workspaceId: fxOwner.workspaceId, ownerSubjectUserId: fxOther.userId, candidate: closeCandidate },
         { getProvider: async () => closeProvider },
       );
       ok("[owner分離] 他ownerのPatternはマッチ対象に含まれずNO_MATCH", result.kind === "NO_MATCH", `kind=${result.kind}`);
@@ -369,13 +377,14 @@ async function main(): Promise<void> {
       );
 
       const closeText = "modeldiff-candidate";
+      const closeCandidate = { representativeText: closeText, decompositionTemplate: null };
       const queryProvider = makeFakeEmbeddingProvider({
         providerName: "fakeB",
         modelName: "model-B",
-        vectorsByText: new Map([[closeText, makeVectorWithSimilarityToBase(0.99)]]),
+        vectorsByText: new Map([[buildCasePatternEmbeddingText(closeCandidate), makeVectorWithSimilarityToBase(0.99)]]),
       });
       const result = await matchCasePattern(
-        { workspaceId: fx.workspaceId, ownerSubjectUserId: fx.userId, candidateText: closeText },
+        { workspaceId: fx.workspaceId, ownerSubjectUserId: fx.userId, candidate: closeCandidate },
         { getProvider: async () => queryProvider },
       );
       ok(
@@ -395,7 +404,7 @@ async function main(): Promise<void> {
         forcedFailure: { kind: "TRANSIENT", message: "verify-forced-provider-failure" },
       });
       const result = await matchCasePattern(
-        { workspaceId: fx.workspaceId, ownerSubjectUserId: fx.userId, candidateText: "irrelevant" },
+        { workspaceId: fx.workspaceId, ownerSubjectUserId: fx.userId, candidate: { representativeText: "irrelevant", decompositionTemplate: null } },
         { getProvider: async () => failProvider },
       );
       ok("[provider失敗] EMBEDDING_FAILEDが返る(silent fallbackしない)", result.kind === "EMBEDDING_FAILED", `kind=${result.kind}`);

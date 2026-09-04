@@ -50,3 +50,41 @@ export function requiredProvenanceFieldFor(kind: CasePatternSourceEventKind): "r
       return "formationSessionId";
   }
 }
+
+/**
+ * CasePatternDetectionReceipt.outcomeの正式語彙(PATTERN-DETECT-02A新設・
+ * 2026-09-04)。出典: Claude向け_ISMAY_3b695d9以降_再監査是正・CasePattern
+ * 実機能完遂指示_2026-09-04.md §2 P1-4「CasePatternDetectionReceipt」
+ * 契約、§3.2 worker処理手順。
+ *
+ * - MATCHED: 既存Patternのcurrent revisionへexact cosineで一致し、SourceLinkを
+ *   冪等作成した。
+ * - NEW_PATTERN_CREATED: 一致なし(NO_MATCH)のため、新規CasePattern
+ *   identity + revision 1 + embedding + SourceLinkを同一transactionで作成した。
+ * - AMBIGUOUS: best/second類似度差がambiguity margin未満のため自動統合せず、
+ *   候補をReceiptへ保存するに留めた(本人確認は別Gate)。
+ * - SKIPPED: eligibility/provenance/consentのいずれかを満たさないため処理を
+ *   見送った(reasonCode必須)。
+ * - FAILED: embedding provider失敗・次元検証失敗等(reasonCode必須)。
+ */
+export const CASE_PATTERN_DETECTION_OUTCOMES = [
+  "MATCHED",
+  "NEW_PATTERN_CREATED",
+  "AMBIGUOUS",
+  "SKIPPED",
+  "FAILED",
+] as const;
+export type CasePatternDetectionOutcome = (typeof CASE_PATTERN_DETECTION_OUTCOMES)[number];
+
+/**
+ * SKIPPED/FAILED時のreasonCode語彙。秘密情報(APIキー等)を含まない、原因の
+ * 大分類のみ(詳細メッセージはdebugServerログのみに出す)。
+ */
+export const CASE_PATTERN_DETECTION_REASON_CODES = [
+  "NOT_ELIGIBLE_NO_PRIMARY_LINK",
+  "CONSENT_NOT_GRANTED",
+  "EMBEDDING_TRANSIENT_FAILURE",
+  "EMBEDDING_FATAL_FAILURE",
+  "GENERATION_STALE",
+] as const;
+export type CasePatternDetectionReasonCode = (typeof CASE_PATTERN_DETECTION_REASON_CODES)[number];

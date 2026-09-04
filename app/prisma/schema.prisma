@@ -76,6 +76,7 @@ model User {
   /// [PATTERN-DETECT-01B新設・2026-09-03] CasePatternDetectJob.ownerSubjectUserId
   /// からの逆relation。
   casePatternDetectJobsOwned              CasePatternDetectJob[]             @relation("CasePatternDetectJobOwner")
+  casePatternDetectionReceiptsOwned       CasePatternDetectionReceipt[]      @relation("CasePatternDetectionReceiptOwner")
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
@@ -166,6 +167,8 @@ model Workspace {
   casePatterns          CasePattern[]
   /// [PATTERN-DETECT-01B新設・2026-09-03]
   casePatternDetectJobs CasePatternDetectJob[]
+  /// [PATTERN-DETECT-02A新設・2026-09-04]
+  casePatternDetectionReceipts CasePatternDetectionReceipt[]
 
   @@map("workspaces")
 }
@@ -1632,6 +1635,8 @@ model ProjectContext {
   /// 複合FK参照先として必要(DOC-06 §3「Case Patternの独立単位はProject Context
   /// instance」)。
   casePatternSourceLinks CasePatternSourceLink[]
+  /// [PATTERN-DETECT-02A新設・2026-09-04]
+  casePatternDetectionReceipts CasePatternDetectionReceipt[]
 
   /// [tenant境界二重防御] 既存Responsibility/BulkCompleteReceipt等と同じ複合unique方式。
   @@unique([id, workspaceId], map: "project_contexts_id_workspace_uq")
@@ -2831,15 +2836,13 @@ model CasePatternEmbedding {
 // queueの状態機械ロジック自体はrecomputeQueue.tsと可能な限り同一の設計に
 // 揃える。テーブル統合は将来の別Gateで検討する)。
 //
-// [scope注記・2026-09-03] このGateではqueueインフラ(enqueue/claim/complete/
-// fail/generation)とtrigger配線(PRIMARY link作成・解除)のみを実装する。
-// 実際の検出アルゴリズム(集計・クラスタリング)はPATTERN-DETECT-01C/01Dで
-// 実装するため、Job処理ハンドラは現時点ではno-opプレースホルダとする
-// (caseDetectQueueJob.ts参照。想像でクラスタリングアルゴリズムを
-// 先行実装しない)。Correction・Evidence deletion・Pattern definition/
-// model version変更からのenqueueは、対象サブシステムの精査を要するため
-// 本Gateでは配線せず、別途整理のうえ後続Gateで追加する(DECISION_REQUIREDでは
-// なく、単純に本Gateのscopeを絞った上での延期)。
+// [scope注記・2026-09-03、2026-09-04更新] このGate(01B)ではqueueインフラ
+// (enqueue/claim/complete/fail/generation)とtrigger配線(PRIMARY link作成・
+// 解除)のみを実装した。実際の検出アルゴリズム(集計・embedding・matching・
+// 新規Pattern作成)はPATTERN-DETECT-01C/01D/02Aで実装済み(caseDetectQueueJob.ts
+// 参照、casePatternDetectionService.tsへ実接続済み)。Correction・Evidence
+// deletion・Pattern definition/model version変更からのenqueueは、対象
+// サブシステムの精査を要するためPATTERN-DETECT-02B(別Gate)へ延期している。
 model CasePatternDetectJob {
   id                 String    @id @default(uuid())
   workspaceId        String    @map("workspace_id")
@@ -2871,4 +2874,68 @@ model CasePatternDetectJob {
   @@index([status, nextAttemptAt])
   @@index([workspaceId, ownerSubjectUserId, status])
   @@map("case_pattern_detect_jobs")
+}
+
+// =====================================================================
+// V5-M4 Case Pattern Detection Receipt(PATTERN-DETECT-02A新設・2026-09-04)
+// 出典: Claude向け_ISMAY_3b695d9以降_再監査是正・CasePattern実機能完遂指示_
+// 2026-09-04.md §2 P1-4「Source occurrenceの処理済み管理がない」、§3.2 worker
+// 処理手順。
+//
+// [目的] CasePatternSourceLinkの一意制約(patternRevisionId, sourceEventKind,
+// sourceEventId)はrevision内の重複計上防止であり、「このsource
+// EventはNO_MATCHとして処理済み」という記録先ではない。この記録が無いと、
+// owner単位のworker再実行のたびに同じsourceをNO_MATCH判定し続け、新規
+// CasePatternを重複作成しうる(指示書P1-4)。過去revisionへのSourceLink
+// 再発行(既存Patternの新revision作成時に同じsourceを再度紐付ける、という
+// 正当な操作)とは別概念のため、CasePatternSourceLinkとは別テーブルとして
+// 管理する。
+//
+// [冪等unique] 同一source input・policy・model・sourceVersionの組に対しては
+// 常に同じReceiptを指す(再処理しても新規Receiptを作らない、PE2E-02)。
+// policy/model/sourceVersionのいずれかが変わった場合は「入力が変わった」
+// ものとして新しいReceiptを作る(PE2E-08、旧Embeddingと混合しない)。
+model CasePatternDetectionReceipt {
+  id                     String    @id @default(uuid())
+  workspaceId            String    @map("workspace_id")
+  workspace              Workspace @relation(fields: [workspaceId], references: [id])
+  ownerSubjectUserId     String    @map("owner_subject_user_id")
+  ownerSubjectUser       User      @relation("CasePatternDetectionReceiptOwner", fields: [ownerSubjectUserId], references: [id])
+  /// MATERIALIZATION_RECEIPT_ITEM | FORMATION_CANDIDATE_REVISION
+  /// (coreTypes.ts CASE_PATTERN_SOURCE_EVENT_KINDSを再利用)。
+  sourceEventKind        String    @map("source_event_kind")
+  sourceEventId          String    @map("source_event_id")
+  contextId              String    @map("context_id")
+  context                ProjectContext @relation(fields: [contextId, workspaceId], references: [id, workspaceId])
+  responsibilityId       String?   @map("responsibility_id")
+  formationSessionId     String?   @map("formation_session_id")
+  /// versioned candidate text(casePatternEmbeddingText.ts buildCasePatternEmbeddingText
+  /// 適用後)のSHA-256。入力が変わったかどうかの検出に使う(生テキスト自体は
+  /// 保存しない、DOC-09データ最小化)。
+  inputDigest            String    @map("input_digest")
+  policyVersion          String    @map("policy_version")
+  model                  String
+  dimensions             Int?
+  sourceVersion          Int       @map("source_version")
+  /// MATCHED/NEW_PATTERN_CREATED/AMBIGUOUS/SKIPPED/FAILED
+  /// (coreTypes.ts CASE_PATTERN_DETECTION_OUTCOMES)。
+  outcome                String
+  matchedPatternId       String?   @map("matched_pattern_id")
+  matchedPatternRevisionId String? @map("matched_pattern_revision_id")
+  createdPatternId       String?   @map("created_pattern_id")
+  bestSimilarity         Decimal?  @map("best_similarity") @db.Decimal(6, 5)
+  secondSimilarity       Decimal?  @map("second_similarity") @db.Decimal(6, 5)
+  /// SKIPPED/FAILEDの理由コード(CASE_PATTERN_DETECTION_SKIP_REASONS等、秘密情報を含まない)。
+  reasonCode             String?   @map("reason_code")
+  generation             Int       @default(1)
+  attempt                Int       @default(1)
+  processedAt            DateTime  @default(now()) @map("processed_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+
+  /// PE2E-02「同一sourceを100回再処理してもPattern/SourceLink/sample増加なし」
+  /// を支える冪等unique。同一の入力・policy・model・sourceVersionに対しては
+  /// 常に既存Receiptを返す(新規worker実行のたびに同じ判定を繰り返さない)。
+  @@unique([workspaceId, ownerSubjectUserId, sourceEventKind, sourceEventId, policyVersion, model, sourceVersion], map: "case_pattern_detection_receipts_idempotency_uq")
+  @@index([workspaceId, ownerSubjectUserId, outcome])
+  @@map("case_pattern_detection_receipts")
 }

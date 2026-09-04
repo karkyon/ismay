@@ -42,3 +42,15 @@ export function buildCasePatternEmbeddingText(input: CasePatternEmbeddingTextInp
   const templateStr = stableStringify(input.decompositionTemplate ?? {});
   return [input.representativeText, templateStr].join("\n").slice(0, 8000);
 }
+
+/**
+ * [PATTERN-DETECT-02A是正・P1-2] Pattern保存側(embedAndStoreCasePatternRevision)
+ * と候補照合側(matchCasePattern)が同じ意味構造を同じ正規化規則で比較する
+ * ための共有入力型。従来はPattern保存側のみがCasePatternEmbeddingTextInput
+ * (representativeText + decompositionTemplate)を経由し、候補照合側は
+ * 呼び出し元が任意に組み立てた生candidateTextをそのままproviderへ渡していた
+ * (Embedding入力の非対称)。CasePatternDetectionCandidateInputは両者が
+ * 共有する唯一の入力型とし、いずれの経路もbuildCasePatternEmbeddingText()を
+ * 経由させる。
+ */
+export type CasePatternDetectionCandidateInput = CasePatternEmbeddingTextInput;

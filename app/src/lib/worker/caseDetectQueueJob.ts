@@ -6,26 +6,33 @@ import {
   type ClaimedCaseDetectJob,
 } from "@/lib/patterns/caseDetectQueue";
 import { computeAndPersistCasePatternAggregatesForOwner } from "@/lib/patterns/casePatternAggregation";
+import { runCasePatternDetectionForOwner } from "@/lib/patterns/casePatternDetectionService";
 
 /**
  * app/src/lib/worker/caseDetectQueueJob.ts
  *
  * Case Pattern Detect Queue Worker(PATTERN-DETECT-01B新設・2026-09-03、
- * PATTERN-DETECT-01Cで実処理接続・2026-09-03)。
- * recomputeQueueJob.tsと同じ「5秒tick内でポーリング関数を1回呼ぶ」構成
- * (worker/index.ts参照)。claim/complete/fail処理はcaseDetectQueue.tsへ委譲する。
+ * PATTERN-DETECT-01Cで集計接続・2026-09-03、PATTERN-DETECT-02Aで検出本体接続・
+ * 2026-09-04)。recomputeQueueJob.tsと同じ「5秒tick内でポーリング関数を1回
+ * 呼ぶ」構成(worker/index.ts参照)。claim/complete/fail処理はcaseDetectQueue.ts
+ * へ委譲する。
  *
- * [PATTERN-DETECT-01C] この本人(ownerSubjectUserId)が持つ全CasePatternの
- * 集計・stage projectionをcasePatternAggregation.tsへ委譲する。Pattern
- * 検出そのもの(未知のPattern候補を新規に見つけるクラスタリング)は
- * PATTERN-DETECT-01D(embedding・exact cosine matching)のscopeであり、
- * このGateでは「既存Patternの再集計」のみを行う(想像で先行実装しない)。
+ * [完了報告の誤り是正・2026-09-04] 2026-09-03時点のrunDetection()は
+ * computeAndPersistCasePatternAggregatesForOwner()(既存Patternの再集計)しか
+ * 呼んでおらず、「Pattern検出」を名乗りながら実際には未知Pattern候補を一切
+ * 検出していなかった(Claude向け_ISMAY_3b695d9以降_再監査是正・CasePattern
+ * 実機能完遂指示_2026-09-04.md §1「01A〜01Eの完了報告は誤り」、P0-1)。
+ * casePatternDetectionService.ts(PATTERN-DETECT-02A)がeligible source列挙・
+ * embedding・exact cosine matching・SourceLink作成/新規Pattern作成・
+ * Detection Receipt記録までを実際に行う。集計(既存casePatternAggregation.ts)は
+ * 検出処理の後に、検出結果を反映するため引き続き呼ぶ。
  */
 
 const BATCH_SIZE = 10;
 const WORKER_ID = `case-detect-worker-${process.pid}`;
 
 async function runDetection(job: ClaimedCaseDetectJob): Promise<void> {
+  await runCasePatternDetectionForOwner(job.workspaceId, job.ownerSubjectUserId);
   await computeAndPersistCasePatternAggregatesForOwner(job.workspaceId, job.ownerSubjectUserId);
 }
 
