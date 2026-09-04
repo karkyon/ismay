@@ -88,3 +88,16 @@ export const CASE_PATTERN_DETECTION_REASON_CODES = [
   "GENERATION_STALE",
 ] as const;
 export type CasePatternDetectionReasonCode = (typeof CASE_PATTERN_DETECTION_REASON_CODES)[number];
+
+/**
+ * CasePatternSuggestionIdentity.stateの正式語彙(PATTERN-SUGGEST-01A新設・
+ * 2026-09-04)。出典: Claude向け_ISMAY_3b695d9以降_再監査是正・CasePattern
+ * 実機能完遂指示_2026-09-04.md §5。
+ *
+ * PENDINGはfeedback未記録(初期状態)。それ以外はCASE_PATTERN_FEEDBACK_VERDICTS
+ * をそのまま再利用する(想像で別語彙を発明しない)。currentRevisionに対する
+ * 最新の有効feedbackのverdictをそのまま複製した投影値であり、この投影の
+ * 更新自体はPATTERN-SUGGEST-01C(Feedback command)のscope。
+ */
+export const CASE_PATTERN_SUGGESTION_STATES = ["PENDING", ...CASE_PATTERN_FEEDBACK_VERDICTS] as const;
+export type CasePatternSuggestionState = (typeof CASE_PATTERN_SUGGESTION_STATES)[number];

@@ -77,6 +77,8 @@ model User {
   /// からの逆relation。
   casePatternDetectJobsOwned              CasePatternDetectJob[]             @relation("CasePatternDetectJobOwner")
   casePatternDetectionReceiptsOwned       CasePatternDetectionReceipt[]      @relation("CasePatternDetectionReceiptOwner")
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04]
+  casePatternSuggestionsOwned              CasePatternSuggestionIdentity[]    @relation("CasePatternSuggestionOwner")
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
@@ -169,6 +171,8 @@ model Workspace {
   casePatternDetectJobs CasePatternDetectJob[]
   /// [PATTERN-DETECT-02A新設・2026-09-04]
   casePatternDetectionReceipts CasePatternDetectionReceipt[]
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04]
+  casePatternSuggestions CasePatternSuggestionIdentity[]
 
   @@map("workspaces")
 }
@@ -1872,6 +1876,8 @@ model FormationSession {
   /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePatternSourceLink.formationSessionId
   /// (provenance参照、optional)からの複合FK参照先として必要。
   casePatternSourceLinks CasePatternSourceLink[]
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04]
+  casePatternSuggestions CasePatternSuggestionIdentity[]
 
   /// Idempotency-Key再送検出用(DOC-03 7章 POST /formation-sessions)。
   @@unique([workspaceId, captureId, clientSessionKey], map: "formation_sessions_idempotency_uq")
@@ -1929,6 +1935,8 @@ model FormationCandidateIdentity {
   lineageAsParent          FormationCandidateLineage[]       @relation("LineageParentIdentity")
   /// [2026-08-30新設・M1-C2B] このIdentityがMerge操作の結果として作られた場合。
   mergeEventAsNewCandidate FormationCandidateMergeEvent[]    @relation("MergeEventNewCandidate")
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04]
+  casePatternSuggestions   CasePatternSuggestionIdentity[]
 
   @@unique([sessionId, candidateKey], map: "formation_candidate_identities_session_key_uq")
   @@unique([id, workspaceId], map: "formation_candidate_identities_id_workspace_uq")
@@ -1965,6 +1973,8 @@ model FormationCandidateRevision {
   lineageAsChild          FormationCandidateLineage[]       @relation("LineageChildRevision")
   /// [2026-08-30新設・M1-C2B] このRevisionが親の決定時点Revisionとしてlineageに現れる場合。
   lineageAsParentRevision FormationCandidateLineage[]       @relation("LineageParentRevision")
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04]
+  casePatternSuggestionRevisions CasePatternSuggestionRevision[]
 
   @@unique([candidateId, revision], map: "formation_candidate_revisions_candidate_revision_uq")
   @@unique([id, workspaceId], map: "formation_candidate_revisions_id_workspace_uq")
@@ -2681,6 +2691,8 @@ model CasePatternRevision {
   evidenceAggregates CasePatternEvidenceAggregate[]
   embeddings         CasePatternEmbedding[]
   feedbackEvents     CasePatternFeedbackEvent[]
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04]
+  matchedBySuggestionRevisions CasePatternSuggestionRevision[]
 
   @@unique([patternId, revision], map: "case_pattern_revisions_pattern_revision_uq")
   @@unique([id, workspaceId], map: "case_pattern_revisions_id_workspace_uq")
@@ -2780,20 +2792,150 @@ model CasePatternFeedbackEvent {
   /// DBレベルでこの不整合を拒否する。
   patternRevisionId String              @map("pattern_revision_id")
   patternRevision   CasePatternRevision @relation(fields: [patternRevisionId, patternId, workspaceId], references: [id, patternId, workspaceId])
-  /// [契約差分・DECISION未確定] Suggestion entity自体がこのGateのscope外
-  /// (PATTERN-DETECT-01以降の提案API §7)のため、FK制約の無い文字列として
-  /// 保持する。Suggestion entity実装時に正式なFKへ移行するmigrationを追加
-  /// すること(想像でSuggestion entityを先行実装しない)。
-  suggestionId      String              @map("suggestion_id")
+  /// [PATTERN-SUGGEST-01A是正・2026-09-04] 従来はSuggestion entity自体が
+  /// 未実装だったためFK制約の無い文字列として保持していた。
+  /// CasePatternSuggestionIdentityへの正式な複合FKへ移行する。
+  suggestionId       String                     @map("suggestion_id")
+  suggestion         CasePatternSuggestionIdentity @relation(fields: [suggestionId, workspaceId], references: [id, workspaceId])
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04] DOC-06 §7「採否は提案Revisionに
+  /// 固定」の直接的な実装。同一suggestionIdでも複数revision(再照合)が
+  /// あり得るため、この2列(suggestionId, suggestionRevisionId)を複合FKで
+  /// 「このrevisionが本当にこのsuggestionに属するか」までDBで保証する
+  /// (case_pattern_revisions_id_pattern_ws_uqと同じ設計パターン)。
+  suggestionRevisionId String                       @map("suggestion_revision_id")
+  suggestionRevision   CasePatternSuggestionRevision @relation(fields: [suggestionRevisionId, suggestionId, workspaceId], references: [id, suggestionId, workspaceId])
   /// ACCEPT/PARTIAL_ACCEPT/REJECT/LATER/NOT_RELEVANT(CASE_PATTERN_FEEDBACK_VERDICTS)。
   verdict           String
   actorUserId       String              @map("actor_user_id")
   actorUser         User                @relation(fields: [actorUserId], references: [id])
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04] 指示書§5「actorがowner本人で
+  /// あることをapplication guard」「idempotencyKey + requestPayloadHash」
+  /// 「同じkey同じpayloadは同一成功応答、同じkey異payloadは409」。
+  /// application層の検証・応答判定はPATTERN-SUGGEST-01C(Feedback command)の
+  /// scopeであり、このGateではDB契約(列・一意制約)のみを用意する。
+  idempotencyKey       String                       @map("idempotency_key")
+  requestPayloadHash   String                       @map("request_payload_hash")
+  /// [PATTERN-SUGGEST-01A新設・2026-09-04] append-only契約の維持のため、
+  /// 「訂正」は既存行をUPDATEせず、新しいFeedbackEvent行を追記して
+  /// supersedesFeedbackEventIdで元の行を指す形で表現する(指示書§5
+  /// 「訂正を許すならsupersedesFeedbackEventIdで表現し、過去行UPDATE禁止」)。
+  /// 自己参照FKのため、参照先の存在検証はworkspaceId一致込みでapplication層が
+  /// 行う(Prismaの自己参照複合FKは対象列同士の型制約上ここでは単純なid参照
+  /// とし、workspaceId一致はCHECKでなくapplication層検証に委ねる。既存
+  /// CasePatternDetectionReceiptのように同一テーブル内の自己参照へ複合FKを
+  /// 張る前例が無く、想像で新しい複合自己参照パターンを発明しない)。
+  supersedesFeedbackEventId String?           @map("supersedes_feedback_event_id")
   occurredAt        DateTime            @default(now()) @map("occurred_at")
 
+  @@unique([workspaceId, idempotencyKey], map: "case_pattern_feedback_events_idempotency_uq")
   @@index([workspaceId, patternId])
   @@index([patternRevisionId])
+  @@index([workspaceId, suggestionId])
+  @@index([suggestionRevisionId])
   @@map("case_pattern_feedback_events")
+}
+
+/// V5-DOC-06 §7 TBL(PATTERN-SUGGEST-01A新設・2026-09-04): 提案の識別。
+/// 出典: Claude向け_ISMAY_3b695d9以降_再監査是正・CasePattern実機能完遂指示_
+/// 2026-09-04.md §5「DOC-06 §7の『分解案は安定ID』『採否は提案Revisionに
+/// 固定』を満たすため、Suggestion identity/revisionを分離する」。
+///
+/// [suggestionKeyについて・想像で新しい安定キー生成を発明しない]
+/// FormationCandidateIdentity.candidateKeyは、Session内で本人の再解析を
+/// 跨いで同じCandidateを指し続けるための既存の安定キーである。Suggestionは
+/// 「あるCandidateに対するCase Pattern照合結果」という1対1に近い関係の
+/// entityであり、独自の安定キー生成アルゴリズムを新たに発明するのではなく、
+/// 対象CandidateのcandidateKeyをそのまま複製して使う(作成時点のスナップ
+/// ショット。candidateKey自体はSession内で不変のため複製後の乖離は生じない)。
+model CasePatternSuggestionIdentity {
+  id                 String    @id @default(uuid())
+  workspaceId        String    @map("workspace_id")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id])
+  ownerSubjectUserId String    @map("owner_subject_user_id")
+  ownerSubjectUser   User      @relation("CasePatternSuggestionOwner", fields: [ownerSubjectUserId], references: [id])
+  formationSessionId String    @map("formation_session_id")
+  formationSession   FormationSession @relation(fields: [formationSessionId, workspaceId], references: [id, workspaceId])
+  candidateId        String    @map("candidate_id")
+  candidate          FormationCandidateIdentity @relation(fields: [candidateId, workspaceId], references: [id, workspaceId])
+  /// 対象CandidateのFormationCandidateIdentity.candidateKeyの複製(上記モデル
+  /// コメント参照)。
+  suggestionKey      String    @map("suggestion_key")
+  /// FormationCandidateIdentity.currentRevision/CasePattern.currentRevisionと
+  /// 同じ「最新revisionへの高速参照キャッシュ、正本はrevision行そのもの」
+  /// パターン。revision追加と同一transactionでのみ更新する。
+  currentRevision    Int       @default(0) @map("current_revision")
+  /// PENDING/ACCEPT/PARTIAL_ACCEPT/REJECT/LATER/NOT_RELEVANT
+  /// (coreTypes.ts CASE_PATTERN_SUGGESTION_STATES)。PENDINGは未決着(feedback
+  /// 未記録)、それ以外は「currentRevisionに対する最新の有効feedback」の
+  /// verdictをそのまま複製した投影値(想像で別語彙を発明せず、既存
+  /// CASE_PATTERN_FEEDBACK_VERDICTSをそのまま再利用する)。この投影値の
+  /// 更新自体はFeedback記録処理(PATTERN-SUGGEST-01C)のscope。
+  state              String    @default("PENDING")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  revisions      CasePatternSuggestionRevision[]
+  feedbackEvents CasePatternFeedbackEvent[]
+
+  /// 1 CandidateにつきSuggestion identityは1件まで(再照合は新しいrevisionを
+  /// 同じidentityへ追記する。指示書§5「分解案は安定ID」)。
+  @@unique([workspaceId, formationSessionId, candidateId], map: "case_pattern_suggestion_identities_candidate_uq")
+  @@unique([id, workspaceId], map: "case_pattern_suggestion_identities_id_workspace_uq")
+  @@index([workspaceId, ownerSubjectUserId, state])
+  @@map("case_pattern_suggestion_identities")
+}
+
+/// V5-DOC-06 §7 TBL(PATTERN-SUGGEST-01A新設・2026-09-04): 提案のrevision
+/// (immutable、revision単調増加)。1回のPattern照合結果のスナップショットを
+/// 1行として追記する(Patternが後で更新されても既存Suggestionの説明根拠を
+/// 改変しない、指示書§6)。
+model CasePatternSuggestionRevision {
+  id          String                         @id @default(uuid())
+  workspaceId String                         @map("workspace_id")
+  suggestionId String                        @map("suggestion_id")
+  suggestion   CasePatternSuggestionIdentity @relation(fields: [suggestionId, workspaceId], references: [id, workspaceId])
+  revision     Int
+  /// 照合対象としたFormationCandidateRevision(意味的にはsuggestion.candidateId
+  /// と同一Candidateに属するはずだが、DBレベルでも複合FKで保証する)。
+  candidateId              String                     @map("candidate_id")
+  sourceCandidateRevisionId String                    @map("source_candidate_revision_id")
+  sourceCandidateRevision   FormationCandidateRevision @relation(fields: [sourceCandidateRevisionId, candidateId, workspaceId], references: [id, candidateId, workspaceId])
+  /// MATCHEDまたはAMBIGUOUSの最有力候補(指示書§6「AMBIGUOUSは自動選択せず
+  /// 候補比較として表示するか、安全に提案なし」。AMBIGUOUS時にSuggestionを
+  /// 作るかどうかの判断自体はPATTERN-SUGGEST-01Bのscope、このGateは
+  /// 「作るとしたらどう保存するか」という型のみ用意する)。
+  matchedPatternId         String?             @map("matched_pattern_id")
+  matchedPatternRevisionId String?             @map("matched_pattern_revision_id")
+  matchedPatternRevision   CasePatternRevision? @relation(fields: [matchedPatternRevisionId, matchedPatternId, workspaceId], references: [id, patternId, workspaceId])
+  matchPolicyVersion       String              @map("match_policy_version")
+  similarity               Decimal             @db.Decimal(6, 5)
+  /// 分解案(安定child keyを含む、指示書§5「decompositionProposal(安定child
+  /// keyを含む)」)。具体的な構造(child key採番規則等)はPATTERN-SUGGEST-01B
+  /// (Formation接続・提案生成API)が実際に生成する際に確定する。このGateでは
+  /// Json列として型のみ用意し、想像で構造を発明しない。
+  decompositionProposal   Json                @map("decomposition_proposal")
+  /// 指示書§5「evidenceSnapshot: N、M、confidence、adoptionRate、
+  /// window/policy version」。照合時点のPattern側evidence概況をそのまま
+  /// 複製したスナップショットであり、Patternが後で更新されても本行は
+  /// 改変しない(指示書§6「Patternが後で更新されても既存Suggestionの説明
+  /// 根拠を改変しない」)。具体的なJSON shapeは
+  /// { rawSampleSize, distinctContextCount, confidence, adoptionRate,
+  ///   adoptionPolicyVersion } を想定するが、型はJsonのまま
+  /// (casePatternRevisionService.tsのthresholds列と同じ「snapshotをJsonで
+  /// 保持する」既存パターンを踏襲)。
+  evidenceSnapshot         Json                @map("evidence_snapshot")
+  schemaVersion            String              @map("schema_version")
+  createdAt                DateTime            @default(now()) @map("created_at")
+
+  feedbackEvents CasePatternFeedbackEvent[]
+
+  @@unique([suggestionId, revision], map: "case_pattern_suggestion_revisions_suggestion_revision_uq")
+  @@unique([id, workspaceId], map: "case_pattern_suggestion_revisions_id_workspace_uq")
+  /// CasePatternFeedbackEvent.suggestionRevisionIdが複合FKで
+  /// (suggestionRevisionId, suggestionId, workspaceId)を参照するための
+  /// 参照用unique(case_pattern_revisions_id_pattern_ws_uqと同じ設計)。
+  @@unique([id, suggestionId, workspaceId], map: "case_pattern_suggestion_revisions_id_suggestion_ws_uq")
+  @@map("case_pattern_suggestion_revisions")
 }
 
 /// V5-DOC-06 §5 TBL: case_pattern_embeddings
