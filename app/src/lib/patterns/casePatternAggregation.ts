@@ -32,11 +32,15 @@
  * 正本上定義されていないため、想像でON/OFF判定を発明しない。
  * `CASE_PATTERN_AGGREGATE_METRIC_KEY`は暫定的な固定値プレースホルダである。
  *
- * [recentAdoptionRateについて] DOC-06 §7の「採用率」はSuggestion単位の
- * ACCEPT/PARTIAL_ACCEPT/REJECT/LATER/NOT_RELEVANT実績から算出される想定だが、
- * 正式なSuggestion entity・提案APIはPATTERN-DETECT-01Eのscopeでまだ存在しない。
- * 「直近」の具体的な件数・期間の定義も正本に記述が無いため、想像でwindowを
- * 発明せず、01E実装まではnull(未計測)を返す。classifyCasePatternStageは
+ * [recentAdoptionRateについて・PATTERN-DETECT-01Eで接続済み] DOC-06 §7の
+ * 「採用率」はCasePatternFeedbackEventのACCEPT/PARTIAL_ACCEPT/REJECT/LATER/
+ * NOT_RELEVANT実績から算出する(casePatternSuggestion.ts
+ * computeCasePatternAdoptionRate)。正式なSuggestion identity/revision
+ * entity・提案API/UIはPATTERN-SUGGEST-01(別Gate)へ分離済みだが、
+ * FeedbackEvent自体は既存(PATTERN-SCHEMA-01)のため採用率計算は先に接続
+ * できる。「直近」の具体的な件数・期間の定義は正本に記述が無いため、想像で
+ * windowを発明せず、記録済み全FeedbackEventを対象とする。決着した記録が
+ * 無ければnull(未計測)のままで、classifyCasePatternStageは
  * recentAdoptionRate=nullの場合STRONG_SUGGESTIONへ昇格しない設計のため、
  * 未計測を0%と偽装することもない。
  */
@@ -49,6 +53,7 @@ import {
   type CasePatternOccurrence,
   type CasePatternStage,
 } from "./casePatternMath";
+import { computeCasePatternAdoptionRate } from "./casePatternSuggestion";
 
 /** [暫定プレースホルダ] モジュール先頭のコメント「Metric OFF filterについて」参照。 */
 export const CASE_PATTERN_AGGREGATE_METRIC_KEY = "CASE_PATTERN_OCCURRENCE";
@@ -168,8 +173,12 @@ export async function computeAndPersistCasePatternAggregate(
   const now = new Date();
   const confResult = computeCasePatternConfidence(occurrences, now);
   const distinctContextCount = new Set(links.map((l) => l.contextId)).size;
-  // [01E待ち・モジュール先頭コメント参照] Suggestion実装までは未計測。
-  const recentAdoptionRate: number | null = null;
+  // [PATTERN-DETECT-01Eで接続・2026-09-04] Suggestion entity自体は未実装だが、
+  // CasePatternFeedbackEvent(既存)から採用率を計算できるようになったため、
+  // casePatternSuggestion.tsのcomputeCasePatternAdoptionRateへ委譲する。
+  // 「直近」の具体的な件数・期間の定義は正本に記述が無いため、想像でwindowを
+  // 発明せず、記録済み全FeedbackEventを対象とする(同モジュールのコメント参照)。
+  const recentAdoptionRate = await computeCasePatternAdoptionRate(workspaceId, patternId);
 
   const stage = classifyCasePatternStage({
     rawSampleSize: confResult.rawSampleSize,
