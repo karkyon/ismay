@@ -11,6 +11,7 @@ import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { enqueueCaseDetectForResponsibilityCorrection, enqueueCaseDetectForResponsibilityDeletion } from "@/lib/patterns/casePatternTriggers";
 
 /** API-RESP-02: GET /responsibilities/{id} 詳細(UI-06)。 */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
@@ -222,6 +223,14 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     });
   }
 
+  // [PATTERN-DETECT-02B新設・2026-09-04] Case Pattern候補テキストは
+  // `${type}: ${title}`のみを使う(typeはこのPATCHの編集対象に含まれない)。
+  // titleが実際に変化した場合のみ、Pattern入力に影響するCorrectionとして
+  // enqueueする(無差別enqueue禁止、指示書§4)。
+  if (rest.title !== undefined && rest.title !== existing.title) {
+    await enqueueCaseDetectForResponsibilityCorrection(db, { workspaceId, responsibilityId: id });
+  }
+
   if (tagIds) {
     await db.$transaction([
       db.responsibilityTag.deleteMany({ where: { responsibilityId: id } }),
@@ -375,6 +384,11 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
         actorId: auth.user.userId,
       },
     });
+    // [PATTERN-DETECT-02B新設・2026-09-04] このResponsibility由来の
+    // CasePatternSourceLinkを除外し、影響を受けたownerへEVIDENCE_EXCLUDEDで
+    // enqueueする(指示書§4「Evidence deletionでは対応SourceLinkを
+    // projection上excludedにし、raw/weighted/confidenceを減算する」)。
+    await enqueueCaseDetectForResponsibilityDeletion(tx, { workspaceId, responsibilityId: id });
     debugServer.event("DELETE /responsibilities/[id]", "RESPONSIBILITY_DELETED", { aggregateId: id });
   });
 

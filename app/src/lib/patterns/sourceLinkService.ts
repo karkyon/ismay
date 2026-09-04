@@ -2,6 +2,8 @@ import { db } from "@/lib/db";
 import { Prisma } from "@/generated/prisma/client";
 import type { CasePatternSourceEventKind } from "./coreTypes";
 
+type PatternDbClient = typeof db | Prisma.TransactionClient;
+
 /**
  * Case Pattern Catalog(M4) — SourceLink唯一のwrite service(PATTERN-DETECT-01A)。
  * 出典: Claude向け_ISMAY_0fcea2b以降_再監査是正・PATTERN-DETECT連続実装指示_2026-09-03.md
@@ -237,4 +239,63 @@ export async function linkPatternSourceEvent(
     }
     throw err;
   }
+}
+
+export interface ExcludeCasePatternSourceLinksResult {
+  /** excludedAt: nullだった行のうち、今回excludedAtをセットした件数。 */
+  excludedCount: number;
+  /** 影響を受けたCasePattern.ownerSubjectUserIdの重複排除済み一覧
+   *  (呼び出し元がこの本人向けにenqueueCaseDetect(reasonCode=EVIDENCE_EXCLUDED)する)。 */
+  affectedOwnerIds: string[];
+}
+
+/**
+ * [PATTERN-DETECT-02B新設・2026-09-04] 指定Responsibilityに紐づく、まだ除外
+ * されていないCasePatternSourceLink全件を除外する(excludedAt/excludedReason
+ * をセット。物理削除しない、PS-07踏襲)。CasePatternSourceLinkへの唯一の
+ * write入口という本モジュールの契約上、除外もこの関数を経由させる
+ * (呼び出し元がtx.casePatternSourceLink.updateManyを直接呼ばない)。
+ *
+ * 出典: Claude向け_ISMAY_3b695d9以降_再監査是正・CasePattern実機能完遂指示_
+ * 2026-09-04.md §4「Evidence deletionでは対応SourceLinkをprojection上
+ * excludedにし、raw/weighted/confidenceを減算する」。
+ *
+ * revision横断(current revisionでない過去revisionのSourceLinkも含む)で
+ * 除外する。casePatternAggregation.tsはcurrent revisionのみ集計するため
+ * 過去revision分の除外は集計結果へ影響しないが、「この本人が実際に削除した
+ * Responsibility由来のoccurrenceである」という事実の記録としては、
+ * revisionを問わず一貫して除外しておくべきと判断した(想像で過去revisionを
+ * 対象外にする理由が正本に無いため、全revisionを対象とする)。
+ */
+export async function excludeCasePatternSourceLinksForResponsibility(
+  txOrDb: PatternDbClient,
+  params: { workspaceId: string; responsibilityId: string; reason: string },
+): Promise<ExcludeCasePatternSourceLinksResult> {
+  const targets: { id: string; patternRevisionId: string }[] = await txOrDb.casePatternSourceLink.findMany({
+    where: { workspaceId: params.workspaceId, responsibilityId: params.responsibilityId, excludedAt: null },
+    select: { id: true, patternRevisionId: true },
+  });
+  if (targets.length === 0) {
+    return { excludedCount: 0, affectedOwnerIds: [] };
+  }
+
+  const now = new Date();
+  const updateResult = await txOrDb.casePatternSourceLink.updateMany({
+    where: { id: { in: targets.map((t: { id: string }) => t.id) } },
+    data: { excludedAt: now, excludedReason: params.reason },
+  });
+
+  const revisionIds = [...new Set(targets.map((t: { patternRevisionId: string }) => t.patternRevisionId))];
+  const revisions: { patternId: string }[] = await txOrDb.casePatternRevision.findMany({
+    where: { id: { in: revisionIds }, workspaceId: params.workspaceId },
+    select: { patternId: true },
+  });
+  const patternIds = [...new Set(revisions.map((r: { patternId: string }) => r.patternId))];
+  const patterns: { ownerSubjectUserId: string }[] = await txOrDb.casePattern.findMany({
+    where: { id: { in: patternIds }, workspaceId: params.workspaceId },
+    select: { ownerSubjectUserId: true },
+  });
+  const affectedOwnerIds = [...new Set(patterns.map((p: { ownerSubjectUserId: string }) => p.ownerSubjectUserId))];
+
+  return { excludedCount: updateResult.count, affectedOwnerIds };
 }

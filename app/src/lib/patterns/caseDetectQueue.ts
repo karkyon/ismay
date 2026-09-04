@@ -22,8 +22,22 @@ import { db } from "@/lib/db";
 import type { Prisma } from "@/generated/prisma/client";
 import { createHash } from "node:crypto";
 
-/** PRIMARY link作成・解除の2種のみ(本Gateで配線する範囲。他は後続Gateで追加)。 */
-export const CASE_PATTERN_DETECT_REASON_CODES = ["PRIMARY_LINKED", "PRIMARY_UNLINKED"] as const;
+/**
+ * [PATTERN-DETECT-02B拡張・2026-09-04] PRIMARY link作成・解除に加え、
+ * Pattern入力(Responsibility.title等)に影響するCorrection、Evidence
+ * (Responsibility)削除の2種を追加する。出典: Claude向け_ISMAY_3b695d9以降_
+ * 再監査是正・CasePattern実機能完遂指示_2026-09-04.md §4 reason一覧。
+ * PATTERN_REVISION_CHANGED/EMBEDDING_MODEL_CHANGED/
+ * EMBEDDING_SOURCE_VERSION_CHANGED/MANUAL_REBUILDは、対応するtrigger配線元
+ * (Pattern編集API・AI Provider設定変更経路・管理操作)の個別精査が別途必要
+ * なため本Gateでは追加しない(想像で先行実装しない、次Gateで追加)。
+ */
+export const CASE_PATTERN_DETECT_REASON_CODES = [
+  "PRIMARY_LINKED",
+  "PRIMARY_UNLINKED",
+  "RESPONSIBILITY_CORRECTED",
+  "EVIDENCE_EXCLUDED",
+] as const;
 export type CasePatternDetectReasonCode = (typeof CASE_PATTERN_DETECT_REASON_CODES)[number];
 
 export const CASE_PATTERN_DETECT_JOB_STATUSES = ["PENDING", "PROCESSING", "DONE", "FAILED", "DEAD_LETTER"] as const;

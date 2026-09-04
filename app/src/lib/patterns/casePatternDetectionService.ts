@@ -109,7 +109,16 @@ async function listEligibleMaterializationSources(
   const rows: EligibleSourceRow[] = [];
   for (const link of primaryLinks) {
     const items = await db.materializationReceiptItem.findMany({
-      where: { workspaceId, responsibilityId: link.responsibilityId },
+      where: {
+        workspaceId,
+        responsibilityId: link.responsibilityId,
+        // [PATTERN-DETECT-02B是正・2026-09-04] Responsibility.deletedAtの
+        // 実在を見落としていた(02A時点の誤判定)。論理削除済みResponsibilityを
+        // eligible source対象から除外する。既存SourceLinkの除外自体は
+        // casePatternTriggers.ts::enqueueCaseDetectForResponsibilityDeletion
+        // (DELETE route)が別途行う。
+        responsibility: { deletedAt: null },
+      },
       select: {
         id: true,
         receipt: { select: { committedAt: true } },
@@ -140,8 +149,8 @@ function digestOf(text: string): string {
 
 /**
  * 既存Receipt(冪等unique: workspace+owner+source+policy+model+sourceVersion)を
- * 引く。存在すれば「この入力・policy・model・sourceVersionでは処理済み」
- * (PE2E-02)。
+ * 引く。inputDigestも返す(呼び出し元が現在の入力から計算したdigestと比較し、
+ * 「本当に処理済みか」「入力が変わったので再処理が必要か」を判定するため)。
  */
 async function findExistingReceipt(params: {
   workspaceId: string;
@@ -161,7 +170,7 @@ async function findExistingReceipt(params: {
       model: params.model,
       sourceVersion: params.sourceVersion,
     },
-    select: { id: true },
+    select: { id: true, inputDigest: true },
   });
 }
 
@@ -183,32 +192,55 @@ interface WriteReceiptParams {
   bestSimilarity?: number;
   secondSimilarity?: number;
   reasonCode?: string;
+  /** [PATTERN-DETECT-02B新設] 指定時はcreateではなくこのidの行をupdateする
+   *  (Receiptが既存だがinputDigestが変わった=再処理が必要なケース)。 */
+  existingReceiptId?: string;
 }
 
 async function writeReceipt(txOrDb: typeof db | Prisma.TransactionClient, p: WriteReceiptParams): Promise<void> {
-  try {
-    await txOrDb.casePatternDetectionReceipt.create({
+  const data = {
+    workspaceId: p.workspaceId,
+    ownerSubjectUserId: p.ownerSubjectUserId,
+    sourceEventKind: "MATERIALIZATION_RECEIPT_ITEM" as const,
+    sourceEventId: p.sourceEventId,
+    contextId: p.contextId,
+    responsibilityId: p.responsibilityId,
+    inputDigest: p.inputDigest,
+    policyVersion: p.policyVersion,
+    model: p.model,
+    dimensions: p.dimensions,
+    sourceVersion: p.sourceVersion,
+    outcome: p.outcome,
+    matchedPatternId: p.matchedPatternId,
+    matchedPatternRevisionId: p.matchedPatternRevisionId,
+    createdPatternId: p.createdPatternId,
+    bestSimilarity: p.bestSimilarity,
+    secondSimilarity: p.secondSimilarity,
+    reasonCode: p.reasonCode,
+  };
+
+  if (p.existingReceiptId) {
+    // [PATTERN-DETECT-02B新設] 入力(title等)が変わった既存Receiptを上書きする。
+    // matchedPatternId等、前回のoutcomeにのみ存在したフィールドが今回の
+    // outcomeに無い場合はnullで明示的にクリアする(古い値が残留しない)。
+    await txOrDb.casePatternDetectionReceipt.update({
+      where: { id: p.existingReceiptId },
       data: {
-        workspaceId: p.workspaceId,
-        ownerSubjectUserId: p.ownerSubjectUserId,
-        sourceEventKind: "MATERIALIZATION_RECEIPT_ITEM",
-        sourceEventId: p.sourceEventId,
-        contextId: p.contextId,
-        responsibilityId: p.responsibilityId,
-        inputDigest: p.inputDigest,
-        policyVersion: p.policyVersion,
-        model: p.model,
-        dimensions: p.dimensions,
-        sourceVersion: p.sourceVersion,
-        outcome: p.outcome,
-        matchedPatternId: p.matchedPatternId,
-        matchedPatternRevisionId: p.matchedPatternRevisionId,
-        createdPatternId: p.createdPatternId,
-        bestSimilarity: p.bestSimilarity,
-        secondSimilarity: p.secondSimilarity,
-        reasonCode: p.reasonCode,
+        ...data,
+        matchedPatternId: p.matchedPatternId ?? null,
+        matchedPatternRevisionId: p.matchedPatternRevisionId ?? null,
+        createdPatternId: p.createdPatternId ?? null,
+        bestSimilarity: p.bestSimilarity ?? null,
+        secondSimilarity: p.secondSimilarity ?? null,
+        reasonCode: p.reasonCode ?? null,
+        processedAt: new Date(),
       },
     });
+    return;
+  }
+
+  try {
+    await txOrDb.casePatternDetectionReceipt.create({ data });
   } catch (err) {
     // [冪等性・並行競合] 冪等unique違反(P2002)は「別workerが同時に同じsourceを
     // 処理し、先にReceiptを作成した」ケース。PE2E-02同様、例外を投げず成功
@@ -266,12 +298,18 @@ export async function runCasePatternDetectionForOwner(
       model: provider.modelName,
       sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
     });
-    if (existingReceipt) {
+    if (existingReceipt && existingReceipt.inputDigest === inputDigest) {
       // [PE2E-02] 同一input/policy/model/sourceVersionは既に処理済み。
       // embed() API呼出し自体を行わずスキップする。
       results.push({ sourceEventId: source.itemId, outcome: "SKIPPED", reasonCode: "ALREADY_PROCESSED" });
       continue;
     }
+    // [PATTERN-DETECT-02B新設・2026-09-04] Receiptが存在してもinputDigestが
+    // 異なる場合(RESPONSIBILITY_CORRECTEDでtitleが変わった等)は「入力が
+    // 変わった」ため再処理する。既存Receipt行はappend-onlyではなく
+    // 処理済み管理台帳という性質上、この場合はcreateではなくupdateで
+    // 上書きする(existingReceiptIdをwriteReceiptへ渡す)。
+    const existingReceiptId = existingReceipt?.id;
 
     const embedOutcome = await embedCasePatternCandidate(workspaceId, candidate, overrides, provider);
     if (!embedOutcome.ok) {
@@ -279,6 +317,7 @@ export async function runCasePatternDetectionForOwner(
       // [model不明時] provider解決自体に失敗した場合、modelは不明("UNKNOWN")として
       // 記録する(受入試験可視化のため、秘密情報は含めない)。
       await writeReceipt(db, {
+        existingReceiptId,
         workspaceId,
         ownerSubjectUserId,
         sourceEventId: source.itemId,
@@ -320,6 +359,7 @@ export async function runCasePatternDetectionForOwner(
       } catch (err) {
         if (err instanceof PatternSourceEligibilityError || err instanceof PatternSourceProvenanceError) {
           await writeReceipt(db, {
+            existingReceiptId,
             workspaceId,
             ownerSubjectUserId,
             sourceEventId: source.itemId,
@@ -340,6 +380,7 @@ export async function runCasePatternDetectionForOwner(
       }
 
       await writeReceipt(db, {
+        existingReceiptId,
         workspaceId,
         ownerSubjectUserId,
         sourceEventId: source.itemId,
@@ -363,6 +404,7 @@ export async function runCasePatternDetectionForOwner(
       const best = matchResult.candidates[0]!;
       const second = matchResult.candidates[1];
       await writeReceipt(db, {
+        existingReceiptId,
         workspaceId,
         ownerSubjectUserId,
         sourceEventId: source.itemId,
@@ -387,6 +429,7 @@ export async function runCasePatternDetectionForOwner(
       // classifyCasePatternVectorはEmbedding生成後のDB照会のみなので通常
       // 到達しないが、型契約上の網羅性のためFAILEDとして扱う。
       await writeReceipt(db, {
+        existingReceiptId,
         workspaceId,
         ownerSubjectUserId,
         sourceEventId: source.itemId,
@@ -450,6 +493,7 @@ export async function runCasePatternDetectionForOwner(
     });
 
     await writeReceipt(db, {
+      existingReceiptId,
       workspaceId,
       ownerSubjectUserId,
       sourceEventId: source.itemId,
