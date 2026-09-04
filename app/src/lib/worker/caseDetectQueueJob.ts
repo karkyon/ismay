@@ -5,36 +5,28 @@ import {
   failCaseDetectJob,
   type ClaimedCaseDetectJob,
 } from "@/lib/patterns/caseDetectQueue";
+import { computeAndPersistCasePatternAggregatesForOwner } from "@/lib/patterns/casePatternAggregation";
 
 /**
  * app/src/lib/worker/caseDetectQueueJob.ts
  *
- * Case Pattern Detect Queue Worker(PATTERN-DETECT-01B新設・2026-09-03)。
+ * Case Pattern Detect Queue Worker(PATTERN-DETECT-01B新設・2026-09-03、
+ * PATTERN-DETECT-01Cで実処理接続・2026-09-03)。
  * recomputeQueueJob.tsと同じ「5秒tick内でポーリング関数を1回呼ぶ」構成
  * (worker/index.ts参照)。claim/complete/fail処理はcaseDetectQueue.tsへ委譲する。
  *
- * [scope宣言・想像で先行実装しない] 実際の検出処理(この本人の全PRIMARY
- * occurrenceを横断した集計・クラスタリング)はPATTERN-DETECT-01C
- * (集計・stage projection)・01D(embedding・exact cosine matching)で
- * 実装する。このGateではqueueのlease/generation/retry/dead-letter機構
- * 自体を実証することが目的のため、`runDetection`はno-opプレースホルダと
- * する(常に成功しDONEへ進む)。01C実装時にこの関数の中身を実際の集計呼び出し
- * へ置き換える(このファイル・エクスポート形状自体は変更不要な設計)。
+ * [PATTERN-DETECT-01C] この本人(ownerSubjectUserId)が持つ全CasePatternの
+ * 集計・stage projectionをcasePatternAggregation.tsへ委譲する。Pattern
+ * 検出そのもの(未知のPattern候補を新規に見つけるクラスタリング)は
+ * PATTERN-DETECT-01D(embedding・exact cosine matching)のscopeであり、
+ * このGateでは「既存Patternの再集計」のみを行う(想像で先行実装しない)。
  */
 
 const BATCH_SIZE = 10;
 const WORKER_ID = `case-detect-worker-${process.pid}`;
 
-/**
- * PATTERN-DETECT-01C/01Dで実装される実際の検出処理への差し替えポイント。
- * 現時点ではno-op(常に成功)。
- */
 async function runDetection(job: ClaimedCaseDetectJob): Promise<void> {
-  // [PATTERN-DETECT-01C/01D待ち] ここでjob.ownerSubjectUserId(この本人)の
-  // 全PRIMARY occurrenceを再集計し、CasePattern/CasePatternRevisionの
-  // 検出・更新を行う予定。現時点では何もしない(jobの参照だけ残し、
-  // 01C実装時にそのまま置き換えられるようにする)。
-  void job;
+  await computeAndPersistCasePatternAggregatesForOwner(job.workspaceId, job.ownerSubjectUserId);
 }
 
 async function processOneJob(job: ClaimedCaseDetectJob): Promise<"done" | "dead_letter" | "requeued"> {
