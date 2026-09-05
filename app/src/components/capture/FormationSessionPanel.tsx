@@ -56,6 +56,18 @@ interface ProjectionCandidate {
     decidedAt: string | null;
     conflictCode: "LEGACY_PROJECTION_CONFLICT" | "DECISION_MISMATCH" | null;
   } | null;
+  /** [PATTERN-SUGGEST-01D新設・2026-09-05] GET /formation-sessions/{id}が
+   *  返すpatternSuggestion(PATTERN-SUGGEST-01B新設フィールド)。 */
+  patternSuggestion: {
+    suggestionId: string;
+    state: string;
+    revision: number;
+    matchedPatternId: string | null;
+    matchedPatternTitle: string | null;
+    similarity: number;
+    decompositionProposal: unknown;
+    evidenceSnapshot: unknown;
+  } | null;
 }
 
 interface ProjectionQuestion {
@@ -127,6 +139,21 @@ const QUESTION_PRIORITY_LABEL: Record<string, string> = {
   P2: "任意",
 };
 
+/** [PATTERN-SUGGEST-01D新設・2026-09-05] CASE_PATTERN_FEEDBACK_VERDICTSの表示ラベル。 */
+const SUGGESTION_VERDICT_LABEL: Record<string, string> = {
+  ACCEPT: "採用",
+  PARTIAL_ACCEPT: "部分的に採用",
+  REJECT: "却下",
+  LATER: "後で",
+  NOT_RELEVANT: "無関係",
+};
+
+function nextIdempotencyKey(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: string; onChanged?: () => void }) {
   const [data, setData] = useState<ProjectionResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -153,6 +180,9 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
   const [lifecycleBusy, setLifecycleBusy] = useState<"defer" | "dismiss" | "resume" | "retry" | null>(null);
   const [deferReasonOpen, setDeferReasonOpen] = useState(false);
   const [deferReasonDraft, setDeferReasonDraft] = useState("");
+  // [PATTERN-SUGGEST-01D新設・2026-09-05]
+  const [suggestionFeedbackBusyId, setSuggestionFeedbackBusyId] = useState<string | null>(null);
+  const [suggestionFeedbackError, setSuggestionFeedbackError] = useState("");
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -205,6 +235,38 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
       onChanged?.();
     } finally {
       setDecidingId(null);
+    }
+  }
+
+  /** [PATTERN-SUGGEST-01D新設・2026-09-05] Case Patternの提案へのフィードバック
+   *  (ACCEPT/PARTIAL_ACCEPT/REJECT/LATER/NOT_RELEVANT)を記録する。
+   *  POST /api/v1/case-patterns/suggestions/{id}/feedback(PATTERN-SUGGEST-01C)。
+   *  既存decide()と同じくapiFetch(CSRF自動付与)を使い、加えてこのAPI固有の
+   *  Idempotency-Keyヘッダを付与する(既存ProjectContextsClient.tsxの
+   *  nextIdempotencyKeyと同じ方式)。 */
+  async function submitSuggestionFeedback(candidate: ProjectionCandidate, verdict: string) {
+    const suggestion = candidate.patternSuggestion;
+    if (!suggestion) return;
+    setSuggestionFeedbackBusyId(candidate.identityId);
+    setSuggestionFeedbackError("");
+    debugLog.event("FormationSessionPanel", "submitSuggestionFeedback", {
+      suggestionId: suggestion.suggestionId,
+      verdict,
+    });
+    try {
+      const res = await apiFetch(`/api/v1/case-patterns/suggestions/${suggestion.suggestionId}/feedback`, {
+        method: "POST",
+        headers: { "Idempotency-Key": nextIdempotencyKey() },
+        body: JSON.stringify({ revision: suggestion.revision, verdict }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setSuggestionFeedbackError(body?.error?.message ?? "フィードバックの記録に失敗しました");
+        return;
+      }
+      await load(true);
+    } finally {
+      setSuggestionFeedbackBusyId(null);
     }
   }
 
@@ -875,6 +937,42 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
                               : null}
                           </div>
                         )}
+                      {c.patternSuggestion && (
+                        <div className="mt-1.5 rounded bg-brand-50 px-2 py-1.5 text-[10px] text-brand-800">
+                          {c.patternSuggestion.matchedPatternId ? (
+                            <>
+                              <div className="font-medium">
+                                過去の類似パターン: 「{c.patternSuggestion.matchedPatternTitle ?? "(タイトル不明)"}」
+                                (類似度 {(c.patternSuggestion.similarity * 100).toFixed(0)}%)
+                              </div>
+                              {c.patternSuggestion.state === "PENDING" ? (
+                                <div className="mt-1 flex flex-wrap gap-1">
+                                  {(["ACCEPT", "PARTIAL_ACCEPT", "REJECT", "LATER", "NOT_RELEVANT"] as const).map((verdict) => (
+                                    <button
+                                      key={verdict}
+                                      type="button"
+                                      disabled={suggestionFeedbackBusyId === c.identityId}
+                                      onClick={() => submitSuggestionFeedback(c, verdict)}
+                                      className="rounded px-1.5 py-0.5 bg-white border border-brand-200 text-brand-700 hover:bg-brand-100 disabled:opacity-50"
+                                    >
+                                      {SUGGESTION_VERDICT_LABEL[verdict]}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="mt-1">
+                                  記録済み: {SUGGESTION_VERDICT_LABEL[c.patternSuggestion.state] ?? c.patternSuggestion.state}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            // [PATTERN-SUGGEST-01B AMBIGUOUS方針] 複数Pattern候補で判定保留中
+                            // (matchedPatternId=null)。自動選択しないため採否ボタンは出さない
+                            // (バックエンドもSUGGESTION_NOT_MATCHEDで拒否する、01Cで検証済み)。
+                            <div>複数の類似パターン候補があり、自動確定していません(判定保留中)。</div>
+                          )}
+                        </div>
+                      )}
                       {conflictCode && c.legacyProjection && (
                         <div className="mt-1.5 rounded bg-warn-50 px-2 py-1.5 text-[10px] text-warn">
                           {conflictCode === "DECISION_MISMATCH" ? (
@@ -999,6 +1097,7 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
         <p className="text-[11px] text-faint mt-3">全ての候補が処理済みです。</p>
       )}
       {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
+      {suggestionFeedbackError && <p className="text-sm text-red-600 mt-1">{suggestionFeedbackError}</p>}
     </div>
   );
 }
