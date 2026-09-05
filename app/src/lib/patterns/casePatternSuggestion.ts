@@ -81,6 +81,18 @@ export interface CasePatternSuggestionDto {
 }
 
 /**
+ * [PATTERN-SUGGEST-01B新設・2026-09-05] computeCasePatternAdoptionRateの
+ * 現行実装(Pattern全履歴ベース)のversion識別子。ハンドオフ資料5章2項
+ * 「採用率計算をcase-pattern-adoption-v1としてSuggestion単位の直近N件
+ * ベースへ再実装する」はPATTERN-SUGGEST-01Cのscope。このGate時点では
+ * 暫定実装(全履歴ベース)のままCasePatternSuggestionRevision.evidenceSnapshot
+ * へ記録するため、後から「どの計算方式で記録されたスナップショットか」を
+ * 判別できるよう、暫定版であることが分かる名前にする(想像で01Cの結果を
+ * 先取りしない)。
+ */
+export const CASE_PATTERN_ADOPTION_POLICY_VERSION = "case-pattern-adoption-v1-provisional-all-history";
+
+/**
  * Pattern提案の表示用DTOを組み立てる(DOC-06 §7の4値: 過去N件・M文脈・
  * 確度C・採用率A)。CasePattern.currentRevisionに対応するEvidence
  * Aggregate(PATTERN-DETECT-01C成果物)が無い場合はnullを返す

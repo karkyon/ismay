@@ -6,6 +6,7 @@ import { RESPONSIBILITY_TYPES } from "@/lib/responsibility";
 import { resolveLegacyProjectionMap } from "@/lib/formation/legacyProjectionResolver";
 import { sessionEventTypeForDecision } from "@/lib/formation/materialize";
 import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
+import { enqueueCaseSuggestionMatch } from "@/lib/patterns/caseSuggestQueue";
 
 /**
  * V5-M1-C Split Correction service。
@@ -131,8 +132,8 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
   return await db.$transaction(async (tx: Prisma.TransactionClient) => {
     // [recordCandidateDecisionと同じB3.1是正パターン] Session行をFOR UPDATEでlockし、
     // 同一Sessionへの並行Decision記録・Materializeと直列化する。
-    const sessionRows = await tx.$queryRaw<{ id: string; version: number; state: string }[]>`
-      SELECT id, version, state FROM formation_sessions
+    const sessionRows = await tx.$queryRaw<{ id: string; version: number; state: string; subject_user_id: string }[]>`
+      SELECT id, version, state, subject_user_id FROM formation_sessions
       WHERE id = ${sessionId} AND workspace_id = ${workspaceId}
       FOR UPDATE`;
     const session = sessionRows[0];
@@ -307,6 +308,16 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
       await tx.formationCandidateIdentity.update({
         where: { id: childIdentity.id },
         data: { currentRevision: 1 },
+      });
+
+      // [PATTERN-SUGGEST-01B新設・2026-09-05] Split結果の各子Candidateに対しても
+      // Case Pattern照合をenqueueする(shadowWrite.ts/answerService.ts/
+      // mergeCorrection.tsと同じ理由)。
+      await enqueueCaseSuggestionMatch(tx, {
+        workspaceId,
+        ownerSubjectUserId: session.subject_user_id,
+        candidateId: childIdentity.id,
+        reasonCode: "CANDIDATE_REVISION_CREATED",
       });
 
       // [2026-08-30新設・M1-C2C是正] 親のSource Anchorを子へ複製する

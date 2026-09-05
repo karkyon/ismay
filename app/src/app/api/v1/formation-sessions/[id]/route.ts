@@ -108,6 +108,52 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       acceptedUnmaterializedCount++;
     }
 
+    // [PATTERN-SUGGEST-01B新設・2026-09-05] このCandidateに対するCase Pattern
+    // 提案(あれば最新revisionのみ)。存在しない場合はnull(「未照合」と
+    // 「照合したがNO_MATCH/AMBIGUOUSだった」は、このAPIの応答上は区別しない
+    // ——どちらもユーザーへ提示すべきSuggestionが無い、という点で同じ扱いで
+    // 良く、想像で区別する意味付けを発明しない)。
+    const suggestionIdentity = await db.casePatternSuggestionIdentity.findFirst({
+      where: { workspaceId, candidateId: identity.id },
+      select: { id: true, state: true, currentRevision: true },
+    });
+    let patternSuggestion: {
+      suggestionId: string;
+      state: string;
+      revision: number;
+      matchedPatternId: string | null;
+      matchedPatternTitle: string | null;
+      similarity: number;
+      decompositionProposal: unknown;
+      evidenceSnapshot: unknown;
+    } | null = null;
+    if (suggestionIdentity && suggestionIdentity.currentRevision > 0) {
+      const suggestionRevision = await db.casePatternSuggestionRevision.findFirst({
+        where: { suggestionId: suggestionIdentity.id, workspaceId, revision: suggestionIdentity.currentRevision },
+        select: {
+          matchedPatternId: true,
+          similarity: true,
+          decompositionProposal: true,
+          evidenceSnapshot: true,
+        },
+      });
+      const matchedPattern = suggestionRevision?.matchedPatternId
+        ? await db.casePattern.findFirst({ where: { id: suggestionRevision.matchedPatternId, workspaceId }, select: { title: true } })
+        : null;
+      if (suggestionRevision) {
+        patternSuggestion = {
+          suggestionId: suggestionIdentity.id,
+          state: suggestionIdentity.state,
+          revision: suggestionIdentity.currentRevision,
+          matchedPatternId: suggestionRevision.matchedPatternId,
+          matchedPatternTitle: matchedPattern?.title ?? null,
+          similarity: Number(suggestionRevision.similarity),
+          decompositionProposal: suggestionRevision.decompositionProposal,
+          evidenceSnapshot: suggestionRevision.evidenceSnapshot,
+        };
+      }
+    }
+
     candidates.push({
       identityId: identity.id,
       candidateKey: identity.candidateKey,
@@ -132,6 +178,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
             algorithmVersion: atomicityAssessment.algorithmVersion,
           }
         : null,
+      // [PATTERN-SUGGEST-01B新設・2026-09-05]
+      patternSuggestion,
       formationDecision: decisionEvent
         ? { decision: decisionEvent.decision, revisionId: decisionEvent.revisionId, occurredAt: decisionEvent.occurredAt.toISOString() }
         : null,

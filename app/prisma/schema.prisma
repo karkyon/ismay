@@ -79,6 +79,8 @@ model User {
   casePatternDetectionReceiptsOwned       CasePatternDetectionReceipt[]      @relation("CasePatternDetectionReceiptOwner")
   /// [PATTERN-SUGGEST-01A新設・2026-09-04]
   casePatternSuggestionsOwned              CasePatternSuggestionIdentity[]    @relation("CasePatternSuggestionOwner")
+  /// [PATTERN-SUGGEST-01B新設・2026-09-05] CasePatternSuggestJob.ownerSubjectUserIdからの逆relation。
+  casePatternSuggestJobsOwned              CasePatternSuggestJob[]            @relation("CasePatternSuggestJobOwner")
   /// [V5-M1-B1新設] FormationSession.subjectUserId、および各append-only Eventの
   /// actorUserIdからの参照先として必要(全て単一のUser関係のためrelation名の
   /// disambiguationは不要。ProjectContextOwner/CreatedByのような複数関係が
@@ -173,6 +175,8 @@ model Workspace {
   casePatternDetectionReceipts CasePatternDetectionReceipt[]
   /// [PATTERN-SUGGEST-01A新設・2026-09-04]
   casePatternSuggestions CasePatternSuggestionIdentity[]
+  /// [PATTERN-SUGGEST-01B新設・2026-09-05]
+  casePatternSuggestJobs CasePatternSuggestJob[]
 
   @@map("workspaces")
 }
@@ -1937,6 +1941,8 @@ model FormationCandidateIdentity {
   mergeEventAsNewCandidate FormationCandidateMergeEvent[]    @relation("MergeEventNewCandidate")
   /// [PATTERN-SUGGEST-01A新設・2026-09-04]
   casePatternSuggestions   CasePatternSuggestionIdentity[]
+  /// [PATTERN-SUGGEST-01B新設・2026-09-05] CasePatternSuggestJob.candidateIdからの逆relation。
+  casePatternSuggestJobs   CasePatternSuggestJob[]
 
   @@unique([sessionId, candidateKey], map: "formation_candidate_identities_session_key_uq")
   @@unique([id, workspaceId], map: "formation_candidate_identities_id_workspace_uq")
@@ -3016,6 +3022,58 @@ model CasePatternDetectJob {
   @@index([status, nextAttemptAt])
   @@index([workspaceId, ownerSubjectUserId, status])
   @@map("case_pattern_detect_jobs")
+}
+
+// =====================================================================
+// V5-M4 Case Pattern Suggest Job(PATTERN-SUGGEST-01B新設・2026-09-05)
+// 出典: Claude向け_ISMAY_3b695d9以降_再監査是正・CasePattern実機能完遂指示_
+// 2026-09-04.md §6 PATTERN-SUGGEST-01B。
+//
+// [設計判断] CasePatternDetectJob(本人単位の再集計queue)とは別概念の
+// queueである。こちらは「新しいFormationCandidateRevisionが生成された時点で、
+// その特定のCandidateをACTIVE/STRONG_SUGGESTION段階の既存Patternへ照合する」
+// という、FormationCandidateIdentity単位のqueueである(既存caseDetectQueue.tsの
+// lease/generation/backoff/coalescing状態機械をそのまま踏襲、
+// case_pattern_detect_jobs_active_uqと同じ「PENDING/PROCESSINGはcandidateごとに
+// 1件まで」部分一意制約をmigration.sqlに追加する)。
+// =====================================================================
+
+/// V5-DOC-06 §7 TBL(PATTERN-SUGGEST-01B新設): Suggestion生成queue。
+/// 新しいFormationCandidateRevision確定時に、既存4経路
+/// (shadowWrite/answerService/mergeCorrection/splitCorrection)の
+/// transaction内からenqueueCaseSuggestionMatch()で原子的にenqueueされる。
+model CasePatternSuggestJob {
+  id                 String                     @id @default(uuid())
+  workspaceId        String                     @map("workspace_id")
+  workspace          Workspace                  @relation(fields: [workspaceId], references: [id])
+  /// この本人の既存Patternのみを照合対象とする(DOC-06 §5と同じownerスコープ)。
+  ownerSubjectUserId String                     @map("owner_subject_user_id")
+  ownerSubjectUser   User                       @relation("CasePatternSuggestJobOwner", fields: [ownerSubjectUserId], references: [id])
+  /// 照合対象のFormationCandidateIdentity(revisionではなくidentity単位。
+  /// coalescing時は常に最新revisionを照合すればよいため)。
+  candidateId        String                     @map("candidate_id")
+  candidate          FormationCandidateIdentity @relation(fields: [candidateId, workspaceId], references: [id, workspaceId])
+  /// PENDING/PROCESSING/DONE/FAILED/DEAD_LETTER(既存CasePatternDetectJobと同じ語彙)。
+  status             String                     @default("PENDING")
+  generation         Int                        @default(1)
+  attempt            Int                        @default(0)
+  maxAttempts        Int                        @default(8) @map("max_attempts")
+  leaseOwner         String?                    @map("lease_owner")
+  leaseExpiresAt     DateTime?                   @map("lease_expires_at")
+  nextAttemptAt      DateTime                   @default(now()) @map("next_attempt_at")
+  /// CANDIDATE_REVISION_CREATED(本Gateで配線する唯一の契機。指示書§6は
+  /// 「新しいFormationCandidateRevisionが生成された時点」のみを要求しており、
+  /// 他の契機は想像で追加しない)。
+  reasonCode         String                     @map("reason_code")
+  lastErrorCode      String?                     @map("last_error_code")
+  lastErrorDigest    String?                     @map("last_error_digest")
+  completedAt        DateTime?                  @map("completed_at")
+  createdAt          DateTime                   @default(now()) @map("created_at")
+  updatedAt          DateTime                   @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([workspaceId, candidateId, status])
+  @@map("case_pattern_suggest_jobs")
 }
 
 // =====================================================================

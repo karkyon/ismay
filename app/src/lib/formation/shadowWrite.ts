@@ -10,6 +10,7 @@ import { resolveFormationSessionTransition, isValidTextOffsetRange, capConfidenc
 import { applyQuestionPolicyAndTransition, type CandidateForQuestionPolicy } from "@/lib/formation/formationQuestionService";
 import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
 import { classifyPii } from "@/lib/formation/piiClassifier";
+import { enqueueCaseSuggestionMatch } from "@/lib/patterns/caseSuggestQueue";
 
 /**
  * V5-M1-B2 Formation Session shadow書込み。
@@ -264,6 +265,20 @@ export async function writeShadowFormationSession(params: WriteShadowFormationSe
         });
 
         await emit("CANDIDATE_CREATED", { candidateKey: candidate.candidateId, revisionId: revision.id, type: candidate.type });
+
+        // [PATTERN-SUGGEST-01B新設・2026-09-05] 新しいFormationCandidateRevisionが
+        // 確定した時点でCase Pattern照合をenqueueする(CHG-044「Pattern提案を
+        // Candidate sourceとして接続」)。既存Session/Candidate/Event/Anchor書込みと
+        // 同一transaction内で原子的にenqueueする(caseDetectQueue.tsのenqueueCaseDetect
+        // と同じ「呼び出し元txの中で呼ぶ」設計)。subjectUserId=capture.createdById
+        // (このファイル冒頭のformationSession.create呼出しと同じ値、DOC-03
+        // 「FormationSession.subjectUserId」)。
+        await enqueueCaseSuggestionMatch(tx, {
+          workspaceId: capture.workspaceId,
+          ownerSubjectUserId: capture.createdById,
+          candidateId: identity.id,
+          reasonCode: "CANDIDATE_REVISION_CREATED",
+        });
 
         createdCandidates.push({ identityId: identity.id, createdOrder: createdCandidates.length, candidate });
 

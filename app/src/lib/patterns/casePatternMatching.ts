@@ -268,6 +268,45 @@ export async function classifyCasePatternVector(
 }
 
 /**
+ * [PATTERN-SUGGEST-01B新設・2026-09-05] classifyCasePatternVectorと同じ
+ * exact cosine total-scanだが、比較対象をACTIVE/STRONG_SUGGESTION段階の
+ * Patternのみに絞る。指示書§6「Pattern stageがACTIVEまたはSTRONG_SUGGESTIONの
+ * みユーザー提案対象(CANDIDATE_DISPLAYは表示のみ、AMBIGUOUSは自動選択しない)」
+ * の実装。classifyCasePatternVector(検出・自動学習側、全stage対象)とは
+ * 別関数として分離する(検出側の「既存Patternへ強化/新規作成すべきか」判定と、
+ * 提案側の「ユーザーに見せてよいか」判定は異なる目的のため、同じ関数へ
+ * stage引数を足して分岐させるより、意図の異なるqueryとして明示的に分離する)。
+ */
+export async function classifyCasePatternVectorForSuggestion(
+  params: { workspaceId: string; ownerSubjectUserId: string; vectorLiteral: string; model: string; dimensions: number },
+): Promise<CasePatternMatchResult> {
+  const rows = await db.$queryRaw<SimilarityRow[]>`
+    SELECT
+      cp.id AS pattern_id,
+      cpr.id AS revision_id,
+      1 - (cpe.embedding <=> ${params.vectorLiteral}::vector) AS similarity
+    FROM case_pattern_embeddings cpe
+    JOIN case_pattern_revisions cpr ON cpr.id = cpe.revision_id
+    JOIN case_patterns cp ON cp.id = cpr.pattern_id AND cp.current_revision = cpr.revision
+    WHERE cpe.workspace_id = ${params.workspaceId}
+      AND cp.owner_subject_user_id = ${params.ownerSubjectUserId}
+      AND cp.status IN ('ACTIVE', 'STRONG_SUGGESTION')
+      AND cpe.model = ${params.model}
+      AND cpe.dimensions = ${params.dimensions}
+      AND cpe.source_version = ${CASE_PATTERN_EMBEDDING_SOURCE_VERSION}
+    ORDER BY cpe.embedding <=> ${params.vectorLiteral}::vector
+    LIMIT 2
+  `;
+
+  const candidates: CasePatternMatchCandidate[] = rows.map((r: SimilarityRow) => ({
+    patternId: r.pattern_id,
+    revisionId: r.revision_id,
+    similarity: Number(r.similarity),
+  }));
+  return classifyCasePatternMatchCandidates(candidates);
+}
+
+/**
  * 候補テキストが、この本人(ownerSubjectUserId)の既存CasePattern(current
  * revisionのみ)のいずれかと同一Patternとみなせるかを判定する
  * (case-pattern-match-v1、DOC-06 §5 DR-B)。embedCasePatternCandidate +

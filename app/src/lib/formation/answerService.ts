@@ -11,6 +11,7 @@ import {
 import { applyAnswerToCandidate, isValidQuestionCode, type QuestionCode } from "@/lib/formation/questionPolicy";
 import { applyQuestionPolicyAndTransition, type CandidateForQuestionPolicy } from "@/lib/formation/formationQuestionService";
 import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
+import { enqueueCaseSuggestionMatch } from "@/lib/patterns/caseSuggestQueue";
 
 /**
  * V5-M1-B5a: POST /formation-sessions/{id}/answers service。
@@ -107,8 +108,8 @@ export async function recordFormationAnswer(params: RecordFormationAnswerParams)
       // [materialize.tsのrecordCandidateDecisionと同じパターン] Session行を
       // FOR UPDATEでlockし、同一Sessionへの並行回答・他の書込み(materialize等)と
       // 直列化する。
-      const sessionRows = await tx.$queryRaw<{ id: string; version: number; state: string; question_count: number }[]>`
-        SELECT id, version, state, question_count FROM formation_sessions
+      const sessionRows = await tx.$queryRaw<{ id: string; version: number; state: string; question_count: number; subject_user_id: string }[]>`
+        SELECT id, version, state, question_count, subject_user_id FROM formation_sessions
         WHERE id = ${sessionId} AND workspace_id = ${workspaceId}
         FOR UPDATE`;
       const session = sessionRows[0];
@@ -254,6 +255,15 @@ export async function recordFormationAnswer(params: RecordFormationAnswerParams)
                 confidence: revisedAssessment.confidence,
                 algorithmVersion: revisedAssessment.algorithmVersion,
               },
+            });
+            // [PATTERN-SUGGEST-01B新設・2026-09-05] 回答で新Revisionが作られた際も
+            // Case Pattern照合をenqueueする(shadowWrite.tsの初回Revisionと同じ理由:
+            // CHG-044「Pattern提案をCandidate sourceとして接続」)。
+            await enqueueCaseSuggestionMatch(tx, {
+              workspaceId,
+              ownerSubjectUserId: session.subject_user_id,
+              candidateId: identity.id,
+              reasonCode: "CANDIDATE_REVISION_CREATED",
             });
             await tx.formationSessionEvent.create({
               data: {

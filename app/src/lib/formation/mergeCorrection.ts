@@ -7,6 +7,7 @@ import { RESPONSIBILITY_TYPES } from "@/lib/responsibility";
 import { resolveLegacyProjectionMap } from "@/lib/formation/legacyProjectionResolver";
 import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
 import { sessionEventTypeForDecision } from "@/lib/formation/materialize";
+import { enqueueCaseSuggestionMatch } from "@/lib/patterns/caseSuggestQueue";
 
 /**
  * V5-M1-C2B Candidate MERGE Correction service。
@@ -174,8 +175,8 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
   }
 
   return await db.$transaction(async (tx: Prisma.TransactionClient) => {
-    const sessionRows = await tx.$queryRaw<{ id: string; state: string }[]>`
-      SELECT id, state FROM formation_sessions
+    const sessionRows = await tx.$queryRaw<{ id: string; state: string; subject_user_id: string }[]>`
+      SELECT id, state, subject_user_id FROM formation_sessions
       WHERE id = ${sessionId} AND workspace_id = ${workspaceId}
       FOR UPDATE`;
     const session = sessionRows[0];
@@ -404,6 +405,15 @@ export async function mergeFormationCandidates(params: MergeCandidatesParams): P
     await tx.formationCandidateIdentity.update({
       where: { id: newIdentity.id },
       data: { currentRevision: 1 },
+    });
+
+    // [PATTERN-SUGGEST-01B新設・2026-09-05] Merge結果の新Candidateに対しても
+    // Case Pattern照合をenqueueする(shadowWrite.ts/answerService.tsと同じ理由)。
+    await enqueueCaseSuggestionMatch(tx, {
+      workspaceId,
+      ownerSubjectUserId: session.subject_user_id,
+      candidateId: newIdentity.id,
+      reasonCode: "CANDIDATE_REVISION_CREATED",
     });
 
     // [DEC-MERGE-001「親candidate/revisionのlineageをDBで照会可能にする」]
