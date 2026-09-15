@@ -64,6 +64,14 @@ export interface LinkPatternSourceEventResult {
   sourceLinkId: string;
   /** false の場合、既存行を指す冪等応答(新規INSERTは発生していない)。 */
   created: boolean;
+  /**
+   * [PATTERN-INTEGRITY-03B新設・2026-09-05] trueの場合、既存行が除外済み
+   * (excludedAt非null)だったものを本呼び出しで再有効化した(excludedAt/
+   * excludedReasonをnullへ戻した)ことを示す。createdがfalseかつ
+   * reactivatedがtrueのケースは「title変更後、以前と同じPatternへ再一致した」
+   * 場合に相当する。
+   */
+  reactivated: boolean;
 }
 
 /** provenance(sourceEventKind/sourceEventIdの実在・workspace一致・kind対応)検証に失敗。 */
@@ -177,10 +185,23 @@ export async function linkPatternSourceEvent(
           sourceEventKind: input.sourceEventKind,
           sourceEventId: input.sourceEventId,
         },
-        select: { id: true },
+        select: { id: true, excludedAt: true },
       });
       if (existing) {
-        return { sourceLinkId: existing.id, created: false };
+        // [PATTERN-INTEGRITY-03B是正・2026-09-05] title訂正等でこの
+        // (patternRevisionId, sourceEventKind, sourceEventId)が一度
+        // excludeCasePatternSourceLinksForResponsibilityで除外された後、
+        // 再判定で同一Patternへ再一致した場合、除外済みのまま放置すると
+        // 有効なEvidenceが永久に失われる(ISMAY_ハンドオフ資料_2026-09-05_
+        // 続き3.md §3.2)。excludedAtが非nullなら同一tx内で再有効化する。
+        if (existing.excludedAt !== null) {
+          await tx.casePatternSourceLink.update({
+            where: { id: existing.id },
+            data: { excludedAt: null, excludedReason: null },
+          });
+          return { sourceLinkId: existing.id, created: false, reactivated: true };
+        }
+        return { sourceLinkId: existing.id, created: false, reactivated: false };
       }
 
       const revision = await tx.casePatternRevision.findFirst({
@@ -218,7 +239,7 @@ export async function linkPatternSourceEvent(
           qualityWeight: input.qualityWeight ?? 1,
         },
       });
-      return { sourceLinkId: created.id, created: true };
+      return { sourceLinkId: created.id, created: true, reactivated: false };
     });
   } catch (err) {
     // 並行呼び出しによる競合(2つのtransactionが同時に「まだ存在しない」と
@@ -231,10 +252,19 @@ export async function linkPatternSourceEvent(
           sourceEventKind: input.sourceEventKind,
           sourceEventId: input.sourceEventId,
         },
-        select: { id: true },
+        select: { id: true, excludedAt: true },
       });
       if (existing) {
-        return { sourceLinkId: existing.id, created: false };
+        // [PATTERN-INTEGRITY-03B是正・2026-09-05] 並行競合フォールバック経路でも
+        // 上記と同じ再有効化規則を適用する(除外済み行を放置しない)。
+        if (existing.excludedAt !== null) {
+          await db.casePatternSourceLink.update({
+            where: { id: existing.id },
+            data: { excludedAt: null, excludedReason: null },
+          });
+          return { sourceLinkId: existing.id, created: false, reactivated: true };
+        }
+        return { sourceLinkId: existing.id, created: false, reactivated: false };
       }
     }
     throw err;

@@ -51,6 +51,20 @@ async function resolveOwnerForPrimaryLinkedResponsibility(
  * `PATCH /api/v1/responsibilities/[id]`でtitleが実際に変化した直後に呼ぶ。
  * PRIMARY Linkが無ければ何もしない(このResponsibilityはCase Pattern学習の
  * eligible source対象外のため)。
+ *
+ * [PATTERN-INTEGRITY-03B是正・2026-09-05] ISMAY_ハンドオフ資料_2026-09-05_
+ * 続き3.md §3「未着手: PATTERN-INTEGRITY-03B」。
+ * 従来はenqueueCaseDetectを呼ぶのみで、旧title由来の既存CasePatternSourceLink
+ * を除外していなかった。再判定が別Patternへ一致した場合、旧SourceLink(旧
+ * Pattern向け)と新SourceLink(新Pattern向け)が両方残り二重計上される欠陥が
+ * あった。03A(PRIMARY_UNLINKED、
+ * app/src/app/api/v1/project-contexts/[id]/links/[responsibilityId]/route.ts
+ * DELETEハンドラ)と同一の是正パターンを適用する: 唯一のSourceLink除外入口
+ * excludeCasePatternSourceLinksForResponsibilityを呼び、影響を受けた全owner
+ * (通常はresolveOwnerForPrimaryLinkedResponsibilityの解決先と一致するが、
+ * 過去データ不整合等に備え和集合で扱う)へ再検出をenqueueする。
+ * 除外済みSourceLinkが同一Patternへ再一致した場合の再有効化は
+ * sourceLinkService.ts::linkPatternSourceEvent側で処理する(本関数の責務外)。
  */
 export async function enqueueCaseDetectForResponsibilityCorrection(
   txOrDb: PatternDbClient,
@@ -62,11 +76,24 @@ export async function enqueueCaseDetectForResponsibilityCorrection(
     params.responsibilityId,
   );
   if (!ownerSubjectUserId) return;
-  await enqueueCaseDetect(txOrDb, {
+
+  const { affectedOwnerIds } = await excludeCasePatternSourceLinksForResponsibility(txOrDb, {
     workspaceId: params.workspaceId,
-    ownerSubjectUserId,
-    reasonCode: "RESPONSIBILITY_CORRECTED",
+    responsibilityId: params.responsibilityId,
+    reason: "RESPONSIBILITY_CORRECTED",
   });
+
+  // 通常はaffectedOwnerIds === [ownerSubjectUserId](CasePattern.ownerSubjectUserIdは
+  // 常にPRIMARY Context.ownerSubjectUserIdと一致するため)だが、03Aのunlink是正と
+  // 同じく万一の不一致に備え和集合で再集計をenqueueする。
+  const ownersToEnqueue = new Set<string>([ownerSubjectUserId, ...affectedOwnerIds]);
+  for (const id of ownersToEnqueue) {
+    await enqueueCaseDetect(txOrDb, {
+      workspaceId: params.workspaceId,
+      ownerSubjectUserId: id,
+      reasonCode: "RESPONSIBILITY_CORRECTED",
+    });
+  }
 }
 
 /**
