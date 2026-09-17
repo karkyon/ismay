@@ -378,7 +378,12 @@ async function main(): Promise<void> {
     } catch (err) {
       brokenDurationArrayErr = err;
     }
-    ok("[4] durationDistributionが配列(object型でない)場合はCHECK制約で拒否される", isPrismaConstraintError(brokenDurationArrayErr, ["P2010", "P2000"]) || String(brokenDurationArrayErr).includes("duration_distribution_type_check"), String(brokenDurationArrayErr));
+    // [注記] Postgresの識別子長制限(NAMEDATALEN既定63バイト)により、
+    // "case_pattern_action_slot_revisions_duration_distribution_type_check"
+    // (68文字)はDB上で自動的に63文字へ切り詰められ、実際のCHECK制約名は
+    // "...duration_distribution_type_c"となる(実DB確認済み)。切り詰め後も
+    // 生存する短い断片でmatchする。
+    ok("[4] durationDistributionが配列(object型でない)場合はCHECK制約で拒否される", isPrismaConstraintError(brokenDurationArrayErr, ["P2010", "P2000"]) || String(brokenDurationArrayErr).includes("duration_distribution_type"), String(brokenDurationArrayErr));
 
     let brokenOccurrenceProbabilityErr: unknown = null;
     try {
