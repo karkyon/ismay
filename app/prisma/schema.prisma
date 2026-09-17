@@ -177,6 +177,8 @@ model Workspace {
   casePatternSuggestions CasePatternSuggestionIdentity[]
   /// [PATTERN-SUGGEST-01B新設・2026-09-05]
   casePatternSuggestJobs CasePatternSuggestJob[]
+  /// [PATTERN-ACTIONSLOT-SCHEMA-01新設・2026-09-17]
+  casePatternActionSlots CasePatternActionSlot[]
 
   @@map("workspaces")
 }
@@ -1981,6 +1983,8 @@ model FormationCandidateRevision {
   lineageAsParentRevision FormationCandidateLineage[]       @relation("LineageParentRevision")
   /// [PATTERN-SUGGEST-01A新設・2026-09-04]
   casePatternSuggestionRevisions CasePatternSuggestionRevision[]
+  /// [PATTERN-ACTIONSLOT-SCHEMA-01新設・2026-09-17]
+  casePatternActionSlotSourceInstances CasePatternActionSlotSourceInstance[]
 
   @@unique([candidateId, revision], map: "formation_candidate_revisions_candidate_revision_uq")
   @@unique([id, workspaceId], map: "formation_candidate_revisions_id_workspace_uq")
@@ -2670,6 +2674,8 @@ model CasePattern {
 
   revisions      CasePatternRevision[]
   feedbackEvents CasePatternFeedbackEvent[]
+  /// [PATTERN-ACTIONSLOT-SCHEMA-01新設・2026-09-17]
+  actionSlots    CasePatternActionSlot[]
 
   @@unique([workspaceId, ownerSubjectUserId, patternKey], map: "case_patterns_owner_key_uq")
   @@unique([id, workspaceId], map: "case_patterns_id_workspace_uq")
@@ -2699,6 +2705,8 @@ model CasePatternRevision {
   feedbackEvents     CasePatternFeedbackEvent[]
   /// [PATTERN-SUGGEST-01A新設・2026-09-04]
   matchedBySuggestionRevisions CasePatternSuggestionRevision[]
+  /// [PATTERN-ACTIONSLOT-SCHEMA-01新設・2026-09-17]
+  actionSlotRevisions CasePatternActionSlotRevision[]
 
   @@unique([patternId, revision], map: "case_pattern_revisions_pattern_revision_uq")
   @@unique([id, workspaceId], map: "case_pattern_revisions_id_workspace_uq")
@@ -2963,6 +2971,117 @@ model CasePatternEmbedding {
 
   @@unique([workspaceId, revisionId, model], map: "case_pattern_embeddings_revision_model_uq")
   @@map("case_pattern_embeddings")
+}
+
+// =====================================================================
+// V5-M4 CasePatternActionSlot(PATTERN-ACTIONSLOT-SCHEMA-01新設・2026-09-17)
+// 出典: ISMAY_統合正本仕様書_v5_0.md §12.2「CasePatternActionSlot」、
+// Claude向け_ISMAY_d68e9bf以降_ActionSlot正本準拠・CasePattern実分解完遂・
+// 残工程連続実装指示_2026-09-17.md Gate 3(Decision Record)・Gate 4。
+//
+// [安定identityとappend-only snapshotの分離] CasePattern/CasePatternRevisionと
+// 同じ設計規律。CasePatternActionSlotは不変identity(slotKey)のみを持ち、
+// 統計値(occurrenceProbability等)はCasePatternActionSlotRevisionへ
+// append-onlyで記録する。過去revision行へのUPDATE/DELETEは一切行わない。
+//
+// [slotKey再採番禁止・Gate 3.2] slotKeyはcrypto.randomUUID()で「初回生成時
+// のみ」採番する。再集計時は保存済みgroupingKey(normalize(type+title)の
+// SHA-256)とのexact matchで既存slotへ再帰属させ、slotKeyは不変のまま
+// 引き継ぐ(再計算のたびに新しいUUIDを振ってはならない、指示書§3禁止事項)。
+// =====================================================================
+
+/// stable identity。groupingKeyのexact matchで同一slotを再識別する
+/// (意味クラスタリングの閾値は未確定なため、v1では決定論的exact matchのみ)。
+model CasePatternActionSlot {
+  id                    String    @id @default(uuid())
+  workspaceId           String    @map("workspace_id")
+  workspace             Workspace @relation(fields: [workspaceId], references: [id])
+  patternId             String    @map("pattern_id")
+  pattern               CasePattern @relation(fields: [patternId, workspaceId], references: [id, workspaceId])
+  /// 初回生成時のみcrypto.randomUUID()を採番する不透明token(patternKeyと同方針)。
+  slotKey               String    @map("slot_key")
+  /// normalize(type + "\u0000" + title)のSHA-256 hex。exact matchの実キー
+  /// (Gate 3 Decision Record §3.2)。このkeyが変われば別slotとして扱う。
+  groupingKey           String    @map("grouping_key")
+  groupingPolicyVersion String    @map("grouping_policy_version")
+  /// CasePattern.currentRevisionと同じ「最新revisionへの高速参照キャッシュ、
+  /// 正本はrevision行そのもの」パターン。
+  currentRevision       Int       @default(0) @map("current_revision")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  revisions       CasePatternActionSlotRevision[]
+  sourceInstances CasePatternActionSlotSourceInstance[]
+
+  @@unique([workspaceId, patternId, slotKey], map: "case_pattern_action_slots_pattern_slot_uq")
+  @@unique([workspaceId, patternId, groupingKey], map: "case_pattern_action_slots_pattern_grouping_uq")
+  @@unique([id, workspaceId], map: "case_pattern_action_slots_id_workspace_uq")
+  @@index([workspaceId, patternId])
+  @@map("case_pattern_action_slots")
+}
+
+/// append-only snapshot(Gate 3 Decision Record §3.3・§3.4)。
+model CasePatternActionSlotRevision {
+  id                     String   @id @default(uuid())
+  workspaceId            String   @map("workspace_id")
+  slotId                 String   @map("slot_id")
+  slot                   CasePatternActionSlot @relation(fields: [slotId, workspaceId], references: [id, workspaceId])
+  revision               Int
+  /// このrevision算出の根拠にしたCasePatternRevision(どのgenerationの
+  /// 集計かを照会可能にする、指示書§3.3「どのCasePatternRevision/aggregation
+  /// generationがどのslot snapshotを使ったか照会可能にする」)。
+  patternId              String   @map("pattern_id")
+  patternRevisionId      String   @map("pattern_revision_id")
+  patternRevision        CasePatternRevision @relation(fields: [patternRevisionId, patternId, workspaceId], references: [id, patternId, workspaceId])
+  /// このslotの直近instanceのtitleそのまま(要約・自然言語汎化はしない、
+  /// Gate 6「titleの自然言語汎化アルゴリズムは発明しない」の前段方針)。
+  normalizedIntent       String   @map("normalized_intent")
+  suggestedType          String   @map("suggested_type")
+  /// slotを含む適格Split instance数 / Patternに帰属する適格Split instance
+  /// 総数(Gate 3 Decision Record §3.4)。
+  occurrenceProbability  Decimal  @db.Decimal(5, 4) @map("occurrence_probability")
+  /// v1統計量=中央値(policyVersionで明記、無断で意味を変更しない)。
+  typicalOrder           Decimal  @db.Decimal(6, 2) @map("typical_order")
+  predecessorSlotKeys    String[] @map("predecessor_slot_keys")
+  /// v1固定値{status:"NOT_ENOUGH_DATA",sampleSize:0,policyVersion}
+  /// (ExecutionSession接続は別Gate、空{}は禁止)。
+  durationDistribution   Json     @map("duration_distribution")
+  /// 子RevisionのFormationAtomicityAssessment.assessment別件数。
+  atomicityDistribution  Json     @map("atomicity_distribution")
+  rawSampleSize          Int      @map("raw_sample_size")
+  schemaVersion          String   @map("schema_version")
+  policyVersion          String   @map("policy_version")
+  createdAt              DateTime @default(now()) @map("created_at")
+
+  @@unique([workspaceId, slotId, revision], map: "case_pattern_action_slot_revisions_slot_rev_uq")
+  @@index([workspaceId, slotId])
+  @@index([workspaceId, patternRevisionId])
+  @@map("case_pattern_action_slot_revisions")
+}
+
+/// provenance: どのSplit実例(FormationCandidateRevision、実体は
+/// formation_candidate_lineagesのchildRevision)がどのslotへ帰属したかを
+/// 記録する。親candidate・親Revision・correctionKind=SPLITは既存
+/// formation_candidate_lineagesをchildRevisionId経由で遡及すれば得られる
+/// ため、ここでは重複保持しない(1 childRevisionは高々1 slotへのみ帰属し、
+/// 同一分解内の複数partが同じslotへ二重計上されない)。
+model CasePatternActionSlotSourceInstance {
+  id                String   @id @default(uuid())
+  workspaceId       String   @map("workspace_id")
+  slotId            String   @map("slot_id")
+  slot              CasePatternActionSlot @relation(fields: [slotId, workspaceId], references: [id, workspaceId])
+  childRevisionId   String   @map("child_revision_id")
+  childRevision     FormationCandidateRevision @relation(fields: [childRevisionId, workspaceId], references: [id, workspaceId])
+  /// このchildの分解内での順序(0始まり、typicalOrder算出に使う)。
+  order             Int
+  /// 独立性の単位(既存CasePatternSourceLink.independenceGroupと同じ方針、
+  /// 通常はcontextId)。
+  independenceGroup String   @map("independence_group")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@unique([workspaceId, childRevisionId], map: "case_pattern_action_slot_source_instances_child_uq")
+  @@index([workspaceId, slotId])
+  @@map("case_pattern_action_slot_source_instances")
 }
 
 // =====================================================================
