@@ -54,6 +54,7 @@ import {
   type CasePatternStage,
 } from "./casePatternMath";
 import { computeCasePatternAdoptionRate } from "./casePatternSuggestion";
+import { assertCaseDetectJobGenerationCurrent, type CaseDetectJobGenerationContext } from "./caseDetectQueue";
 
 /** [暫定プレースホルダ] モジュール先頭のコメント「Metric OFF filterについて」参照。 */
 export const CASE_PATTERN_AGGREGATE_METRIC_KEY = "CASE_PATTERN_OCCURRENCE";
@@ -129,6 +130,7 @@ function normalizeIndependenceWeights(links: readonly EligibleSourceLinkRow[]): 
 export async function computeAndPersistCasePatternAggregate(
   workspaceId: string,
   patternId: string,
+  jobContext?: CaseDetectJobGenerationContext,
 ): Promise<CasePatternAggregateResult> {
   const pattern = await db.casePattern.findFirst({
     where: { id: patternId, workspaceId },
@@ -190,6 +192,15 @@ export async function computeAndPersistCasePatternAggregate(
   const displayConfidence = displayCasePatternConfidence(confResult);
 
   await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    // [PATTERN-INTEGRITY-03C新設・2026-09-05] ISMAY_ハンドオフ資料_2026-09-05_
+    // 続き3.md §4「旧generationによるPattern/Revision/Embedding/SourceLink/
+    // Aggregate/Receiptの副作用をcommitしない」。jobContext指定時(実worker
+    // 経路)は、Aggregate確定の直前でJobのgenerationを再確認し、処理中に
+    // coalescingが起きていればこのtransaction全体をrollbackさせる。
+    if (jobContext) {
+      await assertCaseDetectJobGenerationCurrent(tx, jobContext.jobId, jobContext.generation);
+    }
+
     await tx.casePatternEvidenceAggregate.upsert({
       where: { revisionId_metricKey: { revisionId: revision.id, metricKey: CASE_PATTERN_AGGREGATE_METRIC_KEY } },
       create: {
@@ -244,6 +255,7 @@ export async function computeAndPersistCasePatternAggregate(
 export async function computeAndPersistCasePatternAggregatesForOwner(
   workspaceId: string,
   ownerSubjectUserId: string,
+  jobContext?: CaseDetectJobGenerationContext,
 ): Promise<CasePatternAggregateResult[]> {
   const patterns = await db.casePattern.findMany({
     where: { workspaceId, ownerSubjectUserId, currentRevision: { gt: 0 } },
@@ -251,7 +263,7 @@ export async function computeAndPersistCasePatternAggregatesForOwner(
   });
   const results: CasePatternAggregateResult[] = [];
   for (const p of patterns) {
-    results.push(await computeAndPersistCasePatternAggregate(workspaceId, p.id));
+    results.push(await computeAndPersistCasePatternAggregate(workspaceId, p.id, jobContext));
   }
   return results;
 }

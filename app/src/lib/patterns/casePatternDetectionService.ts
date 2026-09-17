@@ -61,6 +61,7 @@ import { linkPatternSourceEvent, PatternSourceEligibilityError, PatternSourcePro
 import { createCasePatternIdentity } from "./casePatternRevisionService";
 import { isCasePatternLearningConsentGrantedForOwner } from "./casePatternConsentGate";
 import { CASE_PATTERN_WINDOW_CYCLES, CASE_PATTERN_NULL_INTERVAL_CONFIDENCE_CAP } from "./casePatternMath";
+import { assertCaseDetectJobGenerationCurrent, type CaseDetectJobGenerationContext } from "./caseDetectQueue";
 
 /** CasePatternRevision.thresholdsへ保存するスナップショット(casePatternMath.tsの現行定数)。 */
 const CASE_PATTERN_REVISION_THRESHOLDS_SNAPSHOT = {
@@ -69,6 +70,32 @@ const CASE_PATTERN_REVISION_THRESHOLDS_SNAPSHOT = {
 };
 /** 既存verify script群と同じ慣行(casePatternRevisionService.ts利用箇所参照)。 */
 const CASE_PATTERN_REVISION_SCHEMA_VERSION = "1.0";
+
+/**
+ * [PATTERN-INTEGRITY-03C新設・2026-09-05] ISMAY_ハンドオフ資料_2026-09-05_
+ * 続き3.md §4「generation確認と全DB副作用を同一transaction内で確定する」。
+ * 1sourceあたりのDB確定処理(Receipt/SourceLink/新規Pattern作成のいずれか
+ * 一つ以上を含む)を、単一のdb.$transaction内で行う共通ラッパー。jobContext
+ * (caseDetectQueueJob.ts経由の実worker実行時のみ渡される)が指定されている
+ * 場合、transaction先頭でassertCaseDetectJobGenerationCurrentを呼び、claim時
+ * generationと現在generationの不一致を検出したらCaseDetectJobGenerationStaleError
+ * を投げてtransaction全体をrollbackさせる(この関数はそれを握りつぶさず
+ * そのまま再送出し、呼び出し元のrunCasePatternDetectionForOwnerループ全体を
+ * 中断させる。「旧generation失効時は取得済みEmbedding結果を破棄し、新
+ * generationで再実行する」の実装)。jobContext未指定時(verify script等の
+ * 単独呼び出し)はgeneration lockを行わない(既存呼び出し元との後方互換)。
+ */
+async function commitSourceOutcome<T>(
+  jobContext: CaseDetectJobGenerationContext | undefined,
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return db.$transaction(async (tx: Prisma.TransactionClient): Promise<T> => {
+    if (jobContext) {
+      await assertCaseDetectJobGenerationCurrent(tx, jobContext.jobId, jobContext.generation);
+    }
+    return fn(tx);
+  });
+}
 
 export interface DetectionSourceOutcome {
   sourceEventId: string;
@@ -257,14 +284,30 @@ async function writeReceipt(txOrDb: typeof db | Prisma.TransactionClient, p: Wri
 
 /**
  * この本人(ownerSubjectUserId)のeligible sourceを列挙し、未処理分を検出処理
- * する(§3.2手順1〜9)。generationの古さ検出(手順10)はcaseDetectQueueJob.ts側の
- * 既存completeCaseDetectJobが担う(全書込みが冪等のため、二重実行しても
- * 副作用は増えない)。
+ * する(§3.2手順1〜9)。
+ *
+ * [PATTERN-INTEGRITY-03C是正・2026-09-05] 従来のコメント「generationの
+ * 古さ検出(手順10)はcaseDetectQueueJob.ts側の既存completeCaseDetectJobが
+ * 担う」は誤りだった(ISMAY_ハンドオフ資料_2026-09-05_続き3.md §4「単に
+ * completeCaseDetectJobでPENDINGへ戻すだけでは不合格」)。completeCaseDetectJob
+ * は全source処理完了後の最終チェックに過ぎず、処理中にcoalescingが起きても
+ * 既にcommit済みの副作用(旧generationの入力に基づくPattern/Revision/
+ * Embedding/SourceLink/Aggregate/Receipt)は残ってしまっていた。
+ * jobContext(caseDetectQueueJob.ts経由の実worker実行時のみ)が指定されて
+ * いる場合、各sourceのDB確定処理をcommitSourceOutcome経由でgeneration
+ * lock付きtransactionへ包む。generation不一致を検出した場合は
+ * CaseDetectJobGenerationStaleErrorがこの関数の外まで伝播し、残りの
+ * source処理を中断する(取得済みEmbedding結果は破棄され、次回の再実行
+ * (enqueueCaseDetectでのcoalescing済みgenerationによる再claim)で
+ * 最初からやり直される)。jobContext未指定時(verify script等の直接呼び
+ * 出し)はgeneration lockを行わない従来通りの挙動(既存呼び出し元との
+ * 後方互換)。
  */
 export async function runCasePatternDetectionForOwner(
   workspaceId: string,
   ownerSubjectUserId: string,
   overrides: CasePatternEmbeddingOverrides = {},
+  jobContext?: CaseDetectJobGenerationContext,
 ): Promise<DetectionSourceOutcome[]> {
   const results: DetectionSourceOutcome[] = [];
 
@@ -311,25 +354,30 @@ export async function runCasePatternDetectionForOwner(
     // 上書きする(existingReceiptIdをwriteReceiptへ渡す)。
     const existingReceiptId = existingReceipt?.id;
 
+    // [AI呼出しとtransactionの分離] embedCasePatternCandidateはtransaction外で
+    // 行う(§3.2、既存方針を維持)。この後のDB確定処理のみをcommitSourceOutcome
+    // (generation lock付きtransaction)へ包む。
     const embedOutcome = await embedCasePatternCandidate(workspaceId, candidate, overrides, provider);
     if (!embedOutcome.ok) {
       const reasonCode = embedOutcome.errorKind === "TRANSIENT" ? "EMBEDDING_TRANSIENT_FAILURE" : "EMBEDDING_FATAL_FAILURE";
       // [model不明時] provider解決自体に失敗した場合、modelは不明("UNKNOWN")として
       // 記録する(受入試験可視化のため、秘密情報は含めない)。
-      await writeReceipt(db, {
-        existingReceiptId,
-        workspaceId,
-        ownerSubjectUserId,
-        sourceEventId: source.itemId,
-        contextId: source.contextId,
-        responsibilityId: source.responsibilityId,
-        inputDigest,
-        policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
-        model: "UNKNOWN",
-        dimensions: null,
-        sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
-        outcome: "FAILED",
-        reasonCode,
+      await commitSourceOutcome(jobContext, async (tx) => {
+        await writeReceipt(tx, {
+          existingReceiptId,
+          workspaceId,
+          ownerSubjectUserId,
+          sourceEventId: source.itemId,
+          contextId: source.contextId,
+          responsibilityId: source.responsibilityId,
+          inputDigest,
+          policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
+          model: "UNKNOWN",
+          dimensions: null,
+          sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
+          outcome: "FAILED",
+          reasonCode,
+        });
       });
       results.push({ sourceEventId: source.itemId, outcome: "FAILED", reasonCode });
       continue;
@@ -344,82 +392,98 @@ export async function runCasePatternDetectionForOwner(
     });
 
     if (matchResult.kind === "MATCHED") {
-      try {
-        await linkPatternSourceEvent({
-          workspaceId,
-          patternRevisionId: matchResult.revisionId,
-          contextId: source.contextId,
-          sourceEventKind: "MATERIALIZATION_RECEIPT_ITEM",
-          sourceEventId: source.itemId,
-          responsibilityId: source.responsibilityId,
-          independenceGroup: source.contextId,
-          independenceWeight: 1,
-          qualityWeight: 1,
-        });
-      } catch (err) {
-        if (err instanceof PatternSourceEligibilityError || err instanceof PatternSourceProvenanceError) {
-          await writeReceipt(db, {
-            existingReceiptId,
+      // [PATTERN-INTEGRITY-03C是正・2026-09-05] linkPatternSourceEvent(SourceLink
+      // 確定)とwriteReceipt(Receipt確定)を、generation lock付きの単一
+      // transactionへ包む。PatternSourceEligibilityError/
+      // PatternSourceProvenanceErrorはDB制約違反を伴わない検証エラー
+      // (linkPatternSourceEventCore内でDB書込み前にthrowされる)ため、tx内で
+      // catchして後続のwriteReceipt(SKIPPED)を同一tx内で継続してよい
+      // (postgresのtransaction-abort状態を引き起こさない)。
+      const outcome = await commitSourceOutcome(jobContext, async (tx) => {
+        try {
+          await linkPatternSourceEvent(tx, {
             workspaceId,
-            ownerSubjectUserId,
-            sourceEventId: source.itemId,
+            patternRevisionId: matchResult.revisionId,
             contextId: source.contextId,
+            sourceEventKind: "MATERIALIZATION_RECEIPT_ITEM",
+            sourceEventId: source.itemId,
             responsibilityId: source.responsibilityId,
-            inputDigest,
-            policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
-            model: embedOutcome.model,
-            dimensions: embedOutcome.dimensions,
-            sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
-            outcome: "SKIPPED",
-            reasonCode: "NOT_ELIGIBLE_NO_PRIMARY_LINK",
+            independenceGroup: source.contextId,
+            independenceWeight: 1,
+            qualityWeight: 1,
           });
-          results.push({ sourceEventId: source.itemId, outcome: "SKIPPED", reasonCode: "NOT_ELIGIBLE_NO_PRIMARY_LINK" });
-          continue;
+        } catch (err) {
+          if (err instanceof PatternSourceEligibilityError || err instanceof PatternSourceProvenanceError) {
+            await writeReceipt(tx, {
+              existingReceiptId,
+              workspaceId,
+              ownerSubjectUserId,
+              sourceEventId: source.itemId,
+              contextId: source.contextId,
+              responsibilityId: source.responsibilityId,
+              inputDigest,
+              policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
+              model: embedOutcome.model,
+              dimensions: embedOutcome.dimensions,
+              sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
+              outcome: "SKIPPED",
+              reasonCode: "NOT_ELIGIBLE_NO_PRIMARY_LINK",
+            });
+            return "SKIPPED_NOT_ELIGIBLE" as const;
+          }
+          throw err;
         }
-        throw err;
-      }
 
-      await writeReceipt(db, {
-        existingReceiptId,
-        workspaceId,
-        ownerSubjectUserId,
-        sourceEventId: source.itemId,
-        contextId: source.contextId,
-        responsibilityId: source.responsibilityId,
-        inputDigest,
-        policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
-        model: embedOutcome.model,
-        dimensions: embedOutcome.dimensions,
-        sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
-        outcome: "MATCHED",
-        matchedPatternId: matchResult.patternId,
-        matchedPatternRevisionId: matchResult.revisionId,
-        bestSimilarity: matchResult.similarity,
+        await writeReceipt(tx, {
+          existingReceiptId,
+          workspaceId,
+          ownerSubjectUserId,
+          sourceEventId: source.itemId,
+          contextId: source.contextId,
+          responsibilityId: source.responsibilityId,
+          inputDigest,
+          policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
+          model: embedOutcome.model,
+          dimensions: embedOutcome.dimensions,
+          sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
+          outcome: "MATCHED",
+          matchedPatternId: matchResult.patternId,
+          matchedPatternRevisionId: matchResult.revisionId,
+          bestSimilarity: matchResult.similarity,
+        });
+        return "MATCHED" as const;
       });
-      results.push({ sourceEventId: source.itemId, outcome: "MATCHED" });
+
+      if (outcome === "SKIPPED_NOT_ELIGIBLE") {
+        results.push({ sourceEventId: source.itemId, outcome: "SKIPPED", reasonCode: "NOT_ELIGIBLE_NO_PRIMARY_LINK" });
+      } else {
+        results.push({ sourceEventId: source.itemId, outcome: "MATCHED" });
+      }
       continue;
     }
 
     if (matchResult.kind === "AMBIGUOUS") {
       const best = matchResult.candidates[0]!;
       const second = matchResult.candidates[1];
-      await writeReceipt(db, {
-        existingReceiptId,
-        workspaceId,
-        ownerSubjectUserId,
-        sourceEventId: source.itemId,
-        contextId: source.contextId,
-        responsibilityId: source.responsibilityId,
-        inputDigest,
-        policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
-        model: embedOutcome.model,
-        dimensions: embedOutcome.dimensions,
-        sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
-        outcome: "AMBIGUOUS",
-        matchedPatternId: best.patternId,
-        matchedPatternRevisionId: best.revisionId,
-        bestSimilarity: best.similarity,
-        secondSimilarity: second?.similarity,
+      await commitSourceOutcome(jobContext, async (tx) => {
+        await writeReceipt(tx, {
+          existingReceiptId,
+          workspaceId,
+          ownerSubjectUserId,
+          sourceEventId: source.itemId,
+          contextId: source.contextId,
+          responsibilityId: source.responsibilityId,
+          inputDigest,
+          policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
+          model: embedOutcome.model,
+          dimensions: embedOutcome.dimensions,
+          sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
+          outcome: "AMBIGUOUS",
+          matchedPatternId: best.patternId,
+          matchedPatternRevisionId: best.revisionId,
+          bestSimilarity: best.similarity,
+          secondSimilarity: second?.similarity,
+        });
       });
       results.push({ sourceEventId: source.itemId, outcome: "AMBIGUOUS" });
       continue;
@@ -428,30 +492,32 @@ export async function runCasePatternDetectionForOwner(
     if (matchResult.kind === "EMBEDDING_FAILED") {
       // classifyCasePatternVectorはEmbedding生成後のDB照会のみなので通常
       // 到達しないが、型契約上の網羅性のためFAILEDとして扱う。
-      await writeReceipt(db, {
-        existingReceiptId,
-        workspaceId,
-        ownerSubjectUserId,
-        sourceEventId: source.itemId,
-        contextId: source.contextId,
-        responsibilityId: source.responsibilityId,
-        inputDigest,
-        policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
-        model: embedOutcome.model,
-        dimensions: embedOutcome.dimensions,
-        sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
-        outcome: "FAILED",
-        reasonCode: "EMBEDDING_FATAL_FAILURE",
+      await commitSourceOutcome(jobContext, async (tx) => {
+        await writeReceipt(tx, {
+          existingReceiptId,
+          workspaceId,
+          ownerSubjectUserId,
+          sourceEventId: source.itemId,
+          contextId: source.contextId,
+          responsibilityId: source.responsibilityId,
+          inputDigest,
+          policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
+          model: embedOutcome.model,
+          dimensions: embedOutcome.dimensions,
+          sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
+          outcome: "FAILED",
+          reasonCode: "EMBEDDING_FATAL_FAILURE",
+        });
       });
       results.push({ sourceEventId: source.itemId, outcome: "FAILED", reasonCode: "EMBEDDING_FATAL_FAILURE" });
       continue;
     }
 
-    // NO_MATCH: 新規CasePattern identity + revision 1 + embedding + SourceLinkを
-    // 単一transactionで作成する(§3.2手順7)。title/representativeTextは
-    // 入力根拠(Responsibility.type/title)から決定論的に構築する(AIに
-    // 捏造させない)。
-    const createdPatternId = await db.$transaction(async (tx: Prisma.TransactionClient): Promise<string> => {
+    // NO_MATCH: 新規CasePattern identity + revision 1 + embedding + SourceLink +
+    // Receiptを単一transactionで作成する(§3.2手順7、03Cでgeneration lock・
+    // Receiptを同一tx内へ統合)。title/representativeTextは入力根拠
+    // (Responsibility.type/title)から決定論的に構築する(AIに捏造させない)。
+    await commitSourceOutcome(jobContext, async (tx) => {
       const identity = await createCasePatternIdentity(
         {
           workspaceId,
@@ -489,23 +555,21 @@ export async function runCasePatternDetectionForOwner(
         },
       });
 
-      return identity.patternId;
-    });
-
-    await writeReceipt(db, {
-      existingReceiptId,
-      workspaceId,
-      ownerSubjectUserId,
-      sourceEventId: source.itemId,
-      contextId: source.contextId,
-      responsibilityId: source.responsibilityId,
-      inputDigest,
-      policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
-      model: embedOutcome.model,
-      dimensions: embedOutcome.dimensions,
-      sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
-      outcome: "NEW_PATTERN_CREATED",
-      createdPatternId,
+      await writeReceipt(tx, {
+        existingReceiptId,
+        workspaceId,
+        ownerSubjectUserId,
+        sourceEventId: source.itemId,
+        contextId: source.contextId,
+        responsibilityId: source.responsibilityId,
+        inputDigest,
+        policyVersion: CASE_PATTERN_MATCH_POLICY_VERSION,
+        model: embedOutcome.model,
+        dimensions: embedOutcome.dimensions,
+        sourceVersion: CASE_PATTERN_EMBEDDING_SOURCE_VERSION,
+        outcome: "NEW_PATTERN_CREATED",
+        createdPatternId: identity.patternId,
+      });
     });
     results.push({ sourceEventId: source.itemId, outcome: "NEW_PATTERN_CREATED" });
   }

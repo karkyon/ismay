@@ -168,79 +168,117 @@ async function assertEligible(
 }
 
 /**
+ * linkPatternSourceEvent本体(transaction非依存の共通ロジック)。
+ * [PATTERN-INTEGRITY-03C新設・2026-09-05] 呼び出し元がtxを持つ場合
+ * (casePatternDetectionService.tsのgeneration lock付きtx)と、持たない場合
+ * (既存の単独呼び出し元、verify script群)の両方から共有する。
+ */
+async function linkPatternSourceEventCore(
+  tx: Prisma.TransactionClient,
+  input: LinkPatternSourceEventInput,
+): Promise<LinkPatternSourceEventResult> {
+  const existing = await tx.casePatternSourceLink.findFirst({
+    where: {
+      patternRevisionId: input.patternRevisionId,
+      sourceEventKind: input.sourceEventKind,
+      sourceEventId: input.sourceEventId,
+    },
+    select: { id: true, excludedAt: true },
+  });
+  if (existing) {
+    // [PATTERN-INTEGRITY-03B是正・2026-09-05] title訂正等でこの
+    // (patternRevisionId, sourceEventKind, sourceEventId)が一度
+    // excludeCasePatternSourceLinksForResponsibilityで除外された後、
+    // 再判定で同一Patternへ再一致した場合、除外済みのまま放置すると
+    // 有効なEvidenceが永久に失われる(ISMAY_ハンドオフ資料_2026-09-05_
+    // 続き3.md §3.2)。excludedAtが非nullなら同一tx内で再有効化する。
+    if (existing.excludedAt !== null) {
+      await tx.casePatternSourceLink.update({
+        where: { id: existing.id },
+        data: { excludedAt: null, excludedReason: null },
+      });
+      return { sourceLinkId: existing.id, created: false, reactivated: true };
+    }
+    return { sourceLinkId: existing.id, created: false, reactivated: false };
+  }
+
+  const revision = await tx.casePatternRevision.findFirst({
+    where: { id: input.patternRevisionId, workspaceId: input.workspaceId },
+    select: { id: true },
+  });
+  if (!revision) {
+    throw new PatternSourceProvenanceError(
+      `patternRevisionId(${input.patternRevisionId})がこのworkspace内に見つかりません`,
+    );
+  }
+  const context = await tx.projectContext.findFirst({
+    where: { id: input.contextId, workspaceId: input.workspaceId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!context) {
+    throw new PatternSourceProvenanceError(`contextId(${input.contextId})がこのworkspace内に見つかりません`);
+  }
+
+  const { responsibilityId, formationSessionId, sourceOccurredAt } = await resolveProvenance(tx, input);
+  await assertEligible(tx, input, responsibilityId);
+
+  const created = await tx.casePatternSourceLink.create({
+    data: {
+      workspaceId: input.workspaceId,
+      patternRevisionId: input.patternRevisionId,
+      contextId: input.contextId,
+      sourceEventKind: input.sourceEventKind,
+      sourceEventId: input.sourceEventId,
+      responsibilityId,
+      formationSessionId,
+      sourceOccurredAt,
+      independenceGroup: input.independenceGroup,
+      independenceWeight: input.independenceWeight ?? 1,
+      qualityWeight: input.qualityWeight ?? 1,
+    },
+  });
+  return { sourceLinkId: created.id, created: true, reactivated: false };
+}
+
+/**
  * Case Pattern occurrenceのSourceLinkを冪等に作成する唯一の入口。
  *
  * 呼び出し前提: `input.contextId`・`input.patternRevisionId`は呼び出し元が
  * 別途この関数の外でworkspace所属を検証済みであること(この関数内でも
  * 再検証するが、呼び出し元での早期エラーメッセージのために推奨)。
+ *
+ * [PATTERN-INTEGRITY-03C新設・2026-09-05] 2つの呼び出し形を提供する
+ * overload:
+ *   1. linkPatternSourceEvent(input) — 従来通り、この関数が自前で
+ *      db.$transactionを開く(既存の単独呼び出し元・verify script群向け)。
+ *      並行競合(P2002)時の冪等フォールバックも従来通り行う。
+ *   2. linkPatternSourceEvent(tx, input) — 呼び出し元の既存transaction
+ *      (tx)をそのまま再利用する。caseDetectQueueJob経由の検出処理
+ *      (casePatternDetectionService.ts)が、generation lock
+ *      (assertCaseDetectJobGenerationCurrent)と同一tx境界でSourceLink
+ *      確定を行うために使う。呼び出し元のtx全体が呼び出し元の責任で
+ *      管理されるため、この形ではP2002並行競合フォールバックを行わない
+ *      (競合時は呼び出し元tx自体が失敗し、呼び出し元が再試行判断を行う)。
  */
 export async function linkPatternSourceEvent(
   input: LinkPatternSourceEventInput,
+): Promise<LinkPatternSourceEventResult>;
+export async function linkPatternSourceEvent(
+  tx: Prisma.TransactionClient,
+  input: LinkPatternSourceEventInput,
+): Promise<LinkPatternSourceEventResult>;
+export async function linkPatternSourceEvent(
+  inputOrTx: LinkPatternSourceEventInput | Prisma.TransactionClient,
+  maybeInput?: LinkPatternSourceEventInput,
 ): Promise<LinkPatternSourceEventResult> {
+  if (maybeInput !== undefined) {
+    const tx = inputOrTx as Prisma.TransactionClient;
+    return linkPatternSourceEventCore(tx, maybeInput);
+  }
+
+  const input = inputOrTx as LinkPatternSourceEventInput;
   try {
-    return await db.$transaction(async (tx: Prisma.TransactionClient) => {
-      const existing = await tx.casePatternSourceLink.findFirst({
-        where: {
-          patternRevisionId: input.patternRevisionId,
-          sourceEventKind: input.sourceEventKind,
-          sourceEventId: input.sourceEventId,
-        },
-        select: { id: true, excludedAt: true },
-      });
-      if (existing) {
-        // [PATTERN-INTEGRITY-03B是正・2026-09-05] title訂正等でこの
-        // (patternRevisionId, sourceEventKind, sourceEventId)が一度
-        // excludeCasePatternSourceLinksForResponsibilityで除外された後、
-        // 再判定で同一Patternへ再一致した場合、除外済みのまま放置すると
-        // 有効なEvidenceが永久に失われる(ISMAY_ハンドオフ資料_2026-09-05_
-        // 続き3.md §3.2)。excludedAtが非nullなら同一tx内で再有効化する。
-        if (existing.excludedAt !== null) {
-          await tx.casePatternSourceLink.update({
-            where: { id: existing.id },
-            data: { excludedAt: null, excludedReason: null },
-          });
-          return { sourceLinkId: existing.id, created: false, reactivated: true };
-        }
-        return { sourceLinkId: existing.id, created: false, reactivated: false };
-      }
-
-      const revision = await tx.casePatternRevision.findFirst({
-        where: { id: input.patternRevisionId, workspaceId: input.workspaceId },
-        select: { id: true },
-      });
-      if (!revision) {
-        throw new PatternSourceProvenanceError(
-          `patternRevisionId(${input.patternRevisionId})がこのworkspace内に見つかりません`,
-        );
-      }
-      const context = await tx.projectContext.findFirst({
-        where: { id: input.contextId, workspaceId: input.workspaceId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!context) {
-        throw new PatternSourceProvenanceError(`contextId(${input.contextId})がこのworkspace内に見つかりません`);
-      }
-
-      const { responsibilityId, formationSessionId, sourceOccurredAt } = await resolveProvenance(tx, input);
-      await assertEligible(tx, input, responsibilityId);
-
-      const created = await tx.casePatternSourceLink.create({
-        data: {
-          workspaceId: input.workspaceId,
-          patternRevisionId: input.patternRevisionId,
-          contextId: input.contextId,
-          sourceEventKind: input.sourceEventKind,
-          sourceEventId: input.sourceEventId,
-          responsibilityId,
-          formationSessionId,
-          sourceOccurredAt,
-          independenceGroup: input.independenceGroup,
-          independenceWeight: input.independenceWeight ?? 1,
-          qualityWeight: input.qualityWeight ?? 1,
-        },
-      });
-      return { sourceLinkId: created.id, created: true, reactivated: false };
-    });
+    return await db.$transaction(async (tx: Prisma.TransactionClient) => linkPatternSourceEventCore(tx, input));
   } catch (err) {
     // 並行呼び出しによる競合(2つのtransactionが同時に「まだ存在しない」と
     // 判定してどちらもcreateを試みた場合)は、一意制約違反として一方が失敗する。

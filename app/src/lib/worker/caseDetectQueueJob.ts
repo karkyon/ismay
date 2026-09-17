@@ -3,6 +3,8 @@ import {
   claimCaseDetectJobs,
   completeCaseDetectJob,
   failCaseDetectJob,
+  requeueCaseDetectJobForStaleGeneration,
+  CaseDetectJobGenerationStaleError,
   type ClaimedCaseDetectJob,
 } from "@/lib/patterns/caseDetectQueue";
 import { computeAndPersistCasePatternAggregatesForOwner } from "@/lib/patterns/casePatternAggregation";
@@ -31,9 +33,17 @@ import { runCasePatternDetectionForOwner } from "@/lib/patterns/casePatternDetec
 const BATCH_SIZE = 10;
 const WORKER_ID = `case-detect-worker-${process.pid}`;
 
+/**
+ * [PATTERN-INTEGRITY-03C是正・2026-09-05] job.id/job.generationを
+ * jobContextとして検出・集計の両方へ渡す。各DB確定処理がgeneration lock
+ * 付きtransactionで包まれるようになり、処理中にcoalescing(別enqueueによる
+ * generation増加)が起きた場合はCaseDetectJobGenerationStaleErrorが送出され、
+ * ここまで伝播する(processOneJob側で捕捉)。
+ */
 async function runDetection(job: ClaimedCaseDetectJob): Promise<void> {
-  await runCasePatternDetectionForOwner(job.workspaceId, job.ownerSubjectUserId);
-  await computeAndPersistCasePatternAggregatesForOwner(job.workspaceId, job.ownerSubjectUserId);
+  const jobContext = { jobId: job.id, generation: job.generation };
+  await runCasePatternDetectionForOwner(job.workspaceId, job.ownerSubjectUserId, {}, jobContext);
+  await computeAndPersistCasePatternAggregatesForOwner(job.workspaceId, job.ownerSubjectUserId, jobContext);
 }
 
 async function processOneJob(job: ClaimedCaseDetectJob): Promise<"done" | "dead_letter" | "requeued"> {
@@ -42,6 +52,20 @@ async function processOneJob(job: ClaimedCaseDetectJob): Promise<"done" | "dead_
     const result = await completeCaseDetectJob(job.id, job.generation);
     return result.status === "DONE" ? "done" : "requeued";
   } catch (err) {
+    if (err instanceof CaseDetectJobGenerationStaleError) {
+      // [PATTERN-INTEGRITY-03C新設・2026-09-05] 通常失敗(embedding失敗・DB制約
+      // 違反等)とは区別する。generation lockがtransaction内で不一致を検出した
+      // 時点でtransaction全体がrollback済み(このJobの旧generationによる副作用は
+      // 一切commitされていない)ため、backoff・attempt増加なしに即座にPENDINGへ
+      // 戻し、次のpollingサイクルで新generationとして再処理させる。
+      debugServer.event("Worker/caseDetectQueue", "Case Pattern検出Jobのgenerationが処理中に更新されたため即時PENDING化", {
+        jobId: job.id,
+        ownerSubjectUserId: job.ownerSubjectUserId,
+        claimedGeneration: job.generation,
+      });
+      await requeueCaseDetectJobForStaleGeneration(job.id);
+      return "requeued";
+    }
     debugServer.error("Worker/caseDetectQueue", "Case Pattern検出Job失敗", {
       jobId: job.id,
       ownerSubjectUserId: job.ownerSubjectUserId,

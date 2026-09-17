@@ -43,6 +43,83 @@ export type CasePatternDetectReasonCode = (typeof CASE_PATTERN_DETECT_REASON_COD
 export const CASE_PATTERN_DETECT_JOB_STATUSES = ["PENDING", "PROCESSING", "DONE", "FAILED", "DEAD_LETTER"] as const;
 export type CasePatternDetectJobStatus = (typeof CASE_PATTERN_DETECT_JOB_STATUSES)[number];
 
+/**
+ * [PATTERN-INTEGRITY-03C新設・2026-09-05] ISMAY_ハンドオフ資料_2026-09-05_
+ * 続き3.md §4「未着手: PATTERN-INTEGRITY-03C」。
+ * caseDetectQueueJob.tsのprocessOneJobは、従来runDetection()(全DB書込み)を
+ * 実行後にcompleteCaseDetectJobでgenerationを検証していたため、処理中に
+ * coalescing(enqueueCaseDetectによるgeneration増加)が起きても、既に
+ * commit済みの副作用(Pattern/Revision/Embedding/SourceLink/Aggregate/
+ * Receipt)は残ってしまっていた。単にcompleteCaseDetectJobでPENDINGへ
+ * 戻すだけでは、旧generationの入力(例: title訂正前の古いtitle)に基づく
+ * 副作用が既にcommitされてしまっているため不合格(指示書§4.2受入条件)。
+ * この例外は、DB確定直前にgenerationをlock付きで再確認する
+ * assertCaseDetectJobGenerationCurrentが検出した場合にのみ投げられる。
+ * 通常失敗(embedding失敗・DB制約違反等)と区別し、caseDetectQueueJob.ts側で
+ * backoff・attempt増加なしに即座にJobをPENDINGへ戻す
+ * (requeueCaseDetectJobForStaleGeneration)。
+ */
+/**
+ * [PATTERN-INTEGRITY-03C新設・2026-09-05] caseDetectQueueJob.tsが claim済み
+ * Jobのid/generationを、検出・集計の各DB確定処理へ引き渡すための共有型。
+ * 直接呼び出し元(verify script群等、queueを介さない単独呼び出し)には
+ * 存在しないため、各関数側ではoptionalとして扱う(未指定時はgeneration
+ * lockを行わない、既存の単独呼び出し元との後方互換)。
+ */
+export interface CaseDetectJobGenerationContext {
+  jobId: string;
+  generation: number;
+}
+
+export class CaseDetectJobGenerationStaleError extends Error {
+  constructor(jobId: string, expectedGeneration: number, actualGeneration: number | null) {
+    super(
+      `CaseDetectJob(id=${jobId})のgenerationが処理中に更新されました` +
+        `(claim時=${expectedGeneration}, 現在=${actualGeneration ?? "行が存在しない"})。` +
+        `このtransactionの副作用はcommitせず、旧generationの結果は破棄します。`,
+    );
+    this.name = "CaseDetectJobGenerationStaleError";
+  }
+}
+
+/**
+ * 呼び出し元の既存transaction(tx)の先頭で呼ぶ。`SELECT ... FOR UPDATE`で
+ * 対象Jobの行をlockし、claim時のgeneration(expectedGeneration)と現在の
+ * generationが一致するかを検証する。不一致(=処理中に別のenqueueCaseDetect
+ * 呼出しでcoalescingが起きた)ならCaseDetectJobGenerationStaleErrorを投げ、
+ * 呼び出し元のtransaction全体をrollbackさせる(このtx内のDB書込みを
+ * 一切commitさせない、指示書§4.2「generation確認と全DB副作用を同一
+ * transaction内で確定する」)。
+ */
+export async function assertCaseDetectJobGenerationCurrent(
+  tx: Prisma.TransactionClient,
+  jobId: string,
+  expectedGeneration: number,
+): Promise<void> {
+  const rows = await tx.$queryRaw<{ generation: number }[]>`
+    SELECT "generation" FROM "case_pattern_detect_jobs" WHERE "id" = ${jobId} FOR UPDATE
+  `;
+  const current = rows[0]?.generation ?? null;
+  if (current === null || current !== expectedGeneration) {
+    throw new CaseDetectJobGenerationStaleError(jobId, expectedGeneration, current);
+  }
+}
+
+/**
+ * CaseDetectJobGenerationStaleError検出時にcaseDetectQueueJob.tsから呼ぶ。
+ * failCaseDetectJob(通常失敗、指数backoff・attempt増加)とは区別し、
+ * 即座にPENDINGへ戻す(backoff・attempt増加なし、指示書§4.2)。attempt自体は
+ * claimCaseDetectJobsのclaim時に既に+1済みのため、ここでは追加加算しない
+ * (「attempt増加なし」は「この関数でさらに増やさない」ことを指す)。
+ */
+export async function requeueCaseDetectJobForStaleGeneration(jobId: string): Promise<{ status: "PENDING" }> {
+  await db.casePatternDetectJob.update({
+    where: { id: jobId },
+    data: { status: "PENDING", leaseOwner: null, leaseExpiresAt: null, nextAttemptAt: new Date() },
+  });
+  return { status: "PENDING" };
+}
+
 const LEASE_MS = 5 * 60 * 1000;
 const BASE_BACKOFF_MS = 30 * 1000;
 
