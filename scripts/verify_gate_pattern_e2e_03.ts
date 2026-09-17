@@ -419,7 +419,10 @@ async function main(): Promise<void> {
     // 1回目はstale rollback、2回目(再送後)で正しくP2へ着地することを確認する。
     // ================================================================
     await correctTitle({ workspaceId: fxMain.workspaceId, responsibilityId: occMain.responsibilityId, newTitle: titleT2 });
-    const jobAfterCorrection = await db.casePatternDetectJob.findFirstOrThrow({ where: { workspaceId: fxMain.workspaceId, ownerSubjectUserId: fxMain.userId } });
+    const jobAfterCorrection = await db.casePatternDetectJob.findFirstOrThrow({
+      where: { workspaceId: fxMain.workspaceId, ownerSubjectUserId: fxMain.userId, status: { in: ["PENDING", "PROCESSING"] } },
+      orderBy: { createdAt: "desc" },
+    });
     ok("[title変更] correctTitleはRESPONSIBILITY_CORRECTEDでenqueueする", jobAfterCorrection.reasonCode === "RESPONSIBILITY_CORRECTED", JSON.stringify(jobAfterCorrection));
 
     // [同一要求再送] 訂正確定直後、UIの二重送信等で同じ訂正enqueueがもう一度
