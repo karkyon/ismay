@@ -234,7 +234,7 @@ async function main(): Promise<void> {
         workspaceId: fx.workspaceId, candidateId: identity.id, revision: 1, type: "TASK", title, description: null,
         proposedFields: {
           candidateId: `k-${key}`, type: "TASK", title, completionCondition: "検証用の完了条件",
-          evidenceSpans: [], confidence: 0.9, dateMentions: [], unknowns: [], blockedByCandidateIds: [], suggestedTags: [],
+          evidenceSpans: [{ start: 0, end: 4 }], confidence: 0.9, dateMentions: [], unknowns: [], blockedByCandidateIds: [], suggestedTags: [],
         },
         confidence: 0.9, schemaVersion: "1.0",
       },
