@@ -51,6 +51,7 @@ import {
 import type { CasePatternDetectionCandidateInput } from "./casePatternEmbeddingText";
 import { isCasePatternLearningConsentGrantedForOwner } from "./casePatternConsentGate";
 import { buildCasePatternSuggestionDto, CASE_PATTERN_ADOPTION_POLICY_VERSION } from "./casePatternSuggestion";
+import { buildActionSlotDecompositionProposal } from "./casePatternActionSlotProposal";
 
 /** CasePatternSuggestionRevision.schemaVersion(このGateで確定した最初のversion)。 */
 const CASE_PATTERN_SUGGESTION_REVISION_SCHEMA_VERSION = "1.0";
@@ -158,30 +159,29 @@ export async function generateCaseSuggestionForCandidate(
   const matchedPatternRevisionId = matchResult.kind === "AMBIGUOUS" ? null : matchResult.revisionId;
   const similarity = matchResult.kind === "AMBIGUOUS" ? matchResult.candidates[0]!.similarity : matchResult.similarity;
 
-  const matchedRevision = patternId
-    ? await db.casePatternRevision.findFirst({
-        where: { id: matchedPatternRevisionId!, patternId, workspaceId },
-        select: { decompositionTemplate: true },
-      })
-    : null;
-
   const dto = patternId ? await buildCasePatternSuggestionDto(workspaceId, patternId) : null;
 
+  // [PATTERN-PROPOSAL-02是正・2026-09-18] ISMAY_最新コード再監査_全体進捗
+  // 残工程_2026-09-17.md「分解Proposalは実質null」の是正。従来は常にnullの
+  // CasePatternRevision.decompositionTemplateを読んで転記していたのみ
+  // だった。MATCHED時はGate 5で学習したActionSlot群から実際のproposalを
+  // 組み立てる(想像で構造を発明せず、既存ActionSlot計算をそのまま転記する)。
+  // AMBIGUOUS時は従来通りclassifyCasePatternMatchCandidatesの生の判定結果
+  // (候補一覧)をそのまま保存する(指示書§6「AMBIGUOUSは自動選択しない」)。
   const decompositionProposal: Prisma.InputJsonValue = matchResult.kind === "AMBIGUOUS"
     ? {
-        // [想像で構造を発明しない] classifyCasePatternMatchCandidatesの生の
-        // 判定結果(候補一覧)をそのまま保存する。UI固有の比較表示形式は
-        // 発明しない(必要になった時点で別Gateがこのデータから組み立てる)。
+        kind: "AMBIGUOUS_CANDIDATES",
         ambiguousCandidates: matchResult.candidates,
       }
-    : {
-        // [想像で構造を先行発明しない] decompositionTemplateは現行システムで
-        // 常にnull(casePatternDetectionService.tsのcandidateInputForがnullを
-        // 渡してきたため)。安定child key採番規則は、実際に非null構造を持つ
-        // Patternが現れるまで発明しない(01A schemaコメントの明示的先送りに
-        // 従い、この場でも同様に先送りする)。
-        patternDecompositionTemplate: matchedRevision?.decompositionTemplate ?? null,
-      };
+    // [Gate 5で学んだPrisma.InputJsonValueの落とし穴を回避] buildActionSlot
+    // DecompositionProposalの戻り値は明示的なnamed interface型
+    // (ActionSlotDecompositionProposal)を持つため、代入先でTypeScriptが
+    // 構造的推論ではなくその named type自体の互換性を検査し、index
+    // signatureが無いことを理由にTS2322となる(casePatternActionSlotLearn
+    // Service.tsのAtomicityDistributionと同じ分散issue)。ここでは
+    // domain型の可読性を優先し、Prismaへ渡す境界でのみ`as unknown as
+    // Prisma.InputJsonValue`で明示変換する。
+    : ((await buildActionSlotDecompositionProposal(workspaceId, patternId!)) as unknown as Prisma.InputJsonValue);
   const evidenceSnapshot: Prisma.InputJsonValue = {
     rawSampleSize: dto?.rawSampleSize ?? null,
     distinctContextCount: dto?.distinctContextCount ?? null,
