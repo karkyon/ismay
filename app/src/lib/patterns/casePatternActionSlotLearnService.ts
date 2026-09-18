@@ -331,22 +331,26 @@ export async function runActionSlotLearningForPattern(
 
       // provenance(SourceInstance)は内容の変化有無に関わらず、未記録の
       // childRevisionIdがあれば都度追記する(append-only、冪等)。
-      for (const childRevisionId of childRevisionIdsInGroup) {
-        const inst = groupInstances.find((i) => i.childRevisionId === childRevisionId)!;
-        try {
-          await tx.casePatternActionSlotSourceInstance.create({
-            data: {
+      // [実DB検証で発見・是正] 個別create()をtry/catchでP2002だけ無視する
+      // 実装は、Postgresでは1文でも失敗するとtransaction全体が
+      // "current transaction is aborted"状態になり、以降の同一transaction内
+      // 文がすべて25P02で失敗する(SAVEPOINTなしでは継続できない)。
+      // createMany({ skipDuplicates: true })は単一のINSERT ... ON CONFLICT
+      // DO NOTHING文としてtransaction安全に実行されるため、この問題を起こさない。
+      if (childRevisionIdsInGroup.length > 0) {
+        await tx.casePatternActionSlotSourceInstance.createMany({
+          data: childRevisionIdsInGroup.map((childRevisionId) => {
+            const inst = groupInstances.find((i) => i.childRevisionId === childRevisionId)!;
+            return {
               workspaceId,
               slotId,
               childRevisionId,
               order: inst.order,
               independenceGroup: inst.decisionEventId,
-            },
-          });
-        } catch (err) {
-          // [冪等性] 既に記録済み(unique制約違反)は正常(再実行での重複防止)。
-          if (!((err as { code?: string }).code === "P2002")) throw err;
-        }
+            };
+          }),
+          skipDuplicates: true,
+        });
       }
 
       if (unchanged) {

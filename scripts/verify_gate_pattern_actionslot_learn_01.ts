@@ -95,6 +95,12 @@ async function main(): Promise<void> {
     // case_patternsを参照するため、case_patterns削除前にこの参照を必ず
     // 断ち切る(cleanupFormationVerifyUserの内部削除順序に依存しない)。
     await db.formationCandidateDecisionEvent.updateMany({ where: { workspaceId, attributedCasePatternId: { not: null } }, data: { attributedCasePatternId: null } }).catch(() => null);
+    // [FK順序] case_pattern_suggest_jobs.candidate_idがformation_candidate_identitiesを
+    // 参照する(既存PATTERN-SUGGEST機能、splitFormationCandidateが子candidateへ
+    // enqueueCaseSuggestionMatchを呼ぶ既存の挙動により本テストでも作成される)。
+    // cleanupFormationVerifyUserがformationCandidateIdentityを削除する前に
+    // 必ず断ち切る。
+    await db.casePatternSuggestJob.deleteMany({ where: { workspaceId } }).catch(() => null);
     await db.casePatternActionSlotSourceInstance.deleteMany({ where: { workspaceId } }).catch(() => null);
     await db.casePatternActionSlotRevision.deleteMany({ where: { workspaceId } }).catch(() => null);
     await db.casePatternActionSlot.deleteMany({ where: { workspaceId } }).catch(() => null);
