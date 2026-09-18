@@ -31,6 +31,63 @@ import { debugLog } from "@/lib/debug";
  *     決定日時を表示するdetail行を追加した。
  */
 
+/** [PATTERN-UI-APPLY-02A新設・2026-09-18] casePatternActionSlotProposal.tsの
+ *  ActionSlotDecompositionProposal/ActionSlotProposalPartとフィールド名を
+ *  一致させる(想像で別の形を発明しない)。 */
+interface ActionSlotProposalPart {
+  slotKey: string;
+  typicalOrder: number;
+  suggestedType: string;
+  titleExample: string;
+  occurrenceProbability: number;
+  rawSampleSize: number;
+  predecessorSlotKeys: string[];
+  sourceActionSlotRevisionId: string;
+}
+interface ActionSlotDecompositionProposal {
+  kind: "ACTION_SLOT_PROPOSAL";
+  schemaVersion: string;
+  policyVersion: string;
+  hasData: boolean;
+  parts: ActionSlotProposalPart[];
+}
+interface AmbiguousCandidateEntry {
+  patternId: string;
+  revisionId: string;
+  similarity: number;
+  /** [API側で追加enrichment] GET /formation-sessions/{id}がpatternIdごとに
+   *  CasePattern.titleを引いて付加する(既存matchedPatternTitleと同じ方針)。 */
+  patternTitle: string | null;
+}
+interface AmbiguousCandidatesProposal {
+  kind: "AMBIGUOUS_CANDIDATES";
+  ambiguousCandidates: AmbiguousCandidateEntry[];
+}
+type DecompositionProposal = ActionSlotDecompositionProposal | AmbiguousCandidatesProposal | null;
+
+/** decompositionProposalは`unknown`(APIがJSON任意形を返す)なので、既知の
+ *  2形状のいずれかに一致する場合のみ型を絞り込む(一致しない場合は
+ *  プレビューUIを一切出さないfail closed、想像で欠けたfieldを補わない)。 */
+function parseDecompositionProposal(value: unknown): DecompositionProposal {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { kind?: unknown };
+  if (v.kind === "ACTION_SLOT_PROPOSAL") {
+    const p = value as Partial<ActionSlotDecompositionProposal>;
+    if (typeof p.hasData === "boolean" && Array.isArray(p.parts)) {
+      return { kind: "ACTION_SLOT_PROPOSAL", schemaVersion: String(p.schemaVersion ?? ""), policyVersion: String(p.policyVersion ?? ""), hasData: p.hasData, parts: p.parts as ActionSlotProposalPart[] };
+    }
+    return null;
+  }
+  if (v.kind === "AMBIGUOUS_CANDIDATES") {
+    const p = value as Partial<AmbiguousCandidatesProposal>;
+    if (Array.isArray(p.ambiguousCandidates)) {
+      return { kind: "AMBIGUOUS_CANDIDATES", ambiguousCandidates: p.ambiguousCandidates as AmbiguousCandidateEntry[] };
+    }
+    return null;
+  }
+  return null;
+}
+
 interface ProjectionCandidate {
   identityId: string;
   candidateKey: string;
@@ -115,6 +172,9 @@ const CANDIDATE_TYPE_LABEL: Record<string, string> = {
   HABIT: "習慣",
   IDEA: "アイデア",
 };
+/** [PATTERN-UI-APPLY-02A新設・2026-09-18] ActionSlot.suggestedTypeが既知の
+ *  候補typeかどうかの判定に使う(未知値はUI側でTASKへ丸めるための集合)。 */
+const RESPONSIBILITY_TYPE_SET = new Set(Object.keys(CANDIDATE_TYPE_LABEL));
 
 /** [B4.3新設] 旧経路(AiInference.decision)の表示ラベル。 */
 const LEGACY_DECISION_LABEL: Record<string, string> = {
@@ -167,10 +227,15 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   // [2026-08-30新設・M1-C Split Correction]
   const [splittingId, setSplittingId] = useState<string | null>(null);
-  const [splitParts, setSplitParts] = useState<Array<{ type: string; title: string }>>([
-    { type: "TASK", title: "" },
-    { type: "TASK", title: "" },
+  const [splitParts, setSplitParts] = useState<Array<{ type: string; title: string; completionCondition: string }>>([
+    { type: "TASK", title: "", completionCondition: "" },
+    { type: "TASK", title: "", completionCondition: "" },
   ]);
+  /** [PATTERN-UI-APPLY-02A新設・2026-09-18] 「この提案をもとに分解する」から
+   *  開始した場合の出典Pattern。実際のsplitFormationCandidate呼出しへの
+   *  接続・送信(attributedCasePatternIdの反映)はGate 8(PATTERN-APPLY-02B)の
+   *  責務。Gate 7ではフォームへの事前入力までを行う(想像で先取り実装しない)。 */
+  const [splitAttributedPatternId, setSplitAttributedPatternId] = useState<string | null>(null);
   const [splitBusy, setSplitBusy] = useState(false);
   // [2026-08-30新設・M1-C2B Merge Correction]
   const [mergingOpen, setMergingOpen] = useState(false);
@@ -395,19 +460,41 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
   function startSplit(candidateId: string) {
     setSplittingId(candidateId);
     setSplitParts([
-      { type: "TASK", title: "" },
-      { type: "TASK", title: "" },
+      { type: "TASK", title: "", completionCondition: "" },
+      { type: "TASK", title: "", completionCondition: "" },
     ]);
+    setSplitAttributedPatternId(null);
+    setError("");
+  }
+
+  /** [PATTERN-UI-APPLY-02A新設・2026-09-18] decomposition proposalのpartsで
+   *  分解フォームを事前入力して開く(想像で新しい種類の分解タイプを発明せず、
+   *  既存の分解フォームをそのまま流用する)。 */
+  function startSplitFromProposal(candidateId: string, patternId: string, parts: ActionSlotProposalPart[]) {
+    setSplittingId(candidateId);
+    setSplitParts(
+      parts.map((p) => ({
+        type: RESPONSIBILITY_TYPE_SET.has(p.suggestedType) ? p.suggestedType : "TASK",
+        title: p.titleExample,
+        completionCondition: "",
+      })),
+    );
+    setSplitAttributedPatternId(patternId);
     setError("");
   }
 
   function cancelSplit() {
     setSplittingId(null);
+    setSplitAttributedPatternId(null);
   }
 
   async function submitSplit(candidate: ProjectionCandidate) {
     if (!candidate.currentRevision) return;
-    const trimmedParts = splitParts.map((p) => ({ type: p.type, title: p.title.trim() }));
+    const trimmedParts = splitParts.map((p) => ({
+      type: p.type,
+      title: p.title.trim(),
+      completionCondition: p.completionCondition.trim() || undefined,
+    }));
     if (trimmedParts.length < 2 || trimmedParts.some((p) => !p.title)) {
       setError("分解には2件以上、すべてtitleを入力した部分が必要です");
       return;
@@ -429,6 +516,7 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
         return;
       }
       setSplittingId(null);
+      setSplitAttributedPatternId(null);
       await load(true);
       onChanged?.();
     } finally {
@@ -964,12 +1052,69 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
                                   記録済み: {SUGGESTION_VERDICT_LABEL[c.patternSuggestion.state] ?? c.patternSuggestion.state}
                                 </div>
                               )}
+                              {/* [PATTERN-UI-APPLY-02A新設・2026-09-18] 分解Preview。
+                                  ActionSlot学習済み(hasData=true)の場合のみ実例のparts
+                                  一覧を表示する。適用(splitFormationCandidateへの原子的
+                                  接続)はGate 8の責務のため、ここでは「事前入力して
+                                  分解フォームを開く」までに留める。 */}
+                              {(() => {
+                                const proposal = parseDecompositionProposal(c.patternSuggestion!.decompositionProposal);
+                                if (!proposal || proposal.kind !== "ACTION_SLOT_PROPOSAL") return null;
+                                if (!proposal.hasData) {
+                                  return <div className="mt-1 text-brand-700/70">この提案パターンにはまだ分解の実績がありません。</div>;
+                                }
+                                return (
+                                  <div className="mt-1.5 rounded border border-brand-200 bg-white p-1.5">
+                                    <div className="font-medium mb-1">分解案プレビュー(過去の実例に基づく)</div>
+                                    <ol className="space-y-0.5 list-decimal list-inside">
+                                      {proposal.parts.map((p) => (
+                                        <li key={p.slotKey}>
+                                          <span className="text-brand-700">[{CANDIDATE_TYPE_LABEL[p.suggestedType] ?? p.suggestedType}]</span> {p.titleExample}
+                                          <span className="text-brand-700/60">
+                                            {" "}
+                                            (出現率 {(p.occurrenceProbability * 100).toFixed(0)}%・{p.rawSampleSize}件の実績)
+                                          </span>
+                                        </li>
+                                      ))}
+                                    </ol>
+                                    {c.currentRevision && c.patternSuggestion.matchedPatternId && (
+                                      <button
+                                        type="button"
+                                        disabled={isBusy}
+                                        onClick={() =>
+                                          startSplitFromProposal(c.identityId, c.patternSuggestion!.matchedPatternId!, proposal.parts)
+                                        }
+                                        className="mt-1.5 text-[11px] bg-white border border-brand-300 text-brand-700 rounded px-2 py-1 disabled:opacity-40 hover:bg-brand-100 transition"
+                                      >
+                                        この提案をもとに分解する
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </>
                           ) : (
                             // [PATTERN-SUGGEST-01B AMBIGUOUS方針] 複数Pattern候補で判定保留中
                             // (matchedPatternId=null)。自動選択しないため採否ボタンは出さない
                             // (バックエンドもSUGGESTION_NOT_MATCHEDで拒否する、01Cで検証済み)。
-                            <div>複数の類似パターン候補があり、自動確定していません(判定保留中)。</div>
+                            <>
+                              <div>複数の類似パターン候補があり、自動確定していません(判定保留中)。</div>
+                              {/* [PATTERN-UI-APPLY-02A新設・2026-09-18] AMBIGUOUS候補の比較表示
+                                  (読み取り専用、自動選択はしない)。 */}
+                              {(() => {
+                                const proposal = parseDecompositionProposal(c.patternSuggestion!.decompositionProposal);
+                                if (!proposal || proposal.kind !== "AMBIGUOUS_CANDIDATES" || proposal.ambiguousCandidates.length === 0) return null;
+                                return (
+                                  <ul className="mt-1 space-y-0.5">
+                                    {proposal.ambiguousCandidates.map((cand) => (
+                                      <li key={cand.patternId}>
+                                        「{cand.patternTitle ?? "(タイトル不明)"}」(類似度 {(cand.similarity * 100).toFixed(0)}%)
+                                      </li>
+                                    ))}
+                                  </ul>
+                                );
+                              })()}
+                            </>
                           )}
                         </div>
                       )}
@@ -1029,43 +1174,62 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
                     <p className="text-[11px] text-muted">
                       「{rev?.title}」を2件以上の独立した作業に分解します。各部分の種別とtitleを入力してください。
                     </p>
+                    {splitAttributedPatternId && (
+                      <p className="text-[10px] text-brand-700 bg-brand-50 rounded px-2 py-1">
+                        分解案プレビューの内容を入力欄へ反映しました。必要に応じて編集してください。
+                      </p>
+                    )}
                     {splitParts.map((part, i) => (
-                      <div key={i} className="flex items-center gap-1.5">
-                        <select
-                          value={part.type}
-                          onChange={(e) =>
-                            setSplitParts((prev) => prev.map((p, idx) => (idx === i ? { ...p, type: e.target.value } : p)))
-                          }
-                          className="text-[11px] rounded border border-line px-1.5 py-1.5"
-                        >
-                          {Object.entries(CANDIDATE_TYPE_LABEL).map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
+                      <div key={i} className="space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={part.type}
+                            onChange={(e) =>
+                              setSplitParts((prev) => prev.map((p, idx) => (idx === i ? { ...p, type: e.target.value } : p)))
+                            }
+                            className="text-[11px] rounded border border-line px-1.5 py-1.5"
+                          >
+                            {Object.entries(CANDIDATE_TYPE_LABEL).map(([value, label]) => (
+                              <option key={value} value={value}>
+                                {label}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="text"
+                            value={part.title}
+                            onChange={(e) =>
+                              setSplitParts((prev) => prev.map((p, idx) => (idx === i ? { ...p, title: e.target.value } : p)))
+                            }
+                            placeholder={`部分${i + 1}のtitle`}
+                            className="flex-1 min-w-0 text-sm rounded border border-line px-2 py-1.5"
+                          />
+                          {splitParts.length > 2 && (
+                            <button
+                              onClick={() => setSplitParts((prev) => prev.filter((_, idx) => idx !== i))}
+                              className="text-[10px] text-faint underline shrink-0"
+                            >
+                              削除
+                            </button>
+                          )}
+                        </div>
+                        {/* [PATTERN-UI-APPLY-02A新設・2026-09-18] completionConditionの
+                            編集欄。既存SplitCandidatePartInput/APIは既に受理していたが、
+                            UIには未実装だった項目を追加する。任意入力。 */}
                         <input
                           type="text"
-                          value={part.title}
+                          value={part.completionCondition}
                           onChange={(e) =>
-                            setSplitParts((prev) => prev.map((p, idx) => (idx === i ? { ...p, title: e.target.value } : p)))
+                            setSplitParts((prev) => prev.map((p, idx) => (idx === i ? { ...p, completionCondition: e.target.value } : p)))
                           }
-                          placeholder={`部分${i + 1}のtitle`}
-                          className="flex-1 min-w-0 text-sm rounded border border-line px-2 py-1.5"
+                          placeholder="完了条件(任意)"
+                          className="w-full text-[11px] rounded border border-line px-2 py-1 text-muted"
                         />
-                        {splitParts.length > 2 && (
-                          <button
-                            onClick={() => setSplitParts((prev) => prev.filter((_, idx) => idx !== i))}
-                            className="text-[10px] text-faint underline shrink-0"
-                          >
-                            削除
-                          </button>
-                        )}
                       </div>
                     ))}
                     <div className="flex items-center justify-between gap-2">
                       <button
-                        onClick={() => setSplitParts((prev) => [...prev, { type: "TASK", title: "" }])}
+                        onClick={() => setSplitParts((prev) => [...prev, { type: "TASK", title: "", completionCondition: "" }])}
                         className="text-[10px] text-faint underline"
                       >
                         + 部分を追加

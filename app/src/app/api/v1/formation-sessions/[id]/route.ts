@@ -140,6 +140,31 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       const matchedPattern = suggestionRevision?.matchedPatternId
         ? await db.casePattern.findFirst({ where: { id: suggestionRevision.matchedPatternId, workspaceId }, select: { title: true } })
         : null;
+      // [PATTERN-UI-APPLY-02A新設・2026-09-18] AMBIGUOUS比較UIがPattern名を
+      // 表示できるよう、decompositionProposal.ambiguousCandidates[].patternIdへ
+      // titleをenrichする(既存matchedPatternTitleと同じ方針)。生のJSON構造を
+      // 破壊しないよう、この応答専用の複製へ追記する(DB上のdecomposition
+      // Proposalそのものは変更しない)。
+      let enrichedDecompositionProposal: unknown = suggestionRevision?.decompositionProposal ?? null;
+      if (
+        enrichedDecompositionProposal &&
+        typeof enrichedDecompositionProposal === "object" &&
+        (enrichedDecompositionProposal as { kind?: unknown }).kind === "AMBIGUOUS_CANDIDATES"
+      ) {
+        const raw = enrichedDecompositionProposal as { kind: string; ambiguousCandidates: { patternId: string; revisionId: string; similarity: number }[] };
+        const candidatePatternIds = raw.ambiguousCandidates.map((cand) => cand.patternId);
+        const candidatePatterns = candidatePatternIds.length > 0
+          ? await db.casePattern.findMany({ where: { id: { in: candidatePatternIds }, workspaceId }, select: { id: true, title: true } })
+          : [];
+        const titleByPatternId = new Map(candidatePatterns.map((p: { id: string; title: string }) => [p.id, p.title]));
+        enrichedDecompositionProposal = {
+          kind: "AMBIGUOUS_CANDIDATES",
+          ambiguousCandidates: raw.ambiguousCandidates.map((cand) => ({
+            ...cand,
+            patternTitle: titleByPatternId.get(cand.patternId) ?? null,
+          })),
+        };
+      }
       if (suggestionRevision) {
         patternSuggestion = {
           suggestionId: suggestionIdentity.id,
@@ -148,7 +173,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
           matchedPatternId: suggestionRevision.matchedPatternId,
           matchedPatternTitle: matchedPattern?.title ?? null,
           similarity: Number(suggestionRevision.similarity),
-          decompositionProposal: suggestionRevision.decompositionProposal,
+          decompositionProposal: enrichedDecompositionProposal,
           evidenceSnapshot: suggestionRevision.evidenceSnapshot,
         };
       }
