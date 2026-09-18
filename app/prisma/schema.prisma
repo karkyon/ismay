@@ -179,6 +179,8 @@ model Workspace {
   casePatternSuggestJobs CasePatternSuggestJob[]
   /// [PATTERN-ACTIONSLOT-SCHEMA-01新設・2026-09-17]
   casePatternActionSlots CasePatternActionSlot[]
+  /// [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17]
+  casePatternActionSlotLearnJobs CasePatternActionSlotLearnJob[]
 
   @@map("workspaces")
 }
@@ -2156,6 +2158,14 @@ model FormationCandidateDecisionEvent {
   actorUserId String                     @map("actor_user_id")
   actorUser   User                       @relation(fields: [actorUserId], references: [id])
   occurredAt  DateTime                   @default(now()) @map("occurred_at")
+  /// [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17] decision="SPLIT"の場合に
+  /// 限り、本人が明示的に選択したCase Pattern、またはmatched suggestionを
+  /// 起点に適用されたCase Patternを記録する(指示書Gate 5「既存matched
+  /// suggestionを起点に適用されたSplit、または本人が明示Pattern選択した
+  /// Splitだけを最初の学習対象とする」)。nullは「Pattern帰属の根拠が無い
+  /// 通常のSplit」を表し、ActionSlot学習対象には含めない(想像で紐付けない)。
+  attributedCasePatternId String?     @map("attributed_case_pattern_id")
+  attributedCasePattern   CasePattern? @relation(fields: [attributedCasePatternId, workspaceId], references: [id, workspaceId])
 
   /// [2026-08-29追加・B3.1是正B31-04/B31-06] 採否対象Revisionは1候補につき1回だけ
   /// 固定される(=1候補につきDecision Eventは高々1件)という不変条件を、
@@ -2164,6 +2174,7 @@ model FormationCandidateDecisionEvent {
   /// 万一lockを経由しない書込み経路が将来追加された場合の多層防御として追加する。
   @@unique([workspaceId, candidateId], map: "formation_candidate_decision_events_workspace_candidate_uq")
   @@index([workspaceId, candidateId])
+  @@index([workspaceId, attributedCasePatternId])
   @@map("formation_candidate_decision_events")
 }
 
@@ -2676,6 +2687,9 @@ model CasePattern {
   feedbackEvents CasePatternFeedbackEvent[]
   /// [PATTERN-ACTIONSLOT-SCHEMA-01新設・2026-09-17]
   actionSlots    CasePatternActionSlot[]
+  /// [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17]
+  attributedSplitDecisionEvents FormationCandidateDecisionEvent[]
+  actionSlotLearnJobs CasePatternActionSlotLearnJob[]
 
   @@unique([workspaceId, ownerSubjectUserId, patternKey], map: "case_patterns_owner_key_uq")
   @@unique([id, workspaceId], map: "case_patterns_id_workspace_uq")
@@ -3082,6 +3096,41 @@ model CasePatternActionSlotSourceInstance {
   @@unique([workspaceId, childRevisionId], map: "case_pattern_action_slot_source_instances_child_uq")
   @@index([workspaceId, slotId])
   @@map("case_pattern_action_slot_source_instances")
+}
+
+// =====================================================================
+// V5-M4 CasePatternActionSlotLearnJob(PATTERN-ACTIONSLOT-LEARN-01新設・
+// 2026-09-17)。caseDetectQueue.ts/CasePatternDetectJobと同一の状態機械
+// 設計(lease/generation/backoff/dead-letter)を、ActionSlot学習の単位
+// (workspaceId, patternId)向けに再実装したqueue。
+// =====================================================================
+model CasePatternActionSlotLearnJob {
+  id             String    @id @default(uuid())
+  workspaceId    String    @map("workspace_id")
+  workspace      Workspace @relation(fields: [workspaceId], references: [id])
+  patternId      String    @map("pattern_id")
+  pattern        CasePattern @relation(fields: [patternId, workspaceId], references: [id, workspaceId])
+  /// PENDING/PROCESSING/DONE/FAILED/DEAD_LETTER(CasePatternDetectJobと同一語彙)。
+  status         String    @default("PENDING")
+  /// coalescing時に増加(CasePatternDetectJob.generationと同一設計)。
+  generation     Int       @default(1)
+  attempt        Int       @default(0)
+  maxAttempts    Int       @default(8) @map("max_attempts")
+  leaseOwner     String?   @map("lease_owner")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+  nextAttemptAt  DateTime  @default(now()) @map("next_attempt_at")
+  /// SPLIT_ATTRIBUTED(本Gateで配線する唯一のreason。MANUAL_REBUILD等は
+  /// Gate 10で追加、想像で先行実装しない)。
+  reasonCode      String   @map("reason_code")
+  lastErrorCode   String?  @map("last_error_code")
+  lastErrorDigest String?  @map("last_error_digest")
+  completedAt     DateTime? @map("completed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([workspaceId, patternId, status])
+  @@map("case_pattern_action_slot_learn_jobs")
 }
 
 // =====================================================================

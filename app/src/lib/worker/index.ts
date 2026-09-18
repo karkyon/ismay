@@ -13,6 +13,7 @@ import { processSessionTimeouts } from "@/lib/worker/sessionTimeoutJob";
 import { processRecomputeQueue } from "@/lib/worker/recomputeQueueJob";
 import { processCaseDetectQueue } from "@/lib/worker/caseDetectQueueJob";
 import { processCaseSuggestQueue } from "@/lib/worker/caseSuggestQueueJob";
+import { processCaseActionSlotLearnQueue } from "@/lib/worker/caseActionSlotLearnQueueJob";
 import { debugServer } from "@/lib/debugServer";
 
 /**
@@ -79,6 +80,12 @@ async function tick(): Promise<void> {
     // caseDetectQueue同様、自己スロットリング不要な軽量ポーリングのため
     // 5秒tickの中で毎回呼ぶ。
     const caseSuggestQueueResult = await processCaseSuggestQueue();
+    // PATTERN-ACTIONSLOT-LEARN-01(2026-09-17新設): splitFormationCandidateが
+    // attributedCasePatternId付きでSPLITを確定した際にmark staleされた
+    // ActionSlot学習Jobを、FOR UPDATE SKIP LOCKEDでバッチclaimし処理する
+    // (caseActionSlotLearnQueueJob.ts参照)。他queue同様、自己スロットリング
+    // 不要な軽量ポーリングのため5秒tickの中で毎回呼ぶ。
+    const caseActionSlotLearnQueueResult = await processCaseActionSlotLearnQueue();
     if (
       relayResult.relayed > 0 ||
       jobResult.processed > 0 ||
@@ -98,7 +105,9 @@ async function tick(): Promise<void> {
       caseDetectQueueResult.processed > 0 ||
       caseDetectQueueResult.deadLettered > 0 ||
       caseSuggestQueueResult.processed > 0 ||
-      caseSuggestQueueResult.deadLettered > 0
+      caseSuggestQueueResult.deadLettered > 0 ||
+      caseActionSlotLearnQueueResult.processed > 0 ||
+      caseActionSlotLearnQueueResult.deadLettered > 0
     ) {
       debugServer.event("Worker/tick", "tick完了", {
         ...relayResult,
@@ -120,6 +129,8 @@ async function tick(): Promise<void> {
         caseDetectQueueDeadLettered: caseDetectQueueResult.deadLettered,
         caseSuggestQueueProcessed: caseSuggestQueueResult.processed,
         caseSuggestQueueDeadLettered: caseSuggestQueueResult.deadLettered,
+        caseActionSlotLearnQueueProcessed: caseActionSlotLearnQueueResult.processed,
+        caseActionSlotLearnQueueDeadLettered: caseActionSlotLearnQueueResult.deadLettered,
       });
     }
   } catch (err) {

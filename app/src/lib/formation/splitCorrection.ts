@@ -7,6 +7,7 @@ import { resolveLegacyProjectionMap } from "@/lib/formation/legacyProjectionReso
 import { sessionEventTypeForDecision } from "@/lib/formation/materialize";
 import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
 import { enqueueCaseSuggestionMatch } from "@/lib/patterns/caseSuggestQueue";
+import { enqueueCaseActionSlotLearn } from "@/lib/patterns/caseActionSlotLearnQueue";
 
 /**
  * V5-M1-C Split Correction service。
@@ -71,6 +72,14 @@ export interface SplitCandidateParams {
   parts: SplitCandidatePartInput[];
   reasonCode?: string;
   actorUserId: string;
+  /**
+   * [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17] 本人が明示的に選択した、
+   * またはmatched suggestionを起点に適用されたCase Pattern。指定時のみ
+   * このSPLITをActionSlot学習対象とする(指示書Gate 5「Pattern帰属の根拠が
+   * 無いSplitを想像でPatternへ紐付けない」)。省略時(undefined)は従来通り
+   * 学習対象に含めない通常のSplitとして扱う。
+   */
+  attributedCasePatternId?: string;
 }
 
 export interface SplitCandidateNewCandidate {
@@ -102,7 +111,10 @@ export type SplitCandidateResult =
    *  callbackがreturnで終わっても(throwしない限り)それまでの書き込みを
    *  そのままcommitするため、書き込み後に検証するとpartial commitの
    *  不整合を起こす(初回実装でこの順序ミスを実機検証で検出・是正した)。 */
-  | { ok: false; error: "CORRUPTED_CANDIDATE_DATA" };
+  | { ok: false; error: "CORRUPTED_CANDIDATE_DATA" }
+  /** [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17] attributedCasePatternIdが
+   *  指定されたが、このworkspace内に存在しない(または他workspaceのPattern)。 */
+  | { ok: false; error: "ATTRIBUTED_PATTERN_NOT_FOUND" };
 
 const RESPONSIBILITY_TYPE_SET = new Set<string>(RESPONSIBILITY_TYPES);
 
@@ -122,7 +134,7 @@ function validateParts(parts: SplitCandidatePartInput[]): string | null {
 }
 
 export async function splitFormationCandidate(params: SplitCandidateParams): Promise<SplitCandidateResult> {
-  const { sessionId, workspaceId, candidateId, expectedRevision, parts, reasonCode, actorUserId } = params;
+  const { sessionId, workspaceId, candidateId, expectedRevision, parts, reasonCode, actorUserId, attributedCasePatternId } = params;
 
   const partsError = validateParts(parts);
   if (partsError) {
@@ -212,6 +224,19 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
     }
     const parentEvidenceSpans = parsedParent.data.evidenceSpans;
 
+    // [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17] 同じ順序原則(全ての
+    // 判定・検証を書き込み開始前に完了させる)に従い、attributedCasePatternId
+    // が指定された場合はこの時点で存在検証する。
+    if (attributedCasePatternId) {
+      const attributedPattern = await tx.casePattern.findFirst({
+        where: { id: attributedCasePatternId, workspaceId },
+        select: { id: true },
+      });
+      if (!attributedPattern) {
+        return { ok: false, error: "ATTRIBUTED_PATTERN_NOT_FOUND" } as const;
+      }
+    }
+
     // [2026-08-30新設・M1-C2C是正] mergeCorrection.tsと同じく、実際の
     // FormationSourceAnchor行を継承する準備として、書き込み開始前に親の
     // Anchorを取得しておく(旧実装はproposedFields.evidenceSpansをJSONに
@@ -233,6 +258,7 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
         decision: "SPLIT",
         reasonCode: reasonCode ?? null,
         actorUserId,
+        attributedCasePatternId: attributedCasePatternId ?? null,
       },
     });
 
@@ -403,6 +429,18 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
         candidateKey: childCandidateKey,
         revisionId: childRevision.id,
         title: part.title,
+      });
+    }
+
+    // [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17] attributedCasePatternIdが
+    // 指定されている場合のみ、ActionSlot学習Jobをこの同一transaction内で
+    // enqueueする(SPLIT確定と原子的に記録する、Split transaction内で重い
+    // 集計・Embeddingは実行しない、指示書Gate 5)。
+    if (attributedCasePatternId) {
+      await enqueueCaseActionSlotLearn(tx, {
+        workspaceId,
+        patternId: attributedCasePatternId,
+        reasonCode: "SPLIT_ATTRIBUTED",
       });
     }
 

@@ -100,6 +100,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       case "CORRUPTED_CANDIDATE_DATA":
         // [2026-08-30新設・M1-C2C是正]
         return apiError("VALIDATION_FAILED", "候補データが破損しているため分解できません。管理者へご連絡ください", { retryable: false });
+      case "ATTRIBUTED_PATTERN_NOT_FOUND":
+        // [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17]
+        return apiError("VALIDATION_FAILED", "指定されたCase Patternが見つかりません", { retryable: false });
     }
   }
 
