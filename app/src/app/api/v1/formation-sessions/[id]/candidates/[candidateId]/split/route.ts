@@ -5,6 +5,7 @@ import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { RESPONSIBILITY_TYPES } from "@/lib/responsibility";
 import { splitFormationCandidate } from "@/lib/formation/splitCorrection";
+import { computeCasePatternFeedbackPayloadHash } from "@/lib/patterns/casePatternFeedbackService";
 
 /**
  * V5-M1-C: POST /formation-sessions/{id}/candidates/{candidateId}/split
@@ -27,6 +28,18 @@ const SplitRequestSchema = z.object({
   revision: z.number().int().min(1),
   parts: z.array(SplitPartSchema).min(2).max(10),
   reasonCode: z.string().max(100).optional(),
+  /** [PATTERN-ACTIONSLOT-LEARN-01/PATTERN-APPLY-02B新設] 本人が明示的に
+   *  選択した、またはmatched suggestionを起点に適用されたCase Pattern。 */
+  attributedCasePatternId: z.string().min(1).optional(),
+  /** [PATTERN-APPLY-02B新設・2026-09-18] Preview(decomposition proposal)から
+   *  このSplitを確定した場合のSuggestion識別子。指定時はattributedCasePatternId
+   *  も必須、かつIdempotency-Keyヘッダが必須(既存feedback APIと同じ規約)。 */
+  suggestionFeedback: z
+    .object({
+      suggestionId: z.string().min(1),
+      expectedSuggestionRevision: z.number().int().min(1),
+    })
+    .optional(),
 });
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string; candidateId: string }> }) {
@@ -48,6 +61,26 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     });
   }
 
+  // [PATTERN-APPLY-02B新設・2026-09-18] suggestionFeedback指定時のみ
+  // Idempotency-Keyヘッダを必須にする(既存case-patterns/suggestions/{id}/
+  // feedback routeと同じ規約。attributedCasePatternIdのみの通常Split
+  // ではIdempotency-Key不要のまま、既存呼び出し元との後方互換を保つ)。
+  let suggestionFeedbackParams: { suggestionId: string; expectedSuggestionRevision: number; idempotencyKey: string; requestPayloadHash: string } | undefined;
+  if (parsed.data.suggestionFeedback) {
+    const idempotencyKey = req.headers.get("idempotency-key");
+    if (!idempotencyKey) {
+      return apiError("VALIDATION_FAILED", "Idempotency-Keyヘッダが必要です", {
+        fieldErrors: { "Idempotency-Key": "必須ヘッダです" },
+      });
+    }
+    suggestionFeedbackParams = {
+      suggestionId: parsed.data.suggestionFeedback.suggestionId,
+      expectedSuggestionRevision: parsed.data.suggestionFeedback.expectedSuggestionRevision,
+      idempotencyKey,
+      requestPayloadHash: computeCasePatternFeedbackPayloadHash(parsed.data.suggestionFeedback),
+    };
+  }
+
   const { id: sessionId, candidateId } = await ctx.params;
   const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
 
@@ -59,6 +92,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     parts: parsed.data.parts,
     reasonCode: parsed.data.reasonCode,
     actorUserId: auth.user.userId,
+    attributedCasePatternId: parsed.data.attributedCasePatternId,
+    suggestionFeedback: suggestionFeedbackParams,
   });
 
   if (!result.ok) {
@@ -103,6 +138,27 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       case "ATTRIBUTED_PATTERN_NOT_FOUND":
         // [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17]
         return apiError("VALIDATION_FAILED", "指定されたCase Patternが見つかりません", { retryable: false });
+      // [PATTERN-APPLY-02B新設・2026-09-18] suggestionFeedback関連エラー。
+      // 既存feedback route(case-patterns/suggestions/[id]/feedback)と
+      // 同じエラーcode対応にする(想像で新しい対応表を発明しない)。
+      case "SUGGESTION_NOT_FOUND":
+        return apiError("RESOURCE_NOT_FOUND", "指定された提案が見つかりません");
+      case "SUGGESTION_FORBIDDEN":
+        return apiError("ACCESS_DENIED", "この提案に対する操作権限がありません");
+      case "SUGGESTION_REVISION_CONFLICT":
+        return apiError("VERSION_CONFLICT", "提案が更新されています。最新の状態を取得してください", {
+          retryable: true,
+          extra: { latestRevision: result.latestRevision },
+        });
+      case "SUGGESTION_NOT_MATCHED":
+        return apiError(
+          "STATE_TRANSITION_INVALID",
+          "この提案は候補が確定していない、またはActionSlotの学習データが無いため、この経路でのFeedback記録はできません",
+        );
+      case "SUGGESTION_PATTERN_MISMATCH":
+        return apiError("VALIDATION_FAILED", "指定されたPatternと提案の照合先Patternが一致しません", { retryable: false });
+      case "SUGGESTION_IDEMPOTENCY_KEY_REUSED":
+        return apiError("IDEMPOTENCY_KEY_REUSED", "同一のリクエストキーで内容の異なるリクエストが送信されました");
     }
   }
 

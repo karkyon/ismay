@@ -48,6 +48,84 @@ export type RecordCasePatternFeedbackResult =
   | { ok: false; error: "IDEMPOTENCY_KEY_REUSED" };
 
 /**
+ * recordCasePatternFeedback本体(transaction非依存の共通ロジック)。
+ * [PATTERN-APPLY-02B新設・2026-09-18] splitFormationCandidateが「Preview
+ * 確定(Split確定)とFeedback記録を同一transactionで確定する」ために、
+ * 呼び出し元のtx上でこのcore関数を再利用する
+ * (sourceLinkService.ts::linkPatternSourceEventCoreと同じ設計)。
+ */
+async function recordCasePatternFeedbackCore(
+  tx: Prisma.TransactionClient,
+  params: RecordCasePatternFeedbackParams,
+): Promise<RecordCasePatternFeedbackResult> {
+  const { workspaceId, suggestionId, actorUserId, expectedRevision, verdict, idempotencyKey, requestPayloadHash } = params;
+
+  const existingEvent = await tx.casePatternFeedbackEvent.findFirst({
+    where: { workspaceId, idempotencyKey },
+    select: { id: true, requestPayloadHash: true, suggestionId: true },
+  });
+  if (existingEvent) {
+    if (existingEvent.requestPayloadHash !== requestPayloadHash) {
+      return { ok: false, error: "IDEMPOTENCY_KEY_REUSED" };
+    }
+    const suggestion = await tx.casePatternSuggestionIdentity.findFirst({
+      where: { id: existingEvent.suggestionId, workspaceId },
+      select: { state: true },
+    });
+    return { ok: true, feedbackEventId: existingEvent.id, suggestionState: suggestion?.state ?? "PENDING", replay: true };
+  }
+
+  const suggestion = await tx.casePatternSuggestionIdentity.findFirst({
+    where: { id: suggestionId, workspaceId },
+    select: { id: true, ownerSubjectUserId: true, currentRevision: true },
+  });
+  if (!suggestion) {
+    return { ok: false, error: "NOT_FOUND" };
+  }
+  if (suggestion.ownerSubjectUserId !== actorUserId) {
+    return { ok: false, error: "FORBIDDEN" };
+  }
+  if (suggestion.currentRevision !== expectedRevision) {
+    return { ok: false, error: "REVISION_CONFLICT", latestRevision: suggestion.currentRevision };
+  }
+
+  const suggestionRevision = await tx.casePatternSuggestionRevision.findFirst({
+    where: { workspaceId, suggestionId: suggestion.id, revision: expectedRevision },
+    select: { id: true, matchedPatternId: true, matchedPatternRevisionId: true },
+  });
+  if (!suggestionRevision || !suggestionRevision.matchedPatternId || !suggestionRevision.matchedPatternRevisionId) {
+    return { ok: false, error: "SUGGESTION_NOT_MATCHED" };
+  }
+
+  const priorEvent = await tx.casePatternFeedbackEvent.findFirst({
+    where: { workspaceId, suggestionId: suggestion.id },
+    orderBy: { occurredAt: "desc" },
+    select: { id: true },
+  });
+
+  const feedbackEvent = await tx.casePatternFeedbackEvent.create({
+    data: {
+      workspaceId,
+      patternId: suggestionRevision.matchedPatternId,
+      patternRevisionId: suggestionRevision.matchedPatternRevisionId,
+      suggestionId: suggestion.id,
+      suggestionRevisionId: suggestionRevision.id,
+      verdict,
+      actorUserId,
+      idempotencyKey,
+      requestPayloadHash,
+      supersedesFeedbackEventId: priorEvent?.id ?? null,
+    },
+  });
+  await tx.casePatternSuggestionIdentity.update({
+    where: { id: suggestion.id },
+    data: { state: verdict },
+  });
+
+  return { ok: true, feedbackEventId: feedbackEvent.id, suggestionState: verdict, replay: false };
+}
+
+/**
  * 指定Suggestionへfeedback(ACCEPT/PARTIAL_ACCEPT/REJECT/LATER/NOT_RELEVANT)を
  * 記録する。
  *
@@ -70,80 +148,29 @@ export type RecordCasePatternFeedbackResult =
  *   その最新行をsupersedesFeedbackEventIdで指す(01A schemaコメント
  *   「訂正を許すならsupersedesFeedbackEventIdで表現し、過去行UPDATE禁止」の
  *   実装、append-only契約を維持する)。
+ *
+ * [PATTERN-APPLY-02B新設・2026-09-18] 2つの呼び出し形を提供するoverload:
+ *   1. recordCasePatternFeedback(params) — 従来通り、この関数が自前で
+ *      db.$transactionを開く(既存の単独呼び出し元、feedback API route向け)。
+ *   2. recordCasePatternFeedback(tx, params) — 呼び出し元の既存transaction
+ *      (tx)をそのまま再利用する。splitFormationCandidateが「Split確定と
+ *      Feedback記録を同一transactionで確定する」ために使う。
  */
+export async function recordCasePatternFeedback(params: RecordCasePatternFeedbackParams): Promise<RecordCasePatternFeedbackResult>;
 export async function recordCasePatternFeedback(
+  tx: Prisma.TransactionClient,
   params: RecordCasePatternFeedbackParams,
+): Promise<RecordCasePatternFeedbackResult>;
+export async function recordCasePatternFeedback(
+  paramsOrTx: RecordCasePatternFeedbackParams | Prisma.TransactionClient,
+  maybeParams?: RecordCasePatternFeedbackParams,
 ): Promise<RecordCasePatternFeedbackResult> {
-  const { workspaceId, suggestionId, actorUserId, expectedRevision, verdict, idempotencyKey, requestPayloadHash } = params;
-
-  // [既存merge/split契約と同じ順序] 書き込みより前に、idempotencyKeyの
-  // 既存行を確認する。
-  const existingEvent = await db.casePatternFeedbackEvent.findFirst({
-    where: { workspaceId, idempotencyKey },
-    select: { id: true, requestPayloadHash: true, suggestionId: true },
-  });
-  if (existingEvent) {
-    if (existingEvent.requestPayloadHash !== requestPayloadHash) {
-      return { ok: false, error: "IDEMPOTENCY_KEY_REUSED" };
-    }
-    const suggestion = await db.casePatternSuggestionIdentity.findFirst({
-      where: { id: existingEvent.suggestionId, workspaceId },
-      select: { state: true },
-    });
-    return { ok: true, feedbackEventId: existingEvent.id, suggestionState: suggestion?.state ?? "PENDING", replay: true };
+  if (maybeParams !== undefined) {
+    const tx = paramsOrTx as Prisma.TransactionClient;
+    return recordCasePatternFeedbackCore(tx, maybeParams);
   }
-
-  const suggestion = await db.casePatternSuggestionIdentity.findFirst({
-    where: { id: suggestionId, workspaceId },
-    select: { id: true, ownerSubjectUserId: true, currentRevision: true },
-  });
-  if (!suggestion) {
-    return { ok: false, error: "NOT_FOUND" };
-  }
-  if (suggestion.ownerSubjectUserId !== actorUserId) {
-    return { ok: false, error: "FORBIDDEN" };
-  }
-  if (suggestion.currentRevision !== expectedRevision) {
-    return { ok: false, error: "REVISION_CONFLICT", latestRevision: suggestion.currentRevision };
-  }
-
-  const suggestionRevision = await db.casePatternSuggestionRevision.findFirst({
-    where: { workspaceId, suggestionId: suggestion.id, revision: expectedRevision },
-    select: { id: true, matchedPatternId: true, matchedPatternRevisionId: true },
-  });
-  if (!suggestionRevision || !suggestionRevision.matchedPatternId || !suggestionRevision.matchedPatternRevisionId) {
-    return { ok: false, error: "SUGGESTION_NOT_MATCHED" };
-  }
-
-  const priorEvent = await db.casePatternFeedbackEvent.findFirst({
-    where: { workspaceId, suggestionId: suggestion.id },
-    orderBy: { occurredAt: "desc" },
-    select: { id: true },
-  });
-
-  const result = await db.$transaction(async (tx: Prisma.TransactionClient) => {
-    const feedbackEvent = await tx.casePatternFeedbackEvent.create({
-      data: {
-        workspaceId,
-        patternId: suggestionRevision.matchedPatternId!,
-        patternRevisionId: suggestionRevision.matchedPatternRevisionId!,
-        suggestionId: suggestion.id,
-        suggestionRevisionId: suggestionRevision.id,
-        verdict,
-        actorUserId,
-        idempotencyKey,
-        requestPayloadHash,
-        supersedesFeedbackEventId: priorEvent?.id ?? null,
-      },
-    });
-    await tx.casePatternSuggestionIdentity.update({
-      where: { id: suggestion.id },
-      data: { state: verdict },
-    });
-    return feedbackEvent;
-  });
-
-  return { ok: true, feedbackEventId: result.id, suggestionState: verdict, replay: false };
+  const params = paramsOrTx as RecordCasePatternFeedbackParams;
+  return db.$transaction((tx: Prisma.TransactionClient) => recordCasePatternFeedbackCore(tx, params));
 }
 
 /** APIハンドラでrequestPayloadHash算出に使う共通ヘルパー(既存mergeResponsibilities等と同じ算出方法)。 */

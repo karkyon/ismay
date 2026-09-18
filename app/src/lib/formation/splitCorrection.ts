@@ -8,6 +8,7 @@ import { sessionEventTypeForDecision } from "@/lib/formation/materialize";
 import { assessAtomicity } from "@/lib/formation/atomicityAssessment";
 import { enqueueCaseSuggestionMatch } from "@/lib/patterns/caseSuggestQueue";
 import { enqueueCaseActionSlotLearn } from "@/lib/patterns/caseActionSlotLearnQueue";
+import { recordCasePatternFeedback } from "@/lib/patterns/casePatternFeedbackService";
 
 /**
  * V5-M1-C Split Correction service。
@@ -80,6 +81,22 @@ export interface SplitCandidateParams {
    * 学習対象に含めない通常のSplitとして扱う。
    */
   attributedCasePatternId?: string;
+  /**
+   * [PATTERN-APPLY-02B新設・2026-09-18] Preview(decomposition proposal)から
+   * このSplitを確定した場合、Case Pattern Suggestionへのfeedback
+   * (ACCEPT/PARTIAL_ACCEPT)をこのSplitと同一transactionで確定する。
+   * verdict(ACCEPT/PARTIAL_ACCEPT)は本関数が確定済みpartsと元のproposal
+   * partsを照合して算出する(クライアント申告のverdictを信用しない)。
+   * 指定時はattributedCasePatternIdも必須(どのPatternへの採否かを
+   * 一意に定めるため)。
+   */
+  suggestionFeedback?: {
+    suggestionId: string;
+    /** [optimistic concurrency] クライアントが読取API経由で得たcurrentRevision。 */
+    expectedSuggestionRevision: number;
+    idempotencyKey: string;
+    requestPayloadHash: string;
+  };
 }
 
 export interface SplitCandidateNewCandidate {
@@ -114,7 +131,19 @@ export type SplitCandidateResult =
   | { ok: false; error: "CORRUPTED_CANDIDATE_DATA" }
   /** [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17] attributedCasePatternIdが
    *  指定されたが、このworkspace内に存在しない(または他workspaceのPattern)。 */
-  | { ok: false; error: "ATTRIBUTED_PATTERN_NOT_FOUND" };
+  | { ok: false; error: "ATTRIBUTED_PATTERN_NOT_FOUND" }
+  /** [PATTERN-APPLY-02B新設・2026-09-18] suggestionFeedback指定時、
+   *  対象Suggestionが見つからない/本人所有でない/revision不一致/
+   *  matched状態でない、またはmatchedPatternIdがattributedCasePatternIdと
+   *  一致しない(=違うPatternへのfeedbackをこのSplitへ紛れ込ませようとした)。
+   *  recordCasePatternFeedbackCoreのエラー語彙をそのまま流用する
+   *  (想像で新しいエラー語彙を発明しない)。 */
+  | { ok: false; error: "SUGGESTION_NOT_FOUND" }
+  | { ok: false; error: "SUGGESTION_FORBIDDEN" }
+  | { ok: false; error: "SUGGESTION_REVISION_CONFLICT"; latestRevision: number }
+  | { ok: false; error: "SUGGESTION_NOT_MATCHED" }
+  | { ok: false; error: "SUGGESTION_PATTERN_MISMATCH" }
+  | { ok: false; error: "SUGGESTION_IDEMPOTENCY_KEY_REUSED" };
 
 const RESPONSIBILITY_TYPE_SET = new Set<string>(RESPONSIBILITY_TYPES);
 
@@ -134,7 +163,7 @@ function validateParts(parts: SplitCandidatePartInput[]): string | null {
 }
 
 export async function splitFormationCandidate(params: SplitCandidateParams): Promise<SplitCandidateResult> {
-  const { sessionId, workspaceId, candidateId, expectedRevision, parts, reasonCode, actorUserId, attributedCasePatternId } = params;
+  const { sessionId, workspaceId, candidateId, expectedRevision, parts, reasonCode, actorUserId, attributedCasePatternId, suggestionFeedback } = params;
 
   const partsError = validateParts(parts);
   if (partsError) {
@@ -234,6 +263,63 @@ export async function splitFormationCandidate(params: SplitCandidateParams): Pro
       });
       if (!attributedPattern) {
         return { ok: false, error: "ATTRIBUTED_PATTERN_NOT_FOUND" } as const;
+      }
+    }
+
+    // [PATTERN-APPLY-02B新設・2026-09-18] suggestionFeedback指定時、
+    // Split確定とFeedback記録を同一transactionで確定するため、この時点
+    // (書き込み開始前)でverdictを算出しfeedbackを記録する。書き込み開始後に
+    // 検証すると、feedback側の失敗がSplitの既commit分と不整合になる
+    // (CORRUPTED_CANDIDATE_DATA早期checkと同じ順序原則)。verdictは
+    // クライアント申告を信用せず、確定済みpartsと元のproposal partsを
+    // このtx内で照合して算出する(想像でACCEPT/PARTIAL_ACCEPTの判定基準を
+    // 発明せず、「提案の型・titleExampleと完全一致すればACCEPT、それ以外は
+    // PARTIAL_ACCEPT」という最も単純で説明可能な基準を採用する)。
+    if (suggestionFeedback) {
+      if (!attributedCasePatternId) {
+        return { ok: false, error: "SUGGESTION_PATTERN_MISMATCH" } as const;
+      }
+      const suggestionRevisionRow = await tx.casePatternSuggestionRevision.findFirst({
+        where: { workspaceId, suggestionId: suggestionFeedback.suggestionId, revision: suggestionFeedback.expectedSuggestionRevision },
+        select: { matchedPatternId: true, decompositionProposal: true },
+      });
+      if (!suggestionRevisionRow || suggestionRevisionRow.matchedPatternId !== attributedCasePatternId) {
+        // [同一Patternへの紐付けであることを強制] Suggestionが指すPatternと
+        // attributedCasePatternIdが食い違うfeedbackを紛れ込ませない。
+        return { ok: false, error: "SUGGESTION_PATTERN_MISMATCH" } as const;
+      }
+      const proposal = suggestionRevisionRow.decompositionProposal as
+        | { kind?: string; hasData?: boolean; parts?: { suggestedType: string; titleExample: string }[] }
+        | null;
+      if (!proposal || proposal.kind !== "ACTION_SLOT_PROPOSAL" || !proposal.hasData || !Array.isArray(proposal.parts)) {
+        return { ok: false, error: "SUGGESTION_NOT_MATCHED" } as const;
+      }
+      const submittedSignature = parts.map((p) => `${p.type}\u0000${p.title}`).join("\n");
+      const proposalSignature = proposal.parts.map((p) => `${p.suggestedType}\u0000${p.titleExample}`).join("\n");
+      const verdict = submittedSignature === proposalSignature ? "ACCEPT" : "PARTIAL_ACCEPT";
+
+      const feedbackResult = await recordCasePatternFeedback(tx, {
+        workspaceId,
+        suggestionId: suggestionFeedback.suggestionId,
+        actorUserId,
+        expectedRevision: suggestionFeedback.expectedSuggestionRevision,
+        verdict,
+        idempotencyKey: suggestionFeedback.idempotencyKey,
+        requestPayloadHash: suggestionFeedback.requestPayloadHash,
+      });
+      if (!feedbackResult.ok) {
+        switch (feedbackResult.error) {
+          case "NOT_FOUND":
+            return { ok: false, error: "SUGGESTION_NOT_FOUND" } as const;
+          case "FORBIDDEN":
+            return { ok: false, error: "SUGGESTION_FORBIDDEN" } as const;
+          case "REVISION_CONFLICT":
+            return { ok: false, error: "SUGGESTION_REVISION_CONFLICT", latestRevision: feedbackResult.latestRevision } as const;
+          case "SUGGESTION_NOT_MATCHED":
+            return { ok: false, error: "SUGGESTION_NOT_MATCHED" } as const;
+          case "IDEMPOTENCY_KEY_REUSED":
+            return { ok: false, error: "SUGGESTION_IDEMPOTENCY_KEY_REUSED" } as const;
+        }
       }
     }
 

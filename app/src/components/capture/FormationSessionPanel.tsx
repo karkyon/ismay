@@ -503,11 +503,28 @@ export function FormationSessionPanel({ sessionId, onChanged }: { sessionId: str
     setError("");
     debugLog.event("FormationSessionPanel", "submitSplit", { candidateId: candidate.identityId, partCount: trimmedParts.length });
     try {
+      // [PATTERN-APPLY-02B新設・2026-09-18] 「この提案をもとに分解する」から
+      // 開始していた場合(splitAttributedPatternIdが設定されている場合)、
+      // attributedCasePatternIdとsuggestionFeedback識別子を同時送信し、
+      // Split確定とFeedback記録(ACCEPT/PARTIAL_ACCEPT)をバックエンド側で
+      // 同一transactionとして確定させる。verdictはクライアントが申告せず、
+      // バックエンドが確定済みpartsと元のproposalを照合して算出する。
+      const suggestion = splitAttributedPatternId ? candidate.patternSuggestion : null;
+      const headers: Record<string, string> = {};
+      const requestBody: Record<string, unknown> = { revision: candidate.currentRevision.revision, parts: trimmedParts };
+      if (splitAttributedPatternId) {
+        requestBody.attributedCasePatternId = splitAttributedPatternId;
+      }
+      if (suggestion) {
+        requestBody.suggestionFeedback = { suggestionId: suggestion.suggestionId, expectedSuggestionRevision: suggestion.revision };
+        headers["Idempotency-Key"] = nextIdempotencyKey();
+      }
       const res = await apiFetch(
         `/api/v1/formation-sessions/${sessionId}/candidates/${candidate.identityId}/split`,
         {
           method: "POST",
-          body: JSON.stringify({ revision: candidate.currentRevision.revision, parts: trimmedParts }),
+          headers,
+          body: JSON.stringify(requestBody),
         },
       );
       const body = await res.json().catch(() => null);
