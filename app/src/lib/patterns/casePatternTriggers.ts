@@ -1,15 +1,31 @@
 /**
- * Case Pattern検出の欠落enqueue契機(PATTERN-DETECT-02B新設・2026-09-04)。
+ * Case Pattern検出の欠落enqueue契機(PATTERN-DETECT-02B新設・2026-09-04、
+ * PATTERN-DETECT-TRIGGERS-03でEMBEDDING_MODEL_CHANGED/MANUAL_REBUILDを追加)。
  * 出典: Claude向け_ISMAY_3b695d9以降_再監査是正・CasePattern実機能完遂指示_
- * 2026-09-04.md §4「欠落enqueue契機」。
+ * 2026-09-04.md §4「欠落enqueue契機」、Claude向け_ISMAY_d68e9bf以降_
+ * ActionSlot正本準拠・CasePattern実分解完遂・残工程連続実装指示_2026-09-17.md
+ * P1「10. 残り4 reason配線」。
  *
- * [対象2種のみ・想像で先行実装しない] このGateで配線するのは
- * RESPONSIBILITY_CORRECTED(Responsibility.title変更)と
- * EVIDENCE_EXCLUDED(Responsibility論理削除)の2種のみ。
- * PATTERN_REVISION_CHANGED/EMBEDDING_MODEL_CHANGED/
- * EMBEDDING_SOURCE_VERSION_CHANGED/MANUAL_REBUILDは、対応するtrigger配線元
- * (Pattern編集API・AI Provider設定変更経路・管理操作)の個別精査が必要な
- * ため、次Gateへ延期する。
+ * [4種のうち配線できたのは2種のみ・想像で先行実装しない] 当初PATTERN-DETECT-
+ * 02Bで配線したRESPONSIBILITY_CORRECTED/EVIDENCE_EXCLUDEDに加え、本Gateで
+ * EMBEDDING_MODEL_CHANGED(trigger配線元: PATCH /api/v1/admin/ai-providers、
+ * capability=EMBEDDINGでprovider/modelが実際に変化した場合)と
+ * MANUAL_REBUILD(trigger配線元: 新設POST /api/v1/admin/case-patterns/rebuild、
+ * 管理者操作)を配線する。残る2種は個別精査の結果、実在するtrigger配線元が
+ * 無いことを確認した:
+ *   - PATTERN_REVISION_CHANGED: 「Pattern編集API」はGET専用の
+ *     /api/v1/case-patterns/[id]/route.tsのみで、CasePatternRevisionを
+ *     ユーザー操作で直接変更するAPIは存在しない(検出時の自動revision追加
+ *     以外に変更経路が無い)。架空のPattern編集APIを想像で作らない。
+ *   - EMBEDDING_SOURCE_VERSION_CHANGED: CASE_PATTERN_EMBEDDING_SOURCE_VERSION
+ *     (casePatternMatchPolicy.ts)はコード内の固定定数であり、デプロイ時に
+ *     開発者が値を書き換える以外に変化する経路が無い(実行時APIが存在しない)。
+ *     この定数を変更するdeployが発生した場合の再構築は、MANUAL_REBUILDを
+ *     管理者が手動実行することで対応する運用とし、専用の自動trigger配線は
+ *     架空のAPIを発明することになるため追加しない。
+ * この2種は宣言のみ残し(CASE_PATTERN_DETECT_REASON_CODESから削除しない、
+ * 既存Receipt冪等keyやtype定義との後方互換のため)、想像で偽のtrigger元を
+ * 作らない。
  *
  * [なぜtitleのみか] Case Pattern候補テキストは
  * `${responsibility.type}: ${responsibility.title}`のみを使う
@@ -119,4 +135,30 @@ export async function enqueueCaseDetectForResponsibilityDeletion(
       reasonCode: "EVIDENCE_EXCLUDED",
     });
   }
+}
+
+/**
+ * このworkspace内で既にCase Pattern(CasePattern行)を持つ全ownerを列挙し、
+ * それぞれへreasonCode付きでenqueueする(EMBEDDING_MODEL_CHANGED/
+ * MANUAL_REBUILDの共通実装)。まだ1件もPatternを持たないownerは、既存
+ * Pattern自体が存在しないため再検出の対象外(enqueue不要、想像で無関係な
+ * ownerへ書き込まない)。
+ */
+export async function enqueueCaseDetectForAllOwnersInWorkspace(
+  txOrDb: PatternDbClient,
+  params: { workspaceId: string; reasonCode: "EMBEDDING_MODEL_CHANGED" | "MANUAL_REBUILD" },
+): Promise<{ ownerCount: number }> {
+  const owners = await txOrDb.casePattern.findMany({
+    where: { workspaceId: params.workspaceId },
+    select: { ownerSubjectUserId: true },
+    distinct: ["ownerSubjectUserId"],
+  });
+  for (const { ownerSubjectUserId } of owners) {
+    await enqueueCaseDetect(txOrDb, {
+      workspaceId: params.workspaceId,
+      ownerSubjectUserId,
+      reasonCode: params.reasonCode,
+    });
+  }
+  return { ownerCount: owners.length };
 }

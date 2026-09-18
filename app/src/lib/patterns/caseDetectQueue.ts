@@ -27,16 +27,22 @@ import { createHash } from "node:crypto";
  * Pattern入力(Responsibility.title等)に影響するCorrection、Evidence
  * (Responsibility)削除の2種を追加する。出典: Claude向け_ISMAY_3b695d9以降_
  * 再監査是正・CasePattern実機能完遂指示_2026-09-04.md §4 reason一覧。
- * PATTERN_REVISION_CHANGED/EMBEDDING_MODEL_CHANGED/
- * EMBEDDING_SOURCE_VERSION_CHANGED/MANUAL_REBUILDは、対応するtrigger配線元
- * (Pattern編集API・AI Provider設定変更経路・管理操作)の個別精査が別途必要
- * なため本Gateでは追加しない(想像で先行実装しない、次Gateで追加)。
+ * [PATTERN-DETECT-TRIGGERS-03で追記・2026-09-18] EMBEDDING_MODEL_CHANGED
+ * (AI Provider設定変更経路)・MANUAL_REBUILD(管理者操作)はcasePatternTriggers.ts
+ * ::enqueueCaseDetectForAllOwnersInWorkspaceで配線済み。PATTERN_REVISION_
+ * CHANGED/EMBEDDING_SOURCE_VERSION_CHANGEDは、対応する実在のtrigger配線元
+ * (Pattern編集API・埋め込みsource version変更API)が存在しないことを個別
+ * 精査済みのため、値のみ宣言し未配線のまま維持する(casePatternTriggers.ts
+ * 冒頭コメント参照、想像で架空のtrigger元を発明しない)。
  */
 export const CASE_PATTERN_DETECT_REASON_CODES = [
   "PRIMARY_LINKED",
   "PRIMARY_UNLINKED",
   "RESPONSIBILITY_CORRECTED",
   "EVIDENCE_EXCLUDED",
+  // [PATTERN-DETECT-TRIGGERS-03新設・2026-09-18] 本Gateで配線した2種。
+  "EMBEDDING_MODEL_CHANGED",
+  "MANUAL_REBUILD",
 ] as const;
 export type CasePatternDetectReasonCode = (typeof CASE_PATTERN_DETECT_REASON_CODES)[number];
 

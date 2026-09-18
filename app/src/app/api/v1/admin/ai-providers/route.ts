@@ -13,6 +13,7 @@ import {
   listAvailableProviderKeys,
   listAvailableModels,
 } from "@/lib/ai/registry";
+import { enqueueCaseDetectForAllOwnersInWorkspace } from "@/lib/patterns/casePatternTriggers";
 
 /**
  * MOD-10 Admin / MOD-06 AI Gateway: AIプロバイダー切替・モデル選択(2026-08-20新設、
@@ -146,6 +147,13 @@ export async function PATCH(req: NextRequest) {
     return apiError("ACCESS_DENIED", "この操作には管理者権限(OWNER/ADMIN)が必要です");
   }
 
+  // [PATTERN-DETECT-TRIGGERS-03新設・2026-09-18] 変更前の値を保持し、
+  // upsert後に実際の変化有無(providerKey/modelNameのいずれか)を判定する。
+  const existingConfig = await db.aiProviderConfig.findUnique({
+    where: { workspaceId_capability: { workspaceId, capability } },
+    select: { providerKey: true, modelName: true },
+  });
+
   const updated = await db.aiProviderConfig.upsert({
     where: { workspaceId_capability: { workspaceId, capability } },
     create: {
@@ -172,6 +180,26 @@ export async function PATCH(req: NextRequest) {
     capability,
     providerKey: updated.providerKey,
   });
+
+  // [PATTERN-DETECT-TRIGGERS-03新設・2026-09-18] capability=EMBEDDINGの
+  // provider/modelが実際に変化した場合、既存Case Pattern embeddingは
+  // 旧model/dimensionsのまま残り、新規Suggestion照合クエリ
+  // (classifyCasePatternVectorForSuggestion、model/dimensions完全一致条件)が
+  // 一致しなくなる。このworkspace内で既にPatternを持つ全ownerへ
+  // EMBEDDING_MODEL_CHANGEDで再検出をenqueueし、再検出時にembedAndStore
+  // CasePatternRevisionが新model/dimensionsでembeddingを再生成することで
+  // 自然に解消させる(想像で移行スクリプトを別途発明しない、既存の再検出
+  // 経路をそのまま再利用する)。
+  if (capability === "EMBEDDING" && (existingConfig?.providerKey !== providerKey || (existingConfig?.modelName ?? null) !== (modelName ?? null))) {
+    const { ownerCount } = await enqueueCaseDetectForAllOwnersInWorkspace(db, {
+      workspaceId,
+      reasonCode: "EMBEDDING_MODEL_CHANGED",
+    });
+    debugServer.event("PATCH /admin/ai-providers", "CASE_PATTERN_DETECT_ENQUEUED_FOR_EMBEDDING_CHANGE", {
+      workspaceId,
+      ownerCount,
+    });
+  }
 
   return apiOk({
     capability: updated.capability,
