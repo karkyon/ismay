@@ -121,6 +121,18 @@ async function main(): Promise<void> {
       const membership = await db.workspaceMember.findFirst({ where: { userId }, select: { workspaceId: true } }).catch(() => null);
       workspaceId = membership?.workspaceId ?? null;
     }
+    if (!workspaceId) {
+      // [実DB検証で発見・是正] workspaceMemberのみに頼ると、前回実行が
+      // 部分的に失敗しworkspaceMember行が既に削除済みだった場合(このscript
+      // 自身のFK順序バグにより実際に発生した)、SWEEP時にworkspaceIdを解決
+      // できずcleanupCasePatternRowsByWorkspaceがスキップされ、同じFK違反で
+      // 再度詰まる。技術的教訓(technical-learnings.md「SWEEP logic must not
+      // rely solely on workspaceMember for workspaceId resolution」)に従い、
+      // captureへfallbackする(本scriptのfixtureは必ずcapture.createdById=userId
+      // を作成するため)。
+      const capture = await db.capture.findFirst({ where: { createdById: userId }, select: { workspaceId: true } }).catch(() => null);
+      workspaceId = capture?.workspaceId ?? null;
+    }
     if (workspaceId) await cleanupCasePatternRowsByWorkspace(workspaceId);
 
     const result = await cleanupFormationVerifyUser(db, userId);

@@ -316,11 +316,17 @@ export async function runActionSlotLearningForPattern(
 
       let unchanged = false;
       if (latestRevision) {
+        // [実DB検証で発見・是正] latestRevision.occurrenceProbability/typicalOrderは
+        // Prisma Decimal型であり、その.toString()はDecimal.js側の内部表現に
+        // 依存し、fresh側の.toFixed(N)と桁数(末尾0の有無)が一致しない場合がある
+        // (数値としては等しくても文字列として不一致になり、unchangedが常にfalseに
+        // なってしまうバグを実DBで検出した)。Number(...).toFixed(N)でfresh側と
+        // 同じ書式へ正規化してから比較する。
         const prevContent = {
           normalizedIntent: latestRevision.normalizedIntent,
           suggestedType: latestRevision.suggestedType,
-          occurrenceProbability: latestRevision.occurrenceProbability.toString(),
-          typicalOrder: latestRevision.typicalOrder.toString(),
+          occurrenceProbability: Number(latestRevision.occurrenceProbability).toFixed(4),
+          typicalOrder: Number(latestRevision.typicalOrder).toFixed(2),
           predecessorSlotKeys: latestRevision.predecessorSlotKeys,
           durationDistribution: latestRevision.durationDistribution,
           atomicityDistribution: latestRevision.atomicityDistribution,
