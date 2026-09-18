@@ -150,6 +150,12 @@ async function main(): Promise<void> {
       workspaceId = capture?.workspaceId ?? null;
     }
     if (workspaceId) await cleanupCasePatternRowsByWorkspace(workspaceId);
+    // [FK順序] pem_consent_events.user_idがusersを参照する。makeFixtureが
+    // CASE_PATTERN_LEARNING同意を付与するため、cleanupFormationVerifyUserが
+    // userを削除する前に必ず断ち切る(既存verify_gate_pattern_actionslot_
+    // schema_01.ts/verify_gate_pattern_integrity_03d.tsと同じ慣行、実DB検証で
+    // 本scriptにこのステップが欠落していたことを検出した)。
+    await db.pemConsentEvent.deleteMany({ where: { userId } }).catch(() => null);
 
     const result = await cleanupFormationVerifyUser(db, userId);
     if (result.errors.length > 0) {
