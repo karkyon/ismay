@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
+import { z } from "zod";
 import { db } from "@/lib/db";
-import { requireAuth } from "@/lib/auth/guard";
+import { requireAuth, requireCsrf } from "@/lib/auth/guard";
 import { ensureDefaultWorkspace } from "@/lib/workspace";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { buildCasePatternSuggestionDto } from "@/lib/patterns/casePatternSuggestion";
@@ -57,6 +58,20 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     select: { id: true, suggestionId: true, candidateId: true, similarity: true, createdAt: true },
   });
 
+  // [PATTERN-MANAGEMENT-UI-01新設・2026-09-19] 現行ActionSlot群(Gate 4〜6で
+  // 実装済みのCasePatternActionSlot/Revision)を、Pattern管理画面で
+  // 「このPatternが何を学習したか」を確認できるよう含める。
+  const actionSlots = await db.casePatternActionSlot.findMany({
+    where: { workspaceId, patternId: pattern.id, currentRevision: { gt: 0 } },
+  });
+  const actionSlotRevisions = await db.casePatternActionSlotRevision.findMany({
+    where: {
+      workspaceId,
+      OR: actionSlots.map((s: { id: string; currentRevision: number }) => ({ slotId: s.id, revision: s.currentRevision })),
+    },
+  });
+  const actionSlotRevisionBySlotId = new Map(actionSlotRevisions.map((r: { slotId: string }) => [r.slotId, r]));
+
   return apiOk({
     pattern: {
       id: pattern.id,
@@ -65,9 +80,25 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       confidence: Number(pattern.confidence),
       observedIntervalDays: pattern.observedIntervalDays !== null ? Number(pattern.observedIntervalDays) : null,
       currentRevision: pattern.currentRevision,
+      retiredAt: pattern.retiredAt !== null ? pattern.retiredAt.toISOString() : null,
       createdAt: pattern.createdAt.toISOString(),
       updatedAt: pattern.updatedAt.toISOString(),
     },
+    actionSlots: actionSlots.map((s: { id: string; slotKey: string }) => {
+      const rev = actionSlotRevisionBySlotId.get(s.id) as
+        | { normalizedIntent: string; suggestedType: string; occurrenceProbability: unknown; typicalOrder: unknown; rawSampleSize: number; durationDistribution: unknown; atomicityDistribution: unknown }
+        | undefined;
+      return {
+        slotKey: s.slotKey,
+        titleExample: rev?.normalizedIntent ?? null,
+        suggestedType: rev?.suggestedType ?? null,
+        occurrenceProbability: rev ? Number(rev.occurrenceProbability) : null,
+        typicalOrder: rev ? Number(rev.typicalOrder) : null,
+        rawSampleSize: rev?.rawSampleSize ?? null,
+        durationDistribution: rev?.durationDistribution ?? null,
+        atomicityDistribution: rev?.atomicityDistribution ?? null,
+      };
+    }),
     revisions: revisions.map((r: { id: string; revision: number; representativeText: string; decompositionTemplate: unknown; schemaVersion: string; createdAt: Date }) => ({
       id: r.id,
       revision: r.revision,
@@ -86,4 +117,69 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       createdAt: s.createdAt.toISOString(),
     })),
   });
+}
+
+const PatchRequestSchema = z.object({
+  action: z.enum(["RETIRE", "REACTIVATE"]),
+});
+
+/**
+ * PATCH /api/v1/case-patterns/{id}(PATTERN-MANAGEMENT-UI-01新設・
+ * 2026-09-19)。
+ * 出典: Claude向け_ISMAY_d68e9bf以降_ActionSlot正本準拠・CasePattern実分解
+ * 完遂・残工程連続実装指示_2026-09-17.md P1「11. Pattern管理UI」。
+ *
+ * [statusとは別列] retiredAtはaggregation(casePatternAggregation.ts)が
+ * 無条件で上書きするstatus列とは独立させている(schema.prismaコメント参照)。
+ * 退避中もSourceLink・ActionSlot学習自体は止めない(既存の破壊的巻き戻し
+ * 禁止方針を踏襲)。matching(casePatternMatching.ts)からのみ除外する。
+ */
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireAuth(req);
+  if (!auth.authenticated) {
+    return apiError("AUTH_REQUIRED", "ログインが必要です");
+  }
+  if (!requireCsrf(req)) {
+    return apiError("ACCESS_DENIED", "CSRFトークンが不正です");
+  }
+
+  const json = await req.json().catch(() => null);
+  const parsed = PatchRequestSchema.safeParse(json);
+  if (!parsed.success) {
+    return apiError("VALIDATION_FAILED", "actionはRETIREまたはREACTIVATEを指定してください");
+  }
+
+  const { id: patternId } = await ctx.params;
+  const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
+
+  // [IDOR対策] GETと同じくtenant境界・本人境界の両方でfindFirstを絞る。
+  const pattern = await db.casePattern.findFirst({
+    where: { id: patternId, workspaceId, ownerSubjectUserId: auth.user.userId },
+    select: { id: true, retiredAt: true },
+  });
+  if (!pattern) {
+    return apiError("RESOURCE_NOT_FOUND", "指定されたCase Patternが見つかりません");
+  }
+
+  if (parsed.data.action === "RETIRE") {
+    if (pattern.retiredAt !== null) {
+      return apiOk({ retiredAt: pattern.retiredAt.toISOString() });
+    }
+    const updated = await db.casePattern.update({
+      where: { id: pattern.id },
+      data: { retiredAt: new Date(), retiredById: auth.user.userId },
+      select: { retiredAt: true },
+    });
+    return apiOk({ retiredAt: updated.retiredAt!.toISOString() });
+  }
+
+  // REACTIVATE
+  if (pattern.retiredAt === null) {
+    return apiOk({ retiredAt: null });
+  }
+  await db.casePattern.update({
+    where: { id: pattern.id },
+    data: { retiredAt: null, retiredById: null },
+  });
+  return apiOk({ retiredAt: null });
 }

@@ -37,19 +37,21 @@ export async function GET(req: NextRequest) {
       confidence: true,
       observedIntervalDays: true,
       currentRevision: true,
+      retiredAt: true,
       createdAt: true,
       updatedAt: true,
     },
   });
 
   return apiOk({
-    patterns: patterns.map((p: { id: string; title: string; status: string; confidence: unknown; observedIntervalDays: unknown; currentRevision: number; createdAt: Date; updatedAt: Date }) => ({
+    patterns: patterns.map((p: { id: string; title: string; status: string; confidence: unknown; observedIntervalDays: unknown; currentRevision: number; retiredAt: Date | null; createdAt: Date; updatedAt: Date }) => ({
       id: p.id,
       title: p.title,
       status: p.status,
       confidence: Number(p.confidence),
       observedIntervalDays: p.observedIntervalDays !== null ? Number(p.observedIntervalDays) : null,
       currentRevision: p.currentRevision,
+      retiredAt: p.retiredAt !== null ? p.retiredAt.toISOString() : null,
       createdAt: p.createdAt.toISOString(),
       updatedAt: p.updatedAt.toISOString(),
     })),

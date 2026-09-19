@@ -70,6 +70,8 @@ model User {
   /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePattern.ownerSubjectUserId
   /// (DOC-06 §5「ownerSubjectUserId」)からの逆relation。
   casePatternsOwned                       CasePattern[]                     @relation("CasePatternOwner")
+  /// [PATTERN-MANAGEMENT-UI-01新設・2026-09-19]
+  casePatternsRetired                     CasePattern[]                     @relation("CasePatternRetiredBy")
   /// [PATTERN-SCHEMA-01新設・2026-09-03] CasePatternFeedbackEvent.actorUserId
   /// からの逆relation。
   casePatternFeedbackEvents               CasePatternFeedbackEvent[]
@@ -2680,6 +2682,16 @@ model CasePattern {
   /// 参照キャッシュ、正本はrevision行そのもの」パターン。revision追加と同一
   /// transactionでのみ更新する(lib/patterns/casePatternRevisionService.ts参照)。
   currentRevision      Int       @default(0) @map("current_revision")
+  /// [PATTERN-MANAGEMENT-UI-01新設・2026-09-19] 本人が明示的に「もう提案しな
+  /// くていい」と判断したPattern。statusとは独立したフィールドとする
+  /// (statusはclassifyCasePatternStageが集計のたびに無条件で上書きするため、
+  /// 同じ列に退避状態を乗せると次回集計で消えてしまう)。退避中もActionSlot
+  /// 学習・集計自体は止めない(既存SourceLinkの遡及的な取消しはしない、
+  /// 破壊的な巻き戻しを避ける既存方針を踏襲)。matching(Suggestion生成)から
+  /// のみ除外する。
+  retiredAt            DateTime? @map("retired_at")
+  retiredById          String?   @map("retired_by_id")
+  retiredByUser        User?     @relation("CasePatternRetiredBy", fields: [retiredById], references: [id])
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 

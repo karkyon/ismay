@@ -21,6 +21,9 @@ const NAV_ITEMS = [
   // 相当。UI-02(初回対話)とは異なり、UI-09/UI-10は常設ナビから直接開ける画面。
   { href: "/pem", label: "PEM", icon: PemIcon },
   { href: "/pem/review", label: "週次レビュー", icon: ReviewIcon },
+  // [PATTERN-MANAGEMENT-UI-01追加・2026-09-19] Gate 3〜11で実装したCase
+  // Pattern(繰り返しパターン学習・分解提案)の一覧・詳細・退避(retire)画面。
+  { href: "/patterns", label: "パターン", icon: ReviewIcon },
   { href: "/tags", label: "タグ", icon: SettingsIcon },
   { href: "/admin/ai-providers", label: "AIプロバイダー", icon: SettingsIcon },
   { href: "/admin/audit-logs", label: "監査ログ", icon: SettingsIcon },

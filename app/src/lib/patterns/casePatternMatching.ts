@@ -291,6 +291,7 @@ export async function classifyCasePatternVectorForSuggestion(
     WHERE cpe.workspace_id = ${params.workspaceId}
       AND cp.owner_subject_user_id = ${params.ownerSubjectUserId}
       AND cp.status IN ('ACTIVE', 'STRONG_SUGGESTION')
+      AND cp.retired_at IS NULL
       AND cpe.model = ${params.model}
       AND cpe.dimensions = ${params.dimensions}
       AND cpe.source_version = ${CASE_PATTERN_EMBEDDING_SOURCE_VERSION}
