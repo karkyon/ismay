@@ -133,7 +133,7 @@ find src/lib -path '*/__tests__/*.test.ts' | wc -l   # pure/invariant testファ
 
 ---
 
-## 実装済み機能領域（2026-09-05時点、実コードベース）
+## 実装済み機能領域（2026-09-19時点、実コードベース）
 
 以下は実装が存在する主要領域の一覧であり、各機能の完成度・受入条件はプロジェクトナレッジ側の
 DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参照すること。本READMEは
@@ -150,20 +150,48 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
   Onboarding対話、週次レビュー・助言、データエクスポート、個別Evidence削除
 - **Case Pattern Catalog**：確度計算式・6 table永続化スキーマに加え、検出→Suggestion生成→
   Feedback記録までの閉ループが実装済み(Gate PATTERN-DETECT-02A/02B、PATTERN-SUGGEST-
-  01A/01B/01C/01D、PATTERN-E2E-01で実DB・非課金E2E検証済み)。
+  01A/01B/01C/01D、PATTERN-E2E-01で実DB・非課金E2E検証済み)。さらに、実績からの
+  分解案自動学習→提案→比較/編集→適用→Feedback→次回提案という完全閉ループを実装
+  (Gate PATTERN-ACTIONSLOT-SCHEMA-01〜PATTERN-CLOSEDLOOP-E2E-02、PATTERN-DETECT-
+  TRIGGERS-03、PATTERN-DURATION-01、PATTERN-MANAGEMENT-UI-01、いずれも実DB受入
+  試験で検証済み)。
   - 検出：採用済みResponsibility由来のEvidenceからexact cosine matchingでPattern検出・
     強化・新規作成(`lib/patterns/casePatternDetectionService.ts`、
-    `worker/caseDetectQueueJob.ts`)
+    `worker/caseDetectQueueJob.ts`)。enqueue契機は6種
+    (PRIMARY_LINKED/PRIMARY_UNLINKED/RESPONSIBILITY_CORRECTED/EVIDENCE_EXCLUDED/
+    EMBEDDING_MODEL_CHANGED/MANUAL_REBUILD)を配線済み。`PATTERN_REVISION_CHANGED`/
+    `EMBEDDING_SOURCE_VERSION_CHANGED`は対応する実在のtrigger配線元が無いことを
+    個別調査済みのため未配線のまま(架空のAPIを発明しない方針、
+    `lib/patterns/casePatternTriggers.ts`冒頭コメント参照)
+  - ActionSlot学習：本人が明示的に選択、またはmatched suggestion起点で適用された
+    SplitのみからActionSlot(分解の型)を学習する(想像で紐付けない)。exact match
+    grouping(NFKC正規化のSHA-256)、occurrenceProbability・typicalOrder(中央値)・
+    predecessorSlotKeys・atomicityDistribution・durationDistribution(実
+    ExecutionSessionデータのCLOSED_CONFIRMED Sessionから算出、中断・再開は合算)を
+    append-only revisionとして記録(`lib/patterns/casePatternActionSlotLearnService.ts`、
+    `casePatternActionSlotDuration.ts`、`worker/caseActionSlotLearnQueueJob.ts`)
+  - Proposal生成：Suggestion生成時、matched Patternの現行ActionSlot群から
+    version付きdecomposition proposalを組み立てる(stable child key・根拠・
+    信頼度・欠損の明示を含む、`lib/patterns/casePatternActionSlotProposal.ts`)
   - Suggestion生成：新しいFormation Candidate Revision確定時にACTIVE/STRONG_SUGGESTION
-    段階のPatternへ自動照合(`lib/patterns/casePatternSuggestionGenerationService.ts`、
+    段階かつ未retireのPatternへ自動照合(`lib/patterns/casePatternSuggestionGenerationService.ts`、
     `worker/caseSuggestQueueJob.ts`)。AMBIGUOUS時は自動選択せず候補一覧を保存
+  - Apply：Preview(decomposition proposal)から`splitFormationCandidate`への
+    原子的接続。確定済みpartsと元のproposalを照合してverdict(ACCEPT/PARTIAL_ACCEPT)
+    をサーバー側で算出し、Split確定とFeedback記録を同一transactionで確定する
+    (`lib/formation/splitCorrection.ts`)
   - Feedback：ACCEPT/PARTIAL_ACCEPT/REJECT/LATER/NOT_RELEVANTの記録(CSRF・
     Idempotency-Key・owner認可・optimistic concurrency・append-only訂正、
     `POST /api/v1/case-patterns/suggestions/{id}/feedback`)
-  - 読取API：`GET /api/v1/case-patterns`(一覧・詳細)、`formation-sessions/{id}`への
-    `patternSuggestion`フィールド
-  - UI：`FormationSessionPanel.tsx`にSuggestion表示・Feedbackボタンを統合(独立した
-    Pattern一覧ページは未実装、下記「既知の未完了・保留事項」参照)
+  - 読取API：`GET /api/v1/case-patterns`(一覧・詳細、ActionSlot一覧・退避状態を含む)、
+    `formation-sessions/{id}`への`patternSuggestion`フィールド(decompositionProposal・
+    AMBIGUOUS候補のPattern名enrichmentを含む)
+  - 退避(retire)：`PATCH /api/v1/case-patterns/{id}`(RETIRE/REACTIVATE)。status列とは
+    独立したretiredAt列で管理(aggregationによる上書きを回避)。退避中もActionSlot学習
+    自体は止めず、Suggestion照合(matching)からのみ除外する
+  - UI：`FormationSessionPanel.tsx`にSuggestion表示・分解案Preview・
+    AMBIGUOUS候補比較・Feedbackボタンを統合。独立した`/patterns`ページ
+    (一覧・詳細・退避/再有効化)も実装済み
 - **通知**：静穏時間帯・まとめ通知
 - **監査ログ**：本人スコープの一覧表示
 - **CI**：GitHub Actions(node22/npm ci/prisma validate・generate/tsc/eslint/全pure test/build)
@@ -172,7 +200,7 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 
 ## 既知の未完了・保留事項
 
-「全機能完成」ではない。以下は2026-09-05時点で明示的に未実装、または意図的に保留されている
+「全機能完成」ではない。以下は2026-09-19時点で明示的に未実装、または意図的に保留されている
 主要項目（詳細な根拠・出典はコード内コメント、および各Gateのcommitメッセージ・
 `scripts/verify_gate_pattern_*.ts`を参照）：
 
@@ -181,9 +209,8 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 | メールアドレス確認 | **未実装**。登録時に暫定的に即時検証済み扱い(`register/route.ts`にコメント明記)。Notification基盤(provider)未確定のため |
 | 管理者ロール(RBAC) | **実装済み**(Gate SECURITY-RBAC-01)。統合正本仕様書v5.0 §20.2の正式語彙(`OWNER/ADMIN/MEMBER/VIEWER/SERVICE`)に基づき、管理API5エンドポイント(`/api/v1/admin/ai-providers`GET/PATCH、`/api/v1/admin/ai-providers/credentials`PUT/DELETE、`/api/v1/admin/ai-usage`GET)をOWNER/ADMINへ限定(`lib/auth/roleGuard.ts`)。拒否時はAuditLogへ記録。現状メンバー招待機能が未実装のため、各Workspaceの唯一のmemberは常にOWNERであり、単一利用者運用に挙動変化はない(招待機能実装への先行防御)。`/api/v1/audit-logs`は本人スコープの自己監査ログのため対象外(意図的) |
 | 30日Purge Job | **未実装**。アカウント削除はsoft delete(`deletedAt`)まで。物理削除ジョブは別途スケジュール実装が必要 |
-| Case Pattern：残り4種のenqueue契機 | **未実装**。`PATTERN_REVISION_CHANGED`/`EMBEDDING_MODEL_CHANGED`/`EMBEDDING_SOURCE_VERSION_CHANGED`/`MANUAL_REBUILD`(Pattern編集API・AI Provider設定変更経路・管理操作の個別調査が必要、現状動いている閉ループへの機能追加でありメンテナンス性向上の位置づけ) |
+| Case Pattern：残り4種のenqueue契機のうち2種 | **意図的に未配線のまま**。`PATTERN_REVISION_CHANGED`(Pattern編集APIが存在しない)・`EMBEDDING_SOURCE_VERSION_CHANGED`(コード内固定定数で実行時APIが無い)は、対応する実在のtrigger配線元が無いことを個別調査済み。架空のAPIを想像で発明しない方針のため、値の宣言のみ残し未配線(`EMBEDDING_MODEL_CHANGED`/`MANUAL_REBUILD`はGate PATTERN-DETECT-TRIGGERS-03で配線済み、詳細は`lib/patterns/casePatternTriggers.ts`冒頭コメント参照) |
 | Case Pattern：採用率計算の窓 | **意図的に全履歴ベース**。「直近N件」の定義が正本に無いため、想像で期間・件数を発明せず全履歴を対象とする設計(`casePatternSuggestion.ts`のモジュールコメント参照) |
-| Case Pattern：AMBIGUOUS候補比較UI・独立Pattern一覧ページ | **未実装**。AMBIGUOUS時のUIは「判定保留中」表示のみ(候補一覧はAPIレスポンスに保持されているが専用比較UIは無い)。`GET /api/v1/case-patterns`の専用UIページも無い(API自体は実装済み) |
 | Metric Catalog(v4.0 10.3節の残り9指標) | **意図的に保留**。登録済みは1指標のみ。分子・分母・除外・品質等の完全な文言が業務判断待ちとコード内に明記済み |
 | Activity Evidence Ledger | **未実装**。概念レベルの記述のみで具体的なデータ契約・API契約が正本に未確定 |
 | Context Playbook | **未実装**。同上の理由で非推奨(想像でデータ契約を埋めない方針) |
