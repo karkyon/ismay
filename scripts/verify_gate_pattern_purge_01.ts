@@ -253,6 +253,16 @@ async function main(): Promise<void> {
     });
     await db.responsibility.update({ where: { id: mergeAwayResp.id }, data: { supersededByMergeReceiptId: mergeReceipt.id } });
 
+    // [PATTERN-PURGE-01 fix04・2026-09-20追加/テストアサーション是正]
+    // 上記fix02のSPLIT/MERGE fixtureにより、この時点でeligibleUser2の
+    // workspace配下には元々の1件+splitSourceResp/splitResultResp/
+    // mergeAwayResp/mergeResultRespの計5件のResponsibilityが存在する。
+    // 以前は固定値1を期待していたが、fix02のfixture追加時にこの期待値を
+    // 更新し忘れており、target1のPurgeとは無関係に必ず失敗する状態に
+    // なっていた(実DB受入試験で発見)。固定値ではなくこの時点のスナップ
+    // ショットと比較することで、将来fixtureが変わっても追従できるようにする。
+    const eligibleUser2ResponsibilityBaselineCount = await db.responsibility.count({ where: { workspaceId: eligibleUser2.workspaceId } });
+
     const eligible = await findEligibleUsersForPurge();
     const eligibleIds = new Set(eligible.map((e) => e.userId));
     ok("[1] 31日前に削除されたユーザーは対象になる", eligibleIds.has(eligibleUser1.userId), "");
@@ -295,7 +305,11 @@ async function main(): Promise<void> {
     const eligibleUser2StillThere = await db.user.findUnique({ where: { id: eligibleUser2.userId } });
     ok("[4] 未処理の対象ユーザー2は影響を受けない(まだ存在する)", eligibleUser2StillThere !== null, "");
     const eligibleUser2ResponsibilityCount = await db.responsibility.count({ where: { workspaceId: eligibleUser2.workspaceId } });
-    ok("[4] 未処理の対象ユーザー2のResponsibilityは影響を受けない", eligibleUser2ResponsibilityCount === 1, `count=${eligibleUser2ResponsibilityCount}`);
+    ok(
+      "[4] 未処理の対象ユーザー2のResponsibilityは影響を受けない",
+      eligibleUser2ResponsibilityCount === eligibleUser2ResponsibilityBaselineCount,
+      `count=${eligibleUser2ResponsibilityCount} baseline=${eligibleUser2ResponsibilityBaselineCount}`,
+    );
 
     const recentlyDeletedStillThere = await db.user.findUnique({ where: { id: recentlyDeleted.userId } });
     ok("[4] 30日未満の削除ユーザーは影響を受けない", recentlyDeletedStillThere !== null, "");
