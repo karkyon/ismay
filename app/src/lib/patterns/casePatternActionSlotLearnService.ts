@@ -28,6 +28,7 @@ import {
   assertCaseActionSlotLearnJobGenerationCurrent,
   type CaseActionSlotLearnJobGenerationContext,
 } from "./caseActionSlotLearnQueue";
+import { computeDurationDistributionForChildRevisions } from "./casePatternActionSlotDuration";
 
 /** CasePatternActionSlotRevision.schemaVersion/policyVersion(Gate 3 Decision Record §3.5で確定した最初のversion)。 */
 const CASE_PATTERN_ACTION_SLOT_SCHEMA_VERSION = "1.0";
@@ -273,13 +274,12 @@ export async function runActionSlotLearningForPattern(
       algorithmVersions: [...algorithmVersionsSet].sort(),
     };
 
-    // durationDistribution: v1は明示的な未計測状態(空{}は禁止、Gate 3
-    // Decision Record §3.4)。ExecutionSession接続は別Gate(PATTERN-DURATION-01)。
-    const durationDistribution = {
-      status: "NOT_ENOUGH_DATA" as const,
-      sampleSize: 0,
-      policyVersion: CASE_PATTERN_ACTION_SLOT_POLICY_VERSION,
-    };
+    // durationDistribution: 実在するMaterializationReceiptItem→
+    // ExecutionSessionの接続経路から算出する(PATTERN-DURATION-01新設・
+    // 2026-09-19、Gate 5では「別Gate」として先送りしていた接続を実装)。
+    // まだmaterialize済みのchildが無い、またはCLOSED_CONFIRMED Sessionが
+    // 1件も無ければNOT_ENOUGH_DATA(想像で見積り値を作らない)。
+    const durationDistribution = await computeDurationDistributionForChildRevisions(workspaceId, childRevisionIdsInGroup);
 
     // 代表titleは直近instance(最新のchildRevisionId、createdAt降順は
     // 明示的に取得していないためlineage取得順=DB返却順の最後を採用する。
