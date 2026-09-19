@@ -19,21 +19,30 @@
  *
  * [削除順序のアルゴリズム] エッジX→Y(テーブルXがテーブルYを参照する外部キー
  * 列を持つ)がある場合、Xの行はYの行より先に削除しなければならない(既存の
- * FK制約はすべてRESTRICT、このリポジトリ全体で一貫した方針)。これは
- * 「Yの入次数(=Yを参照する未処理テーブルの数)が0になった時点でYを処理
- * 可能」というKahnのtopological sortそのもので、leafテーブル(誰からも
- * 参照されない)が最初に、`workspaces`/`users`(最も多く参照される)が
- * 最後に処理される順序を自動的に導く。
+ * FK制約は主にRESTRICT、一部1:1detail系テーブル(TaskDetail等)はCASCADE。
+ * いずれの場合もXを先に削除する順序は安全に機能する——RESTRICTなら必須、
+ * CASCADEなら冗長だが無害)。これは「Yの入次数(=Yを参照する未処理テーブル
+ * の数)が0になった時点でYを処理可能」というKahnのtopological sortそのもの
+ * で、leafテーブル(誰からも参照されない)が最初に、`workspaces`/`users`
+ * (最も多く参照される)が最後に処理される順序を自動的に導く。
  *
- * [workspace-scoped列の特定] 列名の命名規則(workspaceId/ownerSubjectUserId
- * /createdById等、このコードベースだけでも複数の慣行が混在)に依存せず、
- * 外部キー制約自体が`workspaces.id`を参照している列を機械的に特定する。
- * user-scoped側は、workspace-scoped列を持たない(=workspacesを経由しない)
- * テーブルに限り、`users.id`を参照する列で絞り込む(1 workspace=1 memberが
- * 現状の不変条件であるため、workspace-scoped削除で本人のデータは網羅される。
- * `retiredById`等、他人の行に残る「行為者としての参照」列は削除条件に含め
- * ない——他人のPatternを誤って削除しないため。詳細はPURGE_DESIGN_NOTEを
- * 参照)。
+ * [スコープ列の特定・推移的解決・2026-09-20実DB検証で発見・是正] 列名の
+ * 命名規則(workspaceId/ownerSubjectUserId/createdById等、このコードベース
+ * だけでも複数の慣行が混在)に依存せず、外部キー制約自体が`workspaces.id`
+ * (または`users.id`)へ辿り着けるかどうかで機械的に特定する。[旧実装の欠陥]
+ * 「そのテーブル自身がworkspaces.id/users.idを直接参照する列を持つ場合の
+ * み」を対象にしていたため、単一列FKで1階層以上離れたテーブル(例:
+ * task_details.responsibilityId → responsibilities.id、task_details自身は
+ * workspace_id列を持たない)が発見対象から漏れ、94テーブル中54テーブルが
+ * Purge対象から漏れていた(実DB検証で発見)。是正として、列名の一致を
+ * 要求せず「参照先テーブルが既にスコープ確定済みか」だけを条件に不動点まで
+ * 推移的に伝播させ(buildScopeChain)、直接列を持たないテーブルは非相関
+ * サブクエリ(buildScopeWhereSql)で絞り込む。user-scoped側は、
+ * workspace-scopedで捕捉できないテーブルに限り、`users.id`へ辿り着ける列で
+ * 絞り込む(1 workspace=1 memberが現状の不変条件であるため、workspace-scoped
+ * 削除で本人のデータは網羅される。`retiredById`等、他人の行に残る「行為者
+ * としての参照」列は削除条件に含めない——他人のPatternを誤って削除しない
+ * ため。詳細はPURGE_DESIGN_NOTEを参照)。
  */
 import { db } from "@/lib/db";
 import { Prisma } from "@/generated/prisma/client";
@@ -197,31 +206,143 @@ function topologicalDeleteOrder(edges: ForeignKeyEdge[]): string[] {
 
 export interface PurgeScopeTable {
   tableName: string;
-  /** このテーブルのうち、削除対象の絞り込みに使う列(workspaces.idまたはusers.idを参照するFK列)。 */
-  filterColumn: string;
   /** "workspace" | "user"。usersテーブル自体を"user"扱いにする特別枠も含む。 */
   scopeKind: "workspace" | "user";
+  /** [fix03・2026-09-20実DB検証で発見・是正] このテーブルの行を絞り込む
+   *  WHERE句(パラメータ$1はtarget.workspaceIds/target.userId)。旧実装は
+   *  「テーブル自身がworkspaces.id/users.idを直接参照する列を持つ場合のみ」
+   *  を対象にしており、単一列FKで1階層以上離れたテーブル(例:
+   *  task_details.responsibilityId → responsibilities.id、
+   *  responsibilitiesは直接workspaces.idを参照するが、task_details自身は
+   *  workspace_id列を持たない)が発見対象から漏れていた。実DB検証で
+   *  94テーブル中40テーブルしか捕捉できていないことを確認(残り54テーブル
+   *  中50テーブルは本来workspace/userスコープ配下で物理削除されるべき行を
+   *  持つ)。是正として、列名の一致を要求せず「参照先テーブルが既に
+   *  スコープ確定済みか」だけを条件に推移的にスコープを解決し(BFS的な
+   *  不動点反復)、直接列を持たないテーブルは
+   *  `"col" IN (SELECT "parentCol" FROM "parentTable" WHERE <parentのWHERE句>)`
+   *  という非相関(non-correlated)サブクエリで絞り込む。削除順序上、子テーブル
+   *  は親テーブルより先に削除されるため、この時点で親テーブルの対象行は
+   *  まだ存在しており、このサブクエリは正しく解決できる。 */
+  whereSql: string;
 }
 
 export interface NullableBackReference {
   tableName: string;
   /** NULLへ更新する対象列(NULL可能な逆参照FK)。 */
   columnName: string;
-  /** そのテーブル自身の絞り込み列・スコープ(このテーブル自身がworkspace/user
-   *  スコープを持たない場合はnull——そのようなテーブルは購入対象外テーブル
-   *  なので実際には到達しない)。 */
-  filterColumn: string;
+  /** [fix03] このテーブルの行を絞り込むWHERE句。PurgeScopeTable.whereSqlと同じ仕組み。 */
+  whereSql: string;
+  scopeKind: "workspace" | "user";
+}
+
+/** [防御的検証] Postgresカタログ由来とはいえ、生SQLへ埋め込む識別子は
+ *  念のため安全なパターンへ限定する(多層防御、実際にこの形式を外れる
+ *  識別子はPostgres自体が許容しないため通常到達しない)。 */
+const SAFE_IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
+function assertSafeIdentifier(name: string): void {
+  if (!SAFE_IDENTIFIER.test(name)) {
+    throw new Error(`[purgeJob] 識別子の形式が不正です(想定外の値のため処理を中止): ${name}`);
+  }
+}
+
+interface ScopeLink {
+  /** このテーブル自身が持つFK列(削除対象の絞り込みに使う)。 */
+  ownColumn: string;
+  /** 参照先テーブル("workspaces"/"users"、または他のスコープ確定済みテーブル)。 */
+  parentTable: string;
+  /** 参照先テーブル側の列(通常は"id"だが、複合FKの場合は他の列もありうる)。 */
+  parentColumn: string;
   scopeKind: "workspace" | "user";
 }
 
 /**
- * FKグラフから、削除対象スコープ(各テーブル・絞り込み列・削除順序)を
- * 算出する。`workspaces`を直接参照する列を持つテーブルは"workspace"
- * スコープとし、それ以外で`users`を直接参照する列を持つテーブルは"user"
- * スコープとする(workspace-scopedの方を優先する——1 workspace=1 member
- * という現状の不変条件の下では、workspace側で本人のデータは網羅される。
- * user-scoped側は、UserSession等workspaceを経由しない真にuser単体の
- * テーブルのためだけに使う)。
+ * [fix03・2026-09-20実DB検証で発見・是正] FKグラフから、各テーブルの
+ * スコープ(workspace/user)を推移的(transitive)に解決する。
+ *
+ * [旧実装の欠陥] 「そのテーブル自身がworkspaces.id/users.idを直接参照する
+ * 列を持つか」だけを見ており、1階層以上離れたテーブル(単一列FKでの
+ * 間接参照、例: task_details → responsibilities → workspaces)を
+ * 一切捕捉できていなかった。実DB検証(66件のmigrationを適用した実
+ * スキーマ)で、94テーブル中54テーブルがこの欠陥によりPurge対象から
+ * 漏れていたことを確認した(退会したはずのデータが物理削除されず残り
+ * 続ける、プライバシー機能として致命的な欠陥)。
+ *
+ * [是正] 列名の一致を要求せず、「エッジの参照先テーブルが既にスコープ
+ * 確定済みか」だけを条件に、不動点(fixed point)に達するまで繰り返し
+ * 伝播させる。workspaceスコープを完全に伝播させてから(既存の「workspace
+ * 優先」設計を踏襲)、残りをuserスコープで伝播させる。
+ */
+function buildScopeChain(edges: ForeignKeyEdge[]): Map<string, ScopeLink> {
+  const chain = new Map<string, ScopeLink>();
+
+  for (const e of edges) {
+    if (e.referencedTableName === "workspaces" && e.referencedColumnName === "id" && !chain.has(e.tableName)) {
+      chain.set(e.tableName, { ownColumn: e.columnName, parentTable: "workspaces", parentColumn: "id", scopeKind: "workspace" });
+    }
+  }
+  for (const e of edges) {
+    if (e.referencedTableName === "users" && e.referencedColumnName === "id" && !chain.has(e.tableName)) {
+      chain.set(e.tableName, { ownColumn: e.columnName, parentTable: "users", parentColumn: "id", scopeKind: "user" });
+    }
+  }
+
+  for (const wantedKind of ["workspace", "user"] as const) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const e of edges) {
+        if (chain.has(e.tableName)) continue;
+        if (e.tableName === e.referencedTableName) continue; // 自己参照はスコープの根拠にしない。
+        const parent = chain.get(e.referencedTableName);
+        if (parent && parent.scopeKind === wantedKind) {
+          chain.set(e.tableName, { ownColumn: e.columnName, parentTable: e.referencedTableName, parentColumn: e.referencedColumnName, scopeKind: parent.scopeKind });
+          changed = true;
+        }
+      }
+    }
+  }
+  return chain;
+}
+
+/**
+ * [fix03] テーブル1件分のWHERE句(SQL断片)を再帰的に組み立てる。
+ * workspaces/usersへ直接つながる場合は `"col" = ANY($1)`、それ以外は
+ * `"col" IN (SELECT "parentCol" FROM "parentTable" WHERE <親のWHERE句>)`
+ * という非相関サブクエリになる(親はまだ削除されていない時点でこの
+ * サブクエリが評価されるため正しく解決できる。削除順序の根拠は
+ * topologicalDeleteOrder参照)。同じテーブルが複数箇所から参照される
+ * 場合に備えcacheで再計算を避ける。識別子はこの関数内で全て
+ * assertSafeIdentifierを通す(多層防御)。
+ */
+function buildScopeWhereSql(tableName: string, chain: Map<string, ScopeLink>, cache: Map<string, string>): string {
+  const cached = cache.get(tableName);
+  if (cached !== undefined) return cached;
+  const link = chain.get(tableName);
+  if (!link) {
+    throw new Error(`[purgeJob] スコープが解決できないテーブルのWHERE句を要求されました(想定外): ${tableName}`);
+  }
+  assertSafeIdentifier(link.ownColumn);
+  assertSafeIdentifier(link.parentTable);
+  assertSafeIdentifier(link.parentColumn);
+  let sql: string;
+  if (link.parentTable === "workspaces" || link.parentTable === "users") {
+    sql = `"${link.ownColumn}" = ANY($1)`;
+  } else {
+    const parentWhere = buildScopeWhereSql(link.parentTable, chain, cache);
+    sql = `"${link.ownColumn}" IN (SELECT "${link.parentColumn}" FROM "${link.parentTable}" WHERE ${parentWhere})`;
+  }
+  cache.set(tableName, sql);
+  return sql;
+}
+
+/**
+ * FKグラフから、削除対象スコープ(各テーブル・WHERE句・削除順序)を
+ * 算出する。`workspaces`を(直接または間接に)参照するテーブルは
+ * "workspace"スコープとし、それ以外で`users`を(直接または間接に)
+ * 参照するテーブルは"user"スコープとする(workspace-scopedの方を
+ * 優先する——1 workspace=1 memberという現状の不変条件の下では、
+ * workspace側で本人のデータは網羅される)。
  */
 export async function computePurgeScope(): Promise<{
   order: PurgeScopeTable[];
@@ -230,66 +351,43 @@ export async function computePurgeScope(): Promise<{
 }> {
   const edges = await discoverForeignKeyEdges();
   const deleteOrder = topologicalDeleteOrder(edges);
-
-  const workspaceFilterColumnByTable = new Map<string, string>();
-  const userFilterColumnByTable = new Map<string, string>();
-  for (const e of edges) {
-    if (e.referencedTableName === "workspaces" && e.referencedColumnName === "id") {
-      if (!workspaceFilterColumnByTable.has(e.tableName)) {
-        workspaceFilterColumnByTable.set(e.tableName, e.columnName);
-      }
-    }
-    if (e.referencedTableName === "users" && e.referencedColumnName === "id") {
-      if (!userFilterColumnByTable.has(e.tableName)) {
-        userFilterColumnByTable.set(e.tableName, e.columnName);
-      }
-    }
-  }
-
-  function scopeOf(tableName: string): { filterColumn: string; scopeKind: "workspace" | "user" } | null {
-    const wsCol = workspaceFilterColumnByTable.get(tableName);
-    if (wsCol) return { filterColumn: wsCol, scopeKind: "workspace" };
-    const userCol = userFilterColumnByTable.get(tableName);
-    if (userCol) return { filterColumn: userCol, scopeKind: "user" };
-    return null;
-  }
+  const chain = buildScopeChain(edges);
+  const whereSqlCache = new Map<string, string>();
 
   const order: PurgeScopeTable[] = [];
   for (const tableName of deleteOrder) {
     if (tableName === "workspaces" || tableName === "users") continue; // 最後に個別処理する。
-    const scope = scopeOf(tableName);
-    if (scope) {
-      order.push({ tableName, filterColumn: scope.filterColumn, scopeKind: scope.scopeKind });
+    const link = chain.get(tableName);
+    if (link) {
+      order.push({ tableName, scopeKind: link.scopeKind, whereSql: buildScopeWhereSql(tableName, chain, whereSqlCache) });
     }
     // どちらのスコープも無いテーブル(workspaces/usersを一切参照しない、
-    // 真にグローバルな参照データ)は対象外のまま(想像で無関係なテーブルへ
-    // 絞り込み条件を発明しない)。
+    // 真にグローバルな参照データ。例: jobs/outbox_events/event_logsは
+    // 集約IDを文字列で保持するのみで正式なFKを意図的に張っていない
+    // ——既存AuditLog等と同じ設計、想像で無関係なテーブルへ絞り込み
+    // 条件を発明しない)は対象外のまま。
   }
 
   // [循環を断ち切るためNULLへ更新する対象列] topologicalDeleteOrderが順序
-  // 制約から除外したNULL可能なエッジのうち、テーブル自身がworkspace/user
+  // 制約から除外したNULL可能なエッジ(または複合FKで同じ制約に属する
+  // NULL可能な列を含むエッジ)のうち、テーブル自身がworkspace/user
   // スコープを持つもののみを対象にする(それ以外は削除対象外テーブルの
   // ため実際には到達しない)。
   const nullableBackReferences: NullableBackReference[] = [];
   for (const e of edges) {
     if (e.tableName === e.referencedTableName) continue;
     if (!e.isNullable) continue;
-    const scope = scopeOf(e.tableName);
-    if (!scope) continue;
-    nullableBackReferences.push({ tableName: e.tableName, columnName: e.columnName, filterColumn: scope.filterColumn, scopeKind: scope.scopeKind });
+    const link = chain.get(e.tableName);
+    if (!link) continue;
+    nullableBackReferences.push({
+      tableName: e.tableName,
+      columnName: e.columnName,
+      whereSql: buildScopeWhereSql(e.tableName, chain, whereSqlCache),
+      scopeKind: link.scopeKind,
+    });
   }
 
   return { order, deleteOrder, nullableBackReferences };
-}
-
-/** [防御的検証] information_schema由来とはいえ、生SQLへ埋め込む識別子は
- *  念のため安全なパターンへ限定する(多層防御、実際にこの形式を外れる
- *  識別子はPostgres自体が許容しないため通常到達しない)。 */
-const SAFE_IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
-function assertSafeIdentifier(name: string): void {
-  if (!SAFE_IDENTIFIER.test(name)) {
-    throw new Error(`[purgeJob] 識別子の形式が不正です(想定外の値のため処理を中止): ${name}`);
-  }
 }
 
 export interface EligibleUserForPurge {
@@ -328,14 +426,13 @@ export async function dryRunPurgeForUser(target: EligibleUserForPurge): Promise<
   const results: PurgeTableCount[] = [];
   for (const t of order) {
     assertSafeIdentifier(t.tableName);
-    assertSafeIdentifier(t.filterColumn);
     const values = t.scopeKind === "workspace" ? target.workspaceIds : [target.userId];
     if (values.length === 0) {
       results.push({ tableName: t.tableName, scopeKind: t.scopeKind, count: 0 });
       continue;
     }
     const rows = await db.$queryRawUnsafe<{ count: bigint }[]>(
-      `SELECT COUNT(*)::bigint AS count FROM "${t.tableName}" WHERE "${t.filterColumn}" = ANY($1)`,
+      `SELECT COUNT(*)::bigint AS count FROM "${t.tableName}" WHERE ${t.whereSql}`,
       values,
     );
     results.push({ tableName: t.tableName, scopeKind: t.scopeKind, count: Number(rows[0]?.count ?? 0) });
@@ -369,24 +466,22 @@ export async function executePurgeForUser(target: EligibleUserForPurge): Promise
     for (const n of nullableBackReferences) {
       assertSafeIdentifier(n.tableName);
       assertSafeIdentifier(n.columnName);
-      assertSafeIdentifier(n.filterColumn);
       const values = n.scopeKind === "workspace" ? target.workspaceIds : [target.userId];
       if (values.length === 0) continue;
       await tx.$executeRawUnsafe(
-        `UPDATE "${n.tableName}" SET "${n.columnName}" = NULL WHERE "${n.filterColumn}" = ANY($1) AND "${n.columnName}" IS NOT NULL`,
+        `UPDATE "${n.tableName}" SET "${n.columnName}" = NULL WHERE ${n.whereSql} AND "${n.columnName}" IS NOT NULL`,
         values,
       );
     }
     for (const t of order) {
       assertSafeIdentifier(t.tableName);
-      assertSafeIdentifier(t.filterColumn);
       const values = t.scopeKind === "workspace" ? target.workspaceIds : [target.userId];
       if (values.length === 0) {
         perTable.push({ tableName: t.tableName, scopeKind: t.scopeKind, count: 0 });
         continue;
       }
       const deleted = await tx.$executeRawUnsafe(
-        `DELETE FROM "${t.tableName}" WHERE "${t.filterColumn}" = ANY($1)`,
+        `DELETE FROM "${t.tableName}" WHERE ${t.whereSql}`,
         values,
       );
       perTable.push({ tableName: t.tableName, scopeKind: t.scopeKind, count: deleted });
