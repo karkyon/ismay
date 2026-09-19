@@ -10,7 +10,10 @@
  * 保持するかを手作業で列挙すると、将来の新設テーブルを見落とすリスクが
  * ある(見落とし=退会したはずのデータが物理削除されず残り続ける、という
  * プライバシー機能として致命的な欠陥になる)。代わりに、Postgresの実際の
- * 外部キー制約(information_schema)を実行時に読み取り、削除順序を
+ * 外部キー制約(pg_constraint、複合FKの列対応をordinalで正しく復元できる
+ * カタログ。2026-09-20実DB検証で is_nullableをconstraint_column_usage
+ * 経由で読む方式が複合FKで列を誤対応させる不具合を発見し、pg_constraintの
+ * conkey/confkeyベースへ是正した)を実行時に読み取り、削除順序を
  * topological sortで動的に算出する。これにより将来テーブルが追加されても
  * 自動的に対象へ含まれる。
  *
@@ -44,37 +47,71 @@ interface ForeignKeyEdge {
    *  「後から埋める任意の逆参照」列がworkspace内に実在し、これが
    *  responsibilities⇄responsibility_correction_receiptsのような真の
    *  循環を作ることを実DB実行で検出した。列名を想像で個別に列挙せず、
-   *  information_schema.columnsのis_nullableを機械的に読み取ることで、
-   *  どの列がこの種の「任意の逆参照」かを判定する。 */
+   *  pg_attribute.attnotnullを機械的に読み取ることで、どの列がこの種の
+   *  「任意の逆参照」かを判定する。 */
   isNullable: boolean;
+  /** [複合FK是正・2026-09-20実DB検証で発見] 同じFK制約(例: Responsibility
+   *  (supersededByReceiptId, workspaceId) → ResponsibilityCorrectionReceipt
+   *  (id, workspaceId))に属する列同士をグループ化するための識別子(制約の
+   *  OID、単一列FKでも一意)。topologicalDeleteOrderが「同じ制約内の列を
+   *  一括で順序制約から除外するか」を判定するために使う(理由は
+   *  topologicalDeleteOrderのコメント参照)。 */
+  constraintId: string;
 }
 
-/** information_schemaから全外部キー制約を読み取る(生SQL、パラメータ無しの固定クエリ)。 */
+/**
+ * Postgresカタログから全外部キー制約を読み取る(生SQL、パラメータ無しの
+ * 固定クエリ)。
+ *
+ * [複合FK列対応の是正・2026-09-20実DB検証で発見・是正] 旧実装は
+ * information_schema.key_column_usageとconstraint_column_usageを
+ * constraint_nameのみで結合していたが、複合FK(このコードベースの
+ * (xxxId, workspaceId) → (id, workspaceId)パターン全体、tenant境界の
+ * 二重防御として全域で意図的に多用されている設計)では、参照元列がN列・
+ * 参照先列がN列ある場合にN×Nの直積(2列なら2×2=4行)が生成され、本来
+ * 対応しない列同士(例: Responsibility.workspaceId →
+ * ResponsibilityCorrectionReceipt.id)という実在しない偽のエッジが混入して
+ * いた。この偽エッジはworkspaceId自体が必須列であるためNOT NULLとして
+ * 扱われ、実在する逆方向の真のNOT NULLエッジ(receipt.sourceResponsibilityId
+ * → responsibility.id)と組み合わさってNOT NULL同士の偽の循環を作り、
+ * PATTERN-PURGE-01 fix01(NULL可能な列を個別に除外する是正)適用後もなお
+ * topologicalDeleteOrderを停止させていた(実DB受入試験で再現・特定)。
+ *
+ * 是正: Postgresカタログ(pg_constraint.conkey/confkey)を
+ * `unnest(...) WITH ORDINALITY`で同じ添字同士を対応付けて読み取る
+ * (PostgreSQL公式ドキュメント: confkeyはconkeyと同じ順序で対応する列を
+ * 列挙する)。これにより複合FKでも列が正しく1:1で対応し、偽エッジが発生
+ * しない。また各行にconstraintId(制約のOID)を付与し、後続の
+ * topologicalDeleteOrderが複合FKを制約単位で正しく扱えるようにする。
+ */
 async function discoverForeignKeyEdges(): Promise<ForeignKeyEdge[]> {
   const rows = await db.$queryRaw<
-    { table_name: string; column_name: string; referenced_table_name: string; referenced_column_name: string; is_nullable: string }[]
+    { table_name: string; column_name: string; referenced_table_name: string; referenced_column_name: string; is_nullable: boolean; constraint_id: string }[]
   >`
     SELECT
-      tc.table_name AS table_name,
-      kcu.column_name AS column_name,
-      ccu.table_name AS referenced_table_name,
-      ccu.column_name AS referenced_column_name,
-      col.is_nullable AS is_nullable
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.key_column_usage kcu
-      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage ccu
-      ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-    JOIN information_schema.columns col
-      ON col.table_schema = tc.table_schema AND col.table_name = tc.table_name AND col.column_name = kcu.column_name
-    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
+      tbl.relname AS table_name,
+      att.attname AS column_name,
+      reftbl.relname AS referenced_table_name,
+      refatt.attname AS referenced_column_name,
+      NOT att.attnotnull AS is_nullable,
+      con.oid::text AS constraint_id
+    FROM pg_constraint con
+    JOIN pg_class tbl ON tbl.oid = con.conrelid
+    JOIN pg_namespace tbl_ns ON tbl_ns.oid = tbl.relnamespace
+    JOIN pg_class reftbl ON reftbl.oid = con.confrelid
+    JOIN pg_namespace reftbl_ns ON reftbl_ns.oid = reftbl.relnamespace
+    CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS pair(conattnum, confattnum, ord)
+    JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = pair.conattnum
+    JOIN pg_attribute refatt ON refatt.attrelid = con.confrelid AND refatt.attnum = pair.confattnum
+    WHERE con.contype = 'f' AND tbl_ns.nspname = 'public' AND reftbl_ns.nspname = 'public'
   `;
-  return rows.map((r: { table_name: string; column_name: string; referenced_table_name: string; referenced_column_name: string; is_nullable: string }) => ({
+  return rows.map((r: { table_name: string; column_name: string; referenced_table_name: string; referenced_column_name: string; is_nullable: boolean; constraint_id: string }) => ({
     tableName: r.table_name,
     columnName: r.column_name,
     referencedTableName: r.referenced_table_name,
     referencedColumnName: r.referenced_column_name,
-    isNullable: r.is_nullable === "YES",
+    isNullable: r.is_nullable,
+    constraintId: r.constraint_id,
   }));
 }
 
@@ -89,7 +126,19 @@ async function discoverForeignKeyEdges(): Promise<ForeignKeyEdge[]> {
  * これらのNULL可能な列を対象行についてNULLへ更新してから通常の削除順序を
  * 実行することで、循環を安全に断ち切る(nullOutNullableBackReferences関数)。
  * 自己参照(同一テーブル内の列)も同様に順序制約から除外する。
- * これでもなお解決できない循環(NOT NULL列同士の真の循環)が万一存在する
+ * [複合FKは制約単位で判定・2026-09-20実DB検証で発見・是正] Postgresの
+ * 複合FKはデフォルトMATCH SIMPLEであり、複合キーを構成する列のうち1つでも
+ * NULLであれば制約全体が不問になる(PostgreSQL公式ドキュメント「MATCH
+ * SIMPLE...if any of them are null, the row is not required to have a
+ * match」)。そのため「列ごと」にNULL可能性を判定するのではなく「同じ制約
+ * (constraintId)に属する列のいずれかがNULL可能」であれば、その制約が
+ * 生成する全ての列ペアを一括で順序制約から除外する。列単位で判定すると、
+ * 複合キーの中のNOT NULL列(例: workspaceId、これ自体は必須列)だけが
+ * 独立した順序制約として残ってしまい、真にNULLへ更新される列(例:
+ * supersededByReceiptId)を除外しても循環が解消されない(実DB受入試験で
+ * 再現・特定した不具合そのもの)。
+ *
+ * これでもなお解決できない循環(NOT NULL制約同士の真の循環)が万一存在する
  * 場合は、想像で強制解決せずエラーとして停止する。
  */
 function topologicalDeleteOrder(edges: ForeignKeyEdge[]): string[] {
@@ -98,15 +147,28 @@ function topologicalDeleteOrder(edges: ForeignKeyEdge[]): string[] {
     allTables.add(e.tableName);
     allTables.add(e.referencedTableName);
   }
+
+  // 同じ制約(constraintId)に属する列のうち1つでもNULL可能なら、その制約
+  // 全体をMATCH SIMPLE的に「NULL可能」として扱う(上記コメント参照)。
+  const constraintHasNullableMember = new Map<string, boolean>();
+  for (const e of edges) {
+    const prev = constraintHasNullableMember.get(e.constraintId) ?? false;
+    constraintHasNullableMember.set(e.constraintId, prev || e.isNullable);
+  }
+
   const inDegree = new Map<string, number>();
   const outgoing = new Map<string, string[]>();
   for (const t of allTables) {
     inDegree.set(t, 0);
     outgoing.set(t, []);
   }
+  const seenOrderEdge = new Set<string>();
   for (const e of edges) {
     if (e.tableName === e.referencedTableName) continue; // 自己参照は順序制約にならない。
-    if (e.isNullable) continue; // NULL可能な逆参照は別途null-outで処理する。
+    if (constraintHasNullableMember.get(e.constraintId)) continue; // NULL可能な逆参照(複合FKの場合は制約全体)は別途null-outで処理する。
+    const pairKey = `${e.tableName}->${e.referencedTableName}`;
+    if (seenOrderEdge.has(pairKey)) continue; // 複合FKの列数だけ同じ有向辺が重複するため1本にまとめる。
+    seenOrderEdge.add(pairKey);
     outgoing.get(e.tableName)!.push(e.referencedTableName);
     inDegree.set(e.referencedTableName, (inDegree.get(e.referencedTableName) ?? 0) + 1);
   }

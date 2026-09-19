@@ -86,8 +86,21 @@ async function main(): Promise<void> {
   const allCreatedUserIds: string[] = [];
   const allCreatedWorkspaceIds: string[] = [];
 
+  /** [PATTERN-PURGE-01 fix02・2026-09-20追加] 複合FKのnull-out→削除の順序を
+   *  purgeJob.ts本体と同じ考え方でcleanup側でも踏襲する(テスト失敗時に
+   *  supersededByReceiptId/supersededByMergeReceiptIdが残っていても、
+   *  cleanup自体がFK違反(RESTRICT)で失敗しないようにするため)。 */
+  async function cleanupWorkspaceCircularRefs(workspaceId: string): Promise<void> {
+    await db.responsibility.updateMany({ where: { workspaceId }, data: { supersededByReceiptId: null, supersededByMergeReceiptId: null } }).catch(() => null);
+    await db.responsibilityCorrectionResultItem.deleteMany({ where: { workspaceId } }).catch(() => null);
+    await db.responsibilityCorrectionReceipt.deleteMany({ where: { workspaceId } }).catch(() => null);
+    await db.responsibilityMergeSourceItem.deleteMany({ where: { workspaceId } }).catch(() => null);
+    await db.responsibilityMergeReceipt.deleteMany({ where: { workspaceId } }).catch(() => null);
+  }
+
   async function cleanupResidual(): Promise<void> {
     for (const workspaceId of allCreatedWorkspaceIds) {
+      await cleanupWorkspaceCircularRefs(workspaceId);
       await db.casePatternRevision.deleteMany({ where: { workspaceId } }).catch(() => null);
       await db.casePattern.deleteMany({ where: { workspaceId } }).catch(() => null);
       await db.responsibility.deleteMany({ where: { workspaceId } }).catch(() => null);
@@ -110,6 +123,7 @@ async function main(): Promise<void> {
     for (const o of orphans) {
       const memberships = await db.workspaceMember.findMany({ where: { userId: o.id }, select: { workspaceId: true } }).catch(() => []);
       for (const m of memberships) {
+        await cleanupWorkspaceCircularRefs(m.workspaceId);
         await db.casePatternRevision.deleteMany({ where: { workspaceId: m.workspaceId } }).catch(() => null);
         await db.casePattern.deleteMany({ where: { workspaceId: m.workspaceId } }).catch(() => null);
         await db.responsibility.deleteMany({ where: { workspaceId: m.workspaceId } }).catch(() => null);
@@ -180,6 +194,65 @@ async function main(): Promise<void> {
     const eligibleUser1 = await makeSoftDeletedUser("eligible1", 31);
     const eligibleUser2 = await makeSoftDeletedUser("eligible2", 45);
 
+    // [PATTERN-PURGE-01 fix02・2026-09-20追加/P1-1是正] 監査資料
+    // 「fix01の核心が受入試験に入っていない」への対応。Responsibility⇄
+    // ResponsibilityCorrectionReceipt/ResponsibilityMergeReceiptの複合FK
+    // 循環を実データ(supersededByReceiptId/supersededByMergeReceiptIdへ
+    // 実際に値を設定)で作り、target2(eligibleUser2)のexecute時に
+    // null-out→削除が実際に機能することを検証する。
+    const fixtureDeletedAt = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+    const fixtureDomain = await db.domain.findFirstOrThrow({ where: { workspaceId: eligibleUser2.workspaceId } });
+    const splitSourceResp = await db.responsibility.create({
+      data: {
+        workspaceId: eligibleUser2.workspaceId, domainId: fixtureDomain.id, type: "TASK",
+        title: "検証用SPLIT元Responsibility", status: "PLANNED", sourceKind: "USER",
+        createdById: eligibleUser2.userId, updatedById: eligibleUser2.userId, deletedAt: fixtureDeletedAt,
+      },
+    });
+    const splitResultResp = await db.responsibility.create({
+      data: {
+        workspaceId: eligibleUser2.workspaceId, domainId: fixtureDomain.id, type: "TASK",
+        title: "検証用SPLIT結果Responsibility", status: "PLANNED", sourceKind: "USER",
+        createdById: eligibleUser2.userId, updatedById: eligibleUser2.userId, deletedAt: fixtureDeletedAt,
+      },
+    });
+    const correctionReceipt = await db.responsibilityCorrectionReceipt.create({
+      data: {
+        workspaceId: eligibleUser2.workspaceId, sourceResponsibilityId: splitSourceResp.id, correctionType: "SPLIT",
+        expectedVersion: 0, idempotencyKey: `verify-purge-split-${RUN_ID}`, requestPayloadHash: "verify-purge-fixture",
+        actorUserId: eligibleUser2.userId,
+      },
+    });
+    await db.responsibilityCorrectionResultItem.create({
+      data: { workspaceId: eligibleUser2.workspaceId, receiptId: correctionReceipt.id, newResponsibilityId: splitResultResp.id },
+    });
+    await db.responsibility.update({ where: { id: splitSourceResp.id }, data: { supersededByReceiptId: correctionReceipt.id } });
+
+    const mergeAwayResp = await db.responsibility.create({
+      data: {
+        workspaceId: eligibleUser2.workspaceId, domainId: fixtureDomain.id, type: "TASK",
+        title: "検証用MERGE吸収元Responsibility", status: "PLANNED", sourceKind: "USER",
+        createdById: eligibleUser2.userId, updatedById: eligibleUser2.userId, deletedAt: fixtureDeletedAt,
+      },
+    });
+    const mergeResultResp = await db.responsibility.create({
+      data: {
+        workspaceId: eligibleUser2.workspaceId, domainId: fixtureDomain.id, type: "TASK",
+        title: "検証用MERGE結果Responsibility", status: "PLANNED", sourceKind: "USER",
+        createdById: eligibleUser2.userId, updatedById: eligibleUser2.userId, deletedAt: fixtureDeletedAt,
+      },
+    });
+    const mergeReceipt = await db.responsibilityMergeReceipt.create({
+      data: {
+        workspaceId: eligibleUser2.workspaceId, newResponsibilityId: mergeResultResp.id,
+        idempotencyKey: `verify-purge-merge-${RUN_ID}`, requestPayloadHash: "verify-purge-fixture", actorUserId: eligibleUser2.userId,
+      },
+    });
+    await db.responsibilityMergeSourceItem.create({
+      data: { workspaceId: eligibleUser2.workspaceId, receiptId: mergeReceipt.id, sourceResponsibilityId: mergeAwayResp.id, expectedVersion: 0 },
+    });
+    await db.responsibility.update({ where: { id: mergeAwayResp.id }, data: { supersededByMergeReceiptId: mergeReceipt.id } });
+
     const eligible = await findEligibleUsersForPurge();
     const eligibleIds = new Set(eligible.map((e) => e.userId));
     ok("[1] 31日前に削除されたユーザーは対象になる", eligibleIds.has(eligibleUser1.userId), "");
@@ -235,6 +308,19 @@ async function main(): Promise<void> {
     ok("[5] 2件目も正常に実行できる", executeResult2.totalRowsDeleted > 0, `total=${executeResult2.totalRowsDeleted}`);
     const eligibleUser2FinalCheck = await db.user.findUnique({ where: { id: eligibleUser2.userId } });
     ok("[5] 2件目のuser行も消える", eligibleUser2FinalCheck === null, "");
+
+    // [PATTERN-PURGE-01 fix02・2026-09-20追加/P1-1是正] 実データで作った
+    // 複合FK循環(SPLIT/MERGE Receipt)が実際に削除されることを確認する
+    // (fix02がschema構造だけでなく実際のnull-out→削除を正しく実行できる
+    // ことの証拠)。
+    const correctionReceiptAfter = await db.responsibilityCorrectionReceipt.findUnique({ where: { id: correctionReceipt.id } });
+    ok("[6] 複合FK循環(SPLIT Receipt)も正しく削除される", correctionReceiptAfter === null, JSON.stringify(correctionReceiptAfter));
+    const mergeReceiptAfter = await db.responsibilityMergeReceipt.findUnique({ where: { id: mergeReceipt.id } });
+    ok("[6] 複合FK循環(MERGE Receipt)も正しく削除される", mergeReceiptAfter === null, JSON.stringify(mergeReceiptAfter));
+    const splitSourceRespAfter = await db.responsibility.findUnique({ where: { id: splitSourceResp.id } });
+    ok("[6] supersededByReceiptIdを持っていた元Responsibilityも消える", splitSourceRespAfter === null, JSON.stringify(splitSourceRespAfter));
+    const mergeAwayRespAfter = await db.responsibility.findUnique({ where: { id: mergeAwayResp.id } });
+    ok("[6] supersededByMergeReceiptIdを持っていた元Responsibilityも消える", mergeAwayRespAfter === null, JSON.stringify(mergeAwayRespAfter));
 
     const eligibleAfterAll = await findEligibleUsersForPurge();
     ok("[5] 全処理後、再度findEligibleUsersForPurgeしても処理済み2件は含まれない(user行自体が無いため)", !eligibleAfterAll.some((e) => e.userId === eligibleUser1.userId || e.userId === eligibleUser2.userId), "");
