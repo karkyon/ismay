@@ -40,40 +40,57 @@ interface ForeignKeyEdge {
   columnName: string;
   referencedTableName: string;
   referencedColumnName: string;
+  /** [実DB検証で発見] Responsibility.supersededByReceiptId等、意図的な
+   *  「後から埋める任意の逆参照」列がworkspace内に実在し、これが
+   *  responsibilities⇄responsibility_correction_receiptsのような真の
+   *  循環を作ることを実DB実行で検出した。列名を想像で個別に列挙せず、
+   *  information_schema.columnsのis_nullableを機械的に読み取ることで、
+   *  どの列がこの種の「任意の逆参照」かを判定する。 */
+  isNullable: boolean;
 }
 
 /** information_schemaから全外部キー制約を読み取る(生SQL、パラメータ無しの固定クエリ)。 */
 async function discoverForeignKeyEdges(): Promise<ForeignKeyEdge[]> {
   const rows = await db.$queryRaw<
-    { table_name: string; column_name: string; referenced_table_name: string; referenced_column_name: string }[]
+    { table_name: string; column_name: string; referenced_table_name: string; referenced_column_name: string; is_nullable: string }[]
   >`
     SELECT
       tc.table_name AS table_name,
       kcu.column_name AS column_name,
       ccu.table_name AS referenced_table_name,
-      ccu.column_name AS referenced_column_name
+      ccu.column_name AS referenced_column_name,
+      col.is_nullable AS is_nullable
     FROM information_schema.table_constraints tc
     JOIN information_schema.key_column_usage kcu
       ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
     JOIN information_schema.constraint_column_usage ccu
       ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
+    JOIN information_schema.columns col
+      ON col.table_schema = tc.table_schema AND col.table_name = tc.table_name AND col.column_name = kcu.column_name
     WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
   `;
-  return rows.map((r: { table_name: string; column_name: string; referenced_table_name: string; referenced_column_name: string }) => ({
+  return rows.map((r: { table_name: string; column_name: string; referenced_table_name: string; referenced_column_name: string; is_nullable: string }) => ({
     tableName: r.table_name,
     columnName: r.column_name,
     referencedTableName: r.referenced_table_name,
     referencedColumnName: r.referenced_column_name,
+    isNullable: r.is_nullable === "YES",
   }));
 }
 
 /**
  * Kahnのtopological sort。エッジX→Y(Xの外部キーがYを参照)がある場合、
  * 戻り値の配列でXがYより前に来る(=Xを先に削除してよい順序)。
- * [循環検出] 既存FKはすべてRESTRICTでかつ自己参照(同一テーブル内の列、
- * 例: supersedesFeedbackEventId)は削除順序に影響しないため無視する。
- * それ以外の真の循環(A→B→A)が万一存在する場合は、想像で強制解決せず
- * エラーとして停止する(不完全な順序で削除を強行しない)。
+ *
+ * [循環の断ち切り・実DB検証で発見・是正] NOT NULL制約の列のみを順序制約
+ * として使う。NULL可能な列(例: Responsibility.supersededByReceiptId⇄
+ * ResponsibilityCorrectionReceipt.responsibilityId)は「後から埋める任意の
+ * 逆参照」であり、削除順序の制約にはしない。代わりに、削除実行の直前に
+ * これらのNULL可能な列を対象行についてNULLへ更新してから通常の削除順序を
+ * 実行することで、循環を安全に断ち切る(nullOutNullableBackReferences関数)。
+ * 自己参照(同一テーブル内の列)も同様に順序制約から除外する。
+ * これでもなお解決できない循環(NOT NULL列同士の真の循環)が万一存在する
+ * 場合は、想像で強制解決せずエラーとして停止する。
  */
 function topologicalDeleteOrder(edges: ForeignKeyEdge[]): string[] {
   const allTables = new Set<string>();
@@ -89,6 +106,7 @@ function topologicalDeleteOrder(edges: ForeignKeyEdge[]): string[] {
   }
   for (const e of edges) {
     if (e.tableName === e.referencedTableName) continue; // 自己参照は順序制約にならない。
+    if (e.isNullable) continue; // NULL可能な逆参照は別途null-outで処理する。
     outgoing.get(e.tableName)!.push(e.referencedTableName);
     inDegree.set(e.referencedTableName, (inDegree.get(e.referencedTableName) ?? 0) + 1);
   }
@@ -109,7 +127,7 @@ function topologicalDeleteOrder(edges: ForeignKeyEdge[]): string[] {
   if (order.length !== allTables.size) {
     const stuck = [...allTables].filter((t) => !order.includes(t));
     throw new Error(
-      `[purgeJob] 外部キーの循環参照を検出したため削除順序を確定できません。対象テーブル: ${stuck.join(", ")}`,
+      `[purgeJob] NOT NULL外部キーの循環参照を検出したため削除順序を確定できません。対象テーブル: ${stuck.join(", ")}`,
     );
   }
   return order;
@@ -123,6 +141,17 @@ export interface PurgeScopeTable {
   scopeKind: "workspace" | "user";
 }
 
+export interface NullableBackReference {
+  tableName: string;
+  /** NULLへ更新する対象列(NULL可能な逆参照FK)。 */
+  columnName: string;
+  /** そのテーブル自身の絞り込み列・スコープ(このテーブル自身がworkspace/user
+   *  スコープを持たない場合はnull——そのようなテーブルは購入対象外テーブル
+   *  なので実際には到達しない)。 */
+  filterColumn: string;
+  scopeKind: "workspace" | "user";
+}
+
 /**
  * FKグラフから、削除対象スコープ(各テーブル・絞り込み列・削除順序)を
  * 算出する。`workspaces`を直接参照する列を持つテーブルは"workspace"
@@ -132,7 +161,11 @@ export interface PurgeScopeTable {
  * user-scoped側は、UserSession等workspaceを経由しない真にuser単体の
  * テーブルのためだけに使う)。
  */
-export async function computePurgeScope(): Promise<{ order: PurgeScopeTable[]; deleteOrder: string[] }> {
+export async function computePurgeScope(): Promise<{
+  order: PurgeScopeTable[];
+  deleteOrder: string[];
+  nullableBackReferences: NullableBackReference[];
+}> {
   const edges = await discoverForeignKeyEdges();
   const deleteOrder = topologicalDeleteOrder(edges);
 
@@ -151,23 +184,40 @@ export async function computePurgeScope(): Promise<{ order: PurgeScopeTable[]; d
     }
   }
 
+  function scopeOf(tableName: string): { filterColumn: string; scopeKind: "workspace" | "user" } | null {
+    const wsCol = workspaceFilterColumnByTable.get(tableName);
+    if (wsCol) return { filterColumn: wsCol, scopeKind: "workspace" };
+    const userCol = userFilterColumnByTable.get(tableName);
+    if (userCol) return { filterColumn: userCol, scopeKind: "user" };
+    return null;
+  }
+
   const order: PurgeScopeTable[] = [];
   for (const tableName of deleteOrder) {
     if (tableName === "workspaces" || tableName === "users") continue; // 最後に個別処理する。
-    const wsCol = workspaceFilterColumnByTable.get(tableName);
-    if (wsCol) {
-      order.push({ tableName, filterColumn: wsCol, scopeKind: "workspace" });
-      continue;
+    const scope = scopeOf(tableName);
+    if (scope) {
+      order.push({ tableName, filterColumn: scope.filterColumn, scopeKind: scope.scopeKind });
     }
-    const userCol = userFilterColumnByTable.get(tableName);
-    if (userCol) {
-      order.push({ tableName, filterColumn: userCol, scopeKind: "user" });
-    }
-    // どちらも無いテーブル(workspaces/usersを一切参照しない、真にグローバルな
-    // 参照データ)は対象外のまま(想像で無関係なテーブルへ絞り込み条件を
-    // 発明しない)。
+    // どちらのスコープも無いテーブル(workspaces/usersを一切参照しない、
+    // 真にグローバルな参照データ)は対象外のまま(想像で無関係なテーブルへ
+    // 絞り込み条件を発明しない)。
   }
-  return { order, deleteOrder };
+
+  // [循環を断ち切るためNULLへ更新する対象列] topologicalDeleteOrderが順序
+  // 制約から除外したNULL可能なエッジのうち、テーブル自身がworkspace/user
+  // スコープを持つもののみを対象にする(それ以外は削除対象外テーブルの
+  // ため実際には到達しない)。
+  const nullableBackReferences: NullableBackReference[] = [];
+  for (const e of edges) {
+    if (e.tableName === e.referencedTableName) continue;
+    if (!e.isNullable) continue;
+    const scope = scopeOf(e.tableName);
+    if (!scope) continue;
+    nullableBackReferences.push({ tableName: e.tableName, columnName: e.columnName, filterColumn: scope.filterColumn, scopeKind: scope.scopeKind });
+  }
+
+  return { order, deleteOrder, nullableBackReferences };
 }
 
 /** [防御的検証] information_schema由来とはいえ、生SQLへ埋め込む識別子は
@@ -242,12 +292,29 @@ export interface PurgeExecutionResult {
  * 実削除。1ユーザーにつき1 transactionで全テーブル+workspace行+user行を
  * 削除する(全体が1つの原子的操作、途中で1つでも失敗すれば全体をrollbackし、
  * 部分的な物理削除を絶対に残さない)。
+ *
+ * [循環の断ち切り・実DB検証で発見・是正] 通常の削除ループの前に、NULL可能な
+ * 逆参照列(例: Responsibility.supersededByReceiptId)を対象行についてNULLへ
+ * 更新する。これにより、その列が指していたテーブル(例: Responsibility
+ * CorrectionReceipt)を後続の通常順序で安全に削除できる(この更新も同一
+ * transaction内のため、原子性は保たれる)。
  */
 export async function executePurgeForUser(target: EligibleUserForPurge): Promise<PurgeExecutionResult> {
-  const { order } = await computePurgeScope();
+  const { order, nullableBackReferences } = await computePurgeScope();
   const perTable: PurgeTableCount[] = [];
 
   await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    for (const n of nullableBackReferences) {
+      assertSafeIdentifier(n.tableName);
+      assertSafeIdentifier(n.columnName);
+      assertSafeIdentifier(n.filterColumn);
+      const values = n.scopeKind === "workspace" ? target.workspaceIds : [target.userId];
+      if (values.length === 0) continue;
+      await tx.$executeRawUnsafe(
+        `UPDATE "${n.tableName}" SET "${n.columnName}" = NULL WHERE "${n.filterColumn}" = ANY($1) AND "${n.columnName}" IS NOT NULL`,
+        values,
+      );
+    }
     for (const t of order) {
       assertSafeIdentifier(t.tableName);
       assertSafeIdentifier(t.filterColumn);
