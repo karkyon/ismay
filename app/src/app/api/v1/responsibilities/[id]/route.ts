@@ -392,6 +392,9 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     debugServer.event("DELETE /responsibilities/[id]", "RESPONSIBILITY_DELETED", { aggregateId: id });
   });
 
-  // DB設計書v1.1 8章: 通常削除はdeleted_at。30日後にPurge Job(未実装、次回対応)。
+  // DB設計書v1.1 8章: 通常削除はdeleted_at。30日後にPurge Job。
+  // [2026-09-25注記] アカウント単位の30日Purgeは実装済み(CLI限定、lib/admin/purgeJob.ts)。
+  // このResponsibility単体のsoft deleteに対する30日Purgeは未実装
+  // (docs/decisions/DEC-PURGE-02B.md §4.8)。
   return apiOk({ deleted: true });
 }

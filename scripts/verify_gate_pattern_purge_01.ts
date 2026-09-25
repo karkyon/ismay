@@ -276,7 +276,11 @@ async function main(): Promise<void> {
 
     const responsibilityCountBefore = await db.responsibility.count({ where: { workspaceId: eligibleUser1.workspaceId } });
     const patternCountBefore = await db.casePattern.count({ where: { workspaceId: eligibleUser1.workspaceId } });
-    const dryRunResult = await dryRunPurgeForUser(target1);
+    // [PURGE-ELIGIBILITY-02C・2026-09-25] dry-run/executeはuserIdだけを受け取り、
+    // transaction内で適格性とmembershipを再評価する(一覧の配列を削除根拠にしない)。
+    const dryRunPlan = await dryRunPurgeForUser({ userId: target1.userId });
+    ok("[2] dry-runはtransaction内の再評価でもELIGIBLE", dryRunPlan.status === "ELIGIBLE", JSON.stringify(dryRunPlan).slice(0, 300));
+    const dryRunResult = dryRunPlan.status === "ELIGIBLE" ? dryRunPlan.manifest.perTable : [];
     const responsibilityCountAfterDryRun = await db.responsibility.count({ where: { workspaceId: eligibleUser1.workspaceId } });
     const patternCountAfterDryRun = await db.casePattern.count({ where: { workspaceId: eligibleUser1.workspaceId } });
     ok("[2] dry-run後もResponsibility行数は変化しない(何も削除しない)", responsibilityCountBefore === responsibilityCountAfterDryRun && responsibilityCountBefore > 0, `before=${responsibilityCountBefore} after=${responsibilityCountAfterDryRun}`);
@@ -287,8 +291,13 @@ async function main(): Promise<void> {
     const dryRunPatternRow = dryRunResult.find((r) => r.tableName === "case_patterns");
     ok("[2] dry-runのcase_patterns件数が実際の行数と一致する(動的FK発見でGate 3〜11の新設テーブルも捕捉)", dryRunPatternRow?.count === patternCountBefore, JSON.stringify(dryRunPatternRow));
 
-    const executeResult = await executePurgeForUser(target1);
-    ok("[3] 実削除件数がdry-runの合計と一致する", executeResult.totalRowsDeleted === dryRunResult.reduce((s, r) => s + r.count, 0), `execute=${executeResult.totalRowsDeleted}`);
+    const executeResult = await executePurgeForUser({ userId: target1.userId }, { expected: dryRunPlan.status === "ELIGIBLE" ? dryRunPlan.manifest : null });
+    // [PURGE-REPORT-02E] rowsDeletedはworkspace行・user行を含む総削除数。dry-runの同じ定義と比較する。
+    ok(
+      "[3] 実削除件数がdry-runの合計と一致する",
+      executeResult.status === "PURGED" && dryRunPlan.status === "ELIGIBLE" && executeResult.manifest.totals.rowsDeleted === dryRunPlan.manifest.totals.rowsDeleted && executeResult.manifest.digest === dryRunPlan.manifest.digest,
+      JSON.stringify(executeResult).slice(0, 300),
+    );
 
     const responsibilityCountAfter = await db.responsibility.count({ where: { workspaceId: eligibleUser1.workspaceId } });
     const patternCountAfter = await db.casePattern.count({ where: { workspaceId: eligibleUser1.workspaceId } });
@@ -318,8 +327,16 @@ async function main(): Promise<void> {
     const activeUserResponsibilityCount = await db.responsibility.count({ where: { workspaceId: activeUser.workspaceId } });
     ok("[4] 有効なユーザーのResponsibilityは影響を受けない", activeUserResponsibilityCount === 1, `count=${activeUserResponsibilityCount}`);
 
-    const executeResult2 = await executePurgeForUser(target2);
-    ok("[5] 2件目も正常に実行できる", executeResult2.totalRowsDeleted > 0, `total=${executeResult2.totalRowsDeleted}`);
+    const executeResult2 = await executePurgeForUser({ userId: target2.userId });
+    ok("[5] 2件目も正常に実行できる", executeResult2.status === "PURGED" && executeResult2.manifest.totals.rowsDeleted > 0, JSON.stringify(executeResult2).slice(0, 300));
+    // [PURGE-SCOPE-02F] 循環遮断のNULL化はsupersededBy*の2列だけで、件数はrowsUpdatedとして別計上される。
+    ok(
+      "[6] 循環遮断(supersededByReceiptId/supersededByMergeReceiptId)が各1件、削除とは別に計上される",
+      executeResult2.status === "PURGED" &&
+        executeResult2.manifest.cycleBreakUpdates.length === 2 &&
+        executeResult2.manifest.cycleBreakUpdates.every((u) => u.tableName === "responsibilities" && u.count === 1),
+      executeResult2.status === "PURGED" ? JSON.stringify(executeResult2.manifest.cycleBreakUpdates) : "",
+    );
     const eligibleUser2FinalCheck = await db.user.findUnique({ where: { id: eligibleUser2.userId } });
     ok("[5] 2件目のuser行も消える", eligibleUser2FinalCheck === null, "");
 
