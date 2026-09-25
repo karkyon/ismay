@@ -1,19 +1,33 @@
 import type { NextRequest } from "next/server";
+import { db } from "@/lib/db";
 import { requireAuth, requireCsrf } from "@/lib/auth/guard";
-import { ensureDefaultWorkspace } from "@/lib/workspace";
-import { apiOk, apiError } from "@/lib/auth/response";
-import { requireAdminConsoleRole } from "@/lib/auth/roleGuard";
-import { findEligibleUsersForPurge, dryRunPurgeForUser } from "@/lib/admin/purgeJob";
+import { apiError } from "@/lib/auth/response";
 
 /**
  * POST /api/v1/admin/purge/dry-run(PATTERN-PURGE-01新設・2026-09-19)。
- * 出典: `auth/account/delete/route.ts`コメント「30日後にPurge Job」
- * (DB設計書8章)、README.md「既知の未完了・保留事項」。
  *
- * [何も削除しない] 対象(deletedAtから30日以上経過した全ユーザー)ごとに、
- * 各テーブルで削除対象となる行数のみを数えて返す。実行前に必ずこの結果を
- * 確認できるようにする(不可逆な物理削除を無人で自動実行しない設計、
- * Gate 10のMANUAL_REBUILDと同じ管理者操作パターン)。
+ * [PURGE-SECURITY-02A・2026-09-20是正・P0是正] 実DB再監査(2026-09-19)で、
+ * この経路が「呼出者が自分の既定WorkspaceでOWNER/ADMINであること」しか
+ * 確認していないにもかかわらず、`findEligibleUsersForPurge()`は
+ * workspace条件なしで全workspaceの対象ユーザーを列挙していたことが判明した。
+ * 現状は各Workspaceの作成者が自動的にOWNERになる(招待機能未実装)ため、
+ * 事実上ほぼ全利用者が他テナントを含む全対象ユーザーのメールアドレス・
+ * 削除件数を閲覧できてしまう欠陥だった。
+ *
+ * `WorkspaceMember.role`(OWNER/ADMIN/MEMBER/VIEWER/SERVICE、
+ * `src/lib/auth/roleGuard.ts`)は単一Workspace内のMOD-10 Admin(AI Provider
+ * 設定等)向けに設計されたものであり、全テナント横断の操作を許可する
+ * 「プラットフォーム管理者」という概念はこのコードベース・正本のどこにも
+ * 定義されていない(調査済み・想像で発明しない)。この不一致を正しく解消
+ * するには、正本側でプラットフォーム管理者ロールの契約(Decision Record)を
+ * 確定させる必要があるが、それが無い間はHTTP経路を安全側でfail closedに
+ * するのが唯一の正しい対応である(監査資料の推奨方針に従う)。
+ *
+ * 運用者(サーバーへの直接アクセス権を持つ者)は、代わりに
+ * `scripts/run_account_purge.ts`をCLIから直接実行すること
+ * (dry-runと実削除が同一プロセス内・同一スナップショットで完結するため、
+ * このHTTP経路が抱えていたもう一つの問題——dry-run表示後に対象集合が
+ * 変わりうる——も合わせて解消される)。
  */
 export async function POST(req: NextRequest) {
   const auth = await requireAuth(req);
@@ -24,30 +38,19 @@ export async function POST(req: NextRequest) {
     return apiError("ACCESS_DENIED", "CSRFトークンが不正です");
   }
 
-  const { workspaceId } = await ensureDefaultWorkspace(auth.user.userId, auth.user.email);
-  const roleOk = await requireAdminConsoleRole({
-    userId: auth.user.userId,
-    workspaceId,
-    action: "ADMIN_PURGE_DRY_RUN",
+  await db.auditLog.create({
+    data: {
+      actorUserId: auth.user.userId,
+      actorType: "USER",
+      action: "ADMIN_PURGE_DRY_RUN",
+      targetType: "System",
+      targetId: null,
+      result: "FAILURE",
+      reason: "ACCESS_DENIED_PURGE_HTTP_DISABLED(PURGE-SECURITY-02A: プラットフォーム管理者契約が正本未確定のためHTTP経路をfail closed)",
+    },
   });
-  if (!roleOk) {
-    return apiError("ACCESS_DENIED", "この操作には管理者権限(OWNER/ADMIN)が必要です");
-  }
-
-  const eligible = await findEligibleUsersForPurge();
-  const results = [];
-  for (const target of eligible) {
-    const perTable = await dryRunPurgeForUser(target);
-    const totalRows = perTable.reduce((sum, t) => sum + t.count, 0);
-    results.push({
-      userId: target.userId,
-      email: target.email,
-      deletedAt: target.deletedAt.toISOString(),
-      workspaceCount: target.workspaceIds.length,
-      totalRowsWouldBeDeleted: totalRows,
-      perTable: perTable.filter((t) => t.count > 0),
-    });
-  }
-
-  return apiOk({ eligibleUserCount: eligible.length, results });
+  return apiError(
+    "ACCESS_DENIED",
+    "この操作はHTTP経由では実行できません。全テナント横断のPurgeを許可する「プラットフォーム管理者」権限が正本で未定義のため、Workspace OWNER/ADMIN権限のみでは実行できない設計へ変更しました。サーバーへの直接アクセス権を持つ運用者は scripts/run_account_purge.ts をCLIから実行してください。",
+  );
 }

@@ -208,7 +208,7 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 |---|---|
 | メールアドレス確認 | **未実装**。登録時に暫定的に即時検証済み扱い(`register/route.ts`にコメント明記)。Notification基盤(provider)未確定のため |
 | 管理者ロール(RBAC) | **実装済み**(Gate SECURITY-RBAC-01)。統合正本仕様書v5.0 §20.2の正式語彙(`OWNER/ADMIN/MEMBER/VIEWER/SERVICE`)に基づき、管理API5エンドポイント(`/api/v1/admin/ai-providers`GET/PATCH、`/api/v1/admin/ai-providers/credentials`PUT/DELETE、`/api/v1/admin/ai-usage`GET)をOWNER/ADMINへ限定(`lib/auth/roleGuard.ts`)。拒否時はAuditLogへ記録。現状メンバー招待機能が未実装のため、各Workspaceの唯一のmemberは常にOWNERであり、単一利用者運用に挙動変化はない(招待機能実装への先行防御)。`/api/v1/audit-logs`は本人スコープの自己監査ログのため対象外(意図的) |
-| 30日Purge Job | **未実装**。アカウント削除はsoft delete(`deletedAt`)まで。物理削除ジョブは別途スケジュール実装が必要 |
+| 30日Purge Job | **実装済み(CLI限定)**。アカウント削除は`deletedAt`によるsoft delete後、30日経過で物理削除対象になる(`lib/admin/purgeJob.ts`、94テーブル中の外部キーグラフを実行時に動的発見し削除順序・スコープを算出)。HTTP経路(`/api/v1/admin/purge/dry-run`・`execute`)は2026-09-20の実DB再監査でP0(全テナント横断の情報漏洩・物理削除を通常のWorkspace OWNER/ADMIN権限で実行できてしまう欠陥、正本にプラットフォーム管理者ロールの契約が無いことに起因)が判明したためfail closedにした。運用者は`scripts/run_account_purge.ts`をサーバー上でCLI直接実行すること(詳細は同ファイル冒頭コメント参照)。プラットフォーム管理者ロールの契約が正本で確定次第、HTTP経路の再開を検討する |
 | Case Pattern：残り4種のenqueue契機のうち2種 | **意図的に未配線のまま**。`PATTERN_REVISION_CHANGED`(Pattern編集APIが存在しない)・`EMBEDDING_SOURCE_VERSION_CHANGED`(コード内固定定数で実行時APIが無い)は、対応する実在のtrigger配線元が無いことを個別調査済み。架空のAPIを想像で発明しない方針のため、値の宣言のみ残し未配線(`EMBEDDING_MODEL_CHANGED`/`MANUAL_REBUILD`はGate PATTERN-DETECT-TRIGGERS-03で配線済み、詳細は`lib/patterns/casePatternTriggers.ts`冒頭コメント参照) |
 | Case Pattern：採用率計算の窓 | **意図的に全履歴ベース**。「直近N件」の定義が正本に無いため、想像で期間・件数を発明せず全履歴を対象とする設計(`casePatternSuggestion.ts`のモジュールコメント参照) |
 | Metric Catalog(v4.0 10.3節の残り9指標) | **意図的に保留**。登録済みは1指標のみ。分子・分母・除外・品質等の完全な文言が業務判断待ちとコード内に明記済み |
