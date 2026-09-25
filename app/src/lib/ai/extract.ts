@@ -263,8 +263,11 @@ async function persistSuccess(
   attachToSessionId?: string,
 ): Promise<number> {
   const { count, checkpointId } = await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    // [PURGE-SCOPE-03A] event_logs/outbox_events/ai_runsの明示的scope列(DB triggerで必須)。
+    const { workspaceId: captureWorkspaceId } = await tx.capture.findUniqueOrThrow({ where: { id: captureId }, select: { workspaceId: true } });
     const run = await tx.aiRun.create({
       data: {
+        workspaceId: captureWorkspaceId,
         captureId,
         provider: ai.providerName,
         model: ai.modelName,
@@ -305,6 +308,7 @@ async function persistSuccess(
 
     await tx.eventLog.create({
       data: {
+        workspaceId: captureWorkspaceId,
         aggregateType: "Capture",
         aggregateId: captureId,
         eventType: "INFERENCE_READY",
@@ -316,6 +320,7 @@ async function persistSuccess(
     if (updated.count > 0) {
       await tx.outboxEvent.create({
         data: {
+          workspaceId: captureWorkspaceId,
           eventName: "InferenceReady.v1",
           eventVersion: "1",
           aggregateId: captureId,
@@ -367,8 +372,11 @@ async function persistFailure(
   batch = false,
 ): Promise<void> {
   await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    // [PURGE-SCOPE-03A] event_logs/outbox_events/ai_runsの明示的scope列(DB triggerで必須)。
+    const { workspaceId: captureWorkspaceId } = await tx.capture.findUniqueOrThrow({ where: { id: captureId }, select: { workspaceId: true } });
     await tx.aiRun.create({
       data: {
+        workspaceId: captureWorkspaceId,
         captureId,
         provider: ai.providerName,
         model: ai.modelName,
@@ -392,6 +400,7 @@ async function persistFailure(
 
     await tx.eventLog.create({
       data: {
+        workspaceId: captureWorkspaceId,
         aggregateType: "Capture",
         aggregateId: captureId,
         eventType: "CAPTURE_ANALYSIS_FAILED",
@@ -405,12 +414,15 @@ async function persistFailure(
 /** ai_runすら作れない(Domain policy/consent拒否)場合の失敗記録。aiRunは残さない。 */
 async function markFailed(captureId: string, processingVersion: number, reason: string): Promise<void> {
   await db.$transaction(async (tx: Prisma.TransactionClient) => {
+    // [PURGE-SCOPE-03A] event_logs/outbox_events/ai_runsの明示的scope列(DB triggerで必須)。
+    const { workspaceId: captureWorkspaceId } = await tx.capture.findUniqueOrThrow({ where: { id: captureId }, select: { workspaceId: true } });
     await tx.capture.updateMany({
       where: { id: captureId, version: processingVersion, processingStatus: "PROCESSING" },
       data: { processingStatus: "FAILED", version: { increment: 1 } },
     });
     await tx.eventLog.create({
       data: {
+        workspaceId: captureWorkspaceId,
         aggregateType: "Capture",
         aggregateId: captureId,
         eventType: "CAPTURE_ANALYSIS_FAILED",

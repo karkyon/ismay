@@ -158,6 +158,8 @@ async function main(): Promise<void> {
   }) {
     const aiRun = await db.aiRun.create({
       data: {
+        // [PURGE-SCOPE-03A] ai_runs.workspace_idは明示的scope列(DB triggerで必須)。
+        workspaceId: (await db.capture.findUniqueOrThrow({ where: { id: params.captureId }, select: { workspaceId: true } })).workspaceId,
         captureId: params.captureId,
         provider: "anthropic",
         model: "claude-haiku-4-5-20251001",

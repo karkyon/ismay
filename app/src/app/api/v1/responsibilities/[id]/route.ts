@@ -328,6 +328,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
   await db.eventLog.create({
     data: {
+      workspaceId,
       aggregateType: "Responsibility",
       aggregateId: id,
       eventType: "RESPONSIBILITY_CHANGED",
@@ -375,6 +376,7 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     });
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Responsibility",
         aggregateId: id,
         eventType: "RESPONSIBILITY_DELETED",

@@ -183,6 +183,12 @@ model Workspace {
   casePatternActionSlots CasePatternActionSlot[]
   /// [PATTERN-ACTIONSLOT-LEARN-01新設・2026-09-17]
   casePatternActionSlotLearnJobs CasePatternActionSlotLearnJob[]
+  /// [PURGE-SCOPE-03A新設・2026-09-25] 30日Purgeの明示的scope列からの逆relation。
+  eventLogs              EventLog[]
+  outboxEvents           OutboxEvent[]
+  jobs                   Job[]
+  consents               Consent[]
+  aiRuns                 AiRun[]
 
   @@map("workspaces")
 }
@@ -633,8 +639,13 @@ model EventLog {
   reason        String?
   correlationId String?  @map("correlation_id")
   occurredAt    DateTime @default(now()) @map("occurred_at")
+  /// [PURGE-SCOPE-03A新設・2026-09-25] 30日Purgeの明示的scope列(DEC-PURGE-02B)。新規行はDB trigger
+  /// (ismay_require_workspace_scope)で必須。backfillで解決できなかった旧行のみNULL。
+  workspaceId   String?    @map("workspace_id")
+  workspace     Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([aggregateType, aggregateId])
+  @@index([workspaceId])
   @@map("event_logs")
 }
 
@@ -652,8 +663,13 @@ model OutboxEvent {
   status           String    @default("PENDING")
   publishedAt      DateTime? @map("published_at")
   createdAt        DateTime  @default(now()) @map("created_at")
+  /// [PURGE-SCOPE-03A新設・2026-09-25] 30日Purgeの明示的scope列(DEC-PURGE-02B)。新規行はDB trigger
+  /// (ismay_require_workspace_scope)で必須。backfillで解決できなかった旧行のみNULL。
+  workspaceId      String?    @map("workspace_id")
+  workspace        Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([status, createdAt])
+  @@index([workspaceId])
   @@map("outbox_events")
 }
 
@@ -672,9 +688,14 @@ model Job {
   payload       Json?
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
+  /// [PURGE-SCOPE-03A新設・2026-09-25] 30日Purgeの明示的scope列(DEC-PURGE-02B)。新規行はDB trigger
+  /// (ismay_require_workspace_scope)で必須。backfillで解決できなかった旧行のみNULL。
+  workspaceId   String?    @map("workspace_id")
+  workspace     Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([jobType, aggregateId, sourceVersion])
   @@index([status, nextRunAt])
+  @@index([workspaceId])
   @@map("jobs")
 }
 
@@ -716,6 +737,9 @@ model AiRun {
   /// PEM呼び出しはCaptureを持たないため、admin/ai-usage APIの集計から漏れないよう
   /// 直接workspaceIdを持たせる(MVPは1ユーザー=1 Workspace固定のため矛盾は生じない)。
   workspaceId        String?   @map("workspace_id")
+  /// [PURGE-SCOPE-03A新設・2026-09-25] workspace_idへFK(既存孤立値があり得るためDB側はNOT VALID)。
+  /// 新規行はDB trigger(ismay_require_workspace_scope)でworkspace_id必須。
+  workspace          Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   provider           String
   model              String
   promptVersion      String    @map("prompt_version")
@@ -747,6 +771,7 @@ model AiRun {
   /// 業務上は1 AiRunにつき最大1件(formation_shadow_checkpoints_ai_run_uqで保証)。
   shadowCheckpoints FormationShadowCheckpoint[]
 
+  @@index([workspaceId])
   @@map("ai_runs")
 }
 
@@ -1549,9 +1574,14 @@ model Consent {
   grantedAt   DateTime  @default(now()) @map("granted_at")
   expiresAt   DateTime? @map("expires_at")
   withdrawnAt DateTime? @map("withdrawn_at")
+  /// [PURGE-SCOPE-03A新設・2026-09-25] 30日Purgeの明示的scope列(DEC-PURGE-02B)。新規行はDB trigger
+  /// (ismay_require_workspace_scope)で必須。backfillで解決できなかった旧行のみNULL。
+  workspaceId String?    @map("workspace_id")
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   captures Capture[]
 
+  @@index([workspaceId])
   @@map("consents")
 }
 

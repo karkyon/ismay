@@ -29,9 +29,22 @@ export async function relayOutboxToJobs(): Promise<{ relayed: number }> {
   for (const event of pending) {
     const jobType = RELAYED_EVENT_TO_JOB_TYPE[event.eventName];
     try {
+      // [PURGE-SCOPE-03A] jobs.workspace_idは明示的scope列(DB triggerで必須)。
+      // 03A以降のOutboxEventは自身のworkspaceIdを持つ。03A以前に作られbackfillでも
+      // 解決できなかった旧行(集約が既に存在しない)は、Job化できないためFAILEDにする。
+      const workspaceId =
+        event.workspaceId ??
+        (await db.capture.findUnique({ where: { id: event.aggregateId }, select: { workspaceId: true } }))?.workspaceId ??
+        null;
+      if (!workspaceId) {
+        await db.outboxEvent.update({ where: { id: event.id }, data: { status: "FAILED" } });
+        debugServer.error("Worker/relay", "workspaceを解決できないOutboxEvent(集約が存在しない旧行)をFAILEDにしました", { eventId: event.id, aggregateId: event.aggregateId });
+        continue;
+      }
       await db.$transaction(async (tx: Prisma.TransactionClient) => {
         await tx.job.create({
           data: {
+            workspaceId,
             jobType,
             aggregateId: event.aggregateId,
             sourceVersion: event.aggregateVersion,

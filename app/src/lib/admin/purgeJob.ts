@@ -35,6 +35,14 @@
  * 対象なし・未削除(復元済み)・30日未満・共有workspace・外部NOT NULL参照・
  * lock競合は、いずれも副作用0の明示的な結果(PurgeRefusal)として返す。
  *
+ * [PURGE-SCOPE-03A・2026-09-25] DEC-PURGE-02Bの利用者決定により、FKを持たなかった
+ * event_logs/outbox_events/jobs/consentsへ明示的scope列(workspace_id→workspaces FK)を
+ * 追加し、ai_runs.workspace_idにもFKを張った(migration 20260925010000_purge_scope_03a)。
+ * これらはFKグラフ経由で自動的にworkspace scopeの削除対象になる。FKで到達しない表は
+ * audit_logsだけになり、DEC-PURGE-02B §4.5(B)に従い行を保持して、本人に関係する行の
+ * 接続元IP(ip_address)を墨消しする(RETAINED_AUDIT_REDACTION)。backfillで解決できな
+ * かった旧行(明示的scope列がNULL)はcountLegacyUnscopedRowsで件数を表示する。
+ *
  * [PURGE-REPORT-02E] 件数は「表ごとの削除」「workspace行」「user行」
  * 「循環遮断のNULL化」「外部参照の匿名化」を別フィールドで返し、物理削除の
  * 総数(rowsDeleted)と更新の総数(rowsUpdated)を区別する。dry-runとexecuteは
@@ -206,6 +214,43 @@ export async function computePurgeScope(): Promise<PurgeScope> {
     retainedUnscopedTables: tables.filter((t) => !chain.has(t) && !isRootTable(t)),
     pkByTable,
   };
+}
+
+/**
+ * DEC-PURGE-02B §4.5(推奨B。2026-09-25利用者決定で明示的scope列方式を採用した際に
+ * 併せて採用): audit_logsは法的・安全目的の監査証跡として行を保持し(DOC-09 §1)、
+ * 本人が行為者または対象である行の接続元IPを墨消しする。行為者参照(actor_user_id)の
+ * NULL化は外部参照の匿名化(ANONYMIZE_EXTERNAL_REFERENCE)として別途行われる。
+ */
+const RETAINED_AUDIT_REDACTION = {
+  tableName: "audit_logs",
+  columnNames: ["ip_address"],
+  referencedTableName: "users",
+  whereSql: `("actor_user_id" = $1 OR ("target_type" = 'User' AND "target_id" = $1)) AND "ip_address" IS NOT NULL`,
+} as const;
+
+export interface LegacyUnscopedCount {
+  tableName: string;
+  columnName: string;
+  count: number;
+}
+
+/**
+ * [PURGE-SCOPE-03A] 明示的scope列がNULLの旧行(migration時のbackfillで集約を
+ * 解決できなかった行。集約自体が既に存在しない孤立行)の件数。これらはどの
+ * ユーザーのPurgeでも到達できないため、運用者へ件数を示す(削除はしない)。
+ */
+export async function countLegacyUnscopedRows(scope?: PurgeScope): Promise<LegacyUnscopedCount[]> {
+  const s = scope ?? (await computePurgeScope());
+  const result: LegacyUnscopedCount[] = [];
+  for (const t of s.deleteOrder) {
+    if (!t.link.explicitScopeColumn) continue;
+    const columnName = t.link.constraint.columns[0];
+    assertSafeIdentifier(columnName);
+    const rows = await db.$queryRawUnsafe<{ count: bigint }[]>(`SELECT COUNT(*)::bigint AS count FROM "${t.tableName}" WHERE "${columnName}" IS NULL`);
+    result.push({ tableName: t.tableName, columnName, count: Number(rows[0]?.count ?? 0) });
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +519,7 @@ interface PlanOutcome {
   plannedPerTable: PurgeTableCount[];
   plannedCycleBreaks: PurgeColumnUpdateCount[];
   plannedAnonymized: { constraint: FkConstraint; count: number }[];
+  plannedRedactions: PurgeColumnUpdateCount[];
 }
 
 async function planInTransaction(tx: Prisma.TransactionClient, scope: PurgeScope, eligibility: EligibilityOk): Promise<PlanOutcome> {
@@ -503,6 +549,20 @@ async function planInTransaction(tx: Prisma.TransactionClient, scope: PurgeScope
     }
   }
 
+  const plannedRedactions: PurgeColumnUpdateCount[] = [];
+  if (scope.retainedUnscopedTables.includes(RETAINED_AUDIT_REDACTION.tableName)) {
+    const count = await countOf(tx, `SELECT COUNT(*)::bigint AS count FROM "${RETAINED_AUDIT_REDACTION.tableName}" WHERE ${RETAINED_AUDIT_REDACTION.whereSql}`, eligibility.userId);
+    if (count > 0) {
+      plannedRedactions.push({
+        tableName: RETAINED_AUDIT_REDACTION.tableName,
+        columnNames: [...RETAINED_AUDIT_REDACTION.columnNames],
+        referencedTableName: RETAINED_AUDIT_REDACTION.referencedTableName,
+        reason: "REDACT_RETAINED_AUDIT",
+        count,
+      });
+    }
+  }
+
   const plannedPerTable = scope.deleteOrder.map((t) => ({ tableName: t.tableName, scopeKind: t.scopeKind, count: ctx.snapshotCount.get(t.tableName) ?? 0 }));
 
   const refusal: PurgeRefusal | null =
@@ -513,7 +573,7 @@ async function planInTransaction(tx: Prisma.TransactionClient, scope: PurgeScope
           detail: `削除対象外の行からNOT NULL外部キーで参照されているため削除しません(他人のデータを巻き込む恐れ): ${externalNotNull.join(" / ")}`,
         }
       : null;
-  return { refusal, ctx, plannedPerTable, plannedCycleBreaks, plannedAnonymized };
+  return { refusal, ctx, plannedPerTable, plannedCycleBreaks, plannedAnonymized, plannedRedactions };
 }
 
 function buildManifest(
@@ -524,6 +584,7 @@ function buildManifest(
   userRowsDeleted: number,
   cycleBreakUpdates: PurgeColumnUpdateCount[],
   anonymizedReferences: PurgeColumnUpdateCount[],
+  redactedRetainedRows: PurgeColumnUpdateCount[],
 ): PurgeManifest {
   return finalizeManifest({
     userId: eligibility.userId,
@@ -535,6 +596,7 @@ function buildManifest(
     userRowsDeleted,
     cycleBreakUpdates,
     anonymizedReferences,
+    redactedRetainedRows,
     retainedUnscopedTables: scope.retainedUnscopedTables,
   });
 }
@@ -573,6 +635,7 @@ export async function dryRunPurgeForUser(request: PurgeRequest, options: PurgeRu
             reason: "ANONYMIZE_EXTERNAL_REFERENCE" as const,
             count,
           })),
+          plan.plannedRedactions,
         );
         throw new DryRunRollback({ status: "ELIGIBLE", manifest });
       },
@@ -612,6 +675,13 @@ export async function executePurgeForUser(request: PurgeRequest, options: PurgeE
         if (plan.refusal) return plan.refusal;
         const { ctx } = plan;
 
+        // 0) 保持するaudit_logsの墨消し(行為者参照のNULL化より前に、本人の行を特定できるうちに行う)。
+        const redactedRetainedRows: PurgeColumnUpdateCount[] = [];
+        for (const planned of plan.plannedRedactions) {
+          const setSql = planned.columnNames.map((col) => `${q(col)} = NULL`).join(", ");
+          const count = await tx.$executeRawUnsafe(`UPDATE ${q(planned.tableName)} SET ${setSql} WHERE ${RETAINED_AUDIT_REDACTION.whereSql}`, eligibility.userId);
+          redactedRetainedRows.push({ ...planned, count });
+        }
         // 1) 外部(snapshot外)からのNULL可能参照を匿名化する。
         const anonymizedReferences: PurgeColumnUpdateCount[] = [];
         for (const { constraint: c } of plan.plannedAnonymized) {
@@ -644,7 +714,7 @@ export async function executePurgeForUser(request: PurgeRequest, options: PurgeE
         );
         const userRowsDeleted = await tx.$executeRawUnsafe(`DELETE FROM "users" AS t USING ${ctx.snapshotName.get("users")} s WHERE t."id" = s."id"`);
 
-        const manifest = buildManifest(scope, eligibility, perTable, workspaceRowsDeleted, userRowsDeleted, cycleBreakUpdates, anonymizedReferences);
+        const manifest = buildManifest(scope, eligibility, perTable, workspaceRowsDeleted, userRowsDeleted, cycleBreakUpdates, anonymizedReferences, redactedRetainedRows);
         const expected = options.expected ?? null;
         return {
           status: "PURGED",

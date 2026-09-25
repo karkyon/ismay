@@ -393,6 +393,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
       await tx.eventLog.create({
         data: {
+          workspaceId,
           aggregateType: "Responsibility",
           aggregateId: created.id,
           eventType: "AI_CANDIDATE_DECIDED",
@@ -407,6 +408,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
       await tx.outboxEvent.create({
         data: {
+          workspaceId,
           eventName: "ResponsibilityCreated.v1",
           eventVersion: "1",
           aggregateId: created.id,

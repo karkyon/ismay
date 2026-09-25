@@ -92,6 +92,7 @@ export async function DELETE(
 
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "ProjectContextResponsibilityUnlinked.v1",
         eventVersion: "1",
         aggregateId: contextId,

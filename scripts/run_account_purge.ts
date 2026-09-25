@@ -31,10 +31,11 @@
  *   - `--execute`時は対話的に確認文字列「物理削除」の入力を要求する。
  *   - 既定では最初の対象1件のみ。全件は`--all`、特定ユーザーは`--email=<address>`。
  *
- * [DEC-PURGE-02B・未決] FKで削除対象へ到達しない表(consents/event_logs/jobs/
- * outbox_events/audit_logs等)は現時点でPurgeの対象外であり、dry-run/実行結果に
- * 「保持表」として表示する(削除・匿名化・法定保持の契約は
- * docs/decisions/DEC-PURGE-02B.md で決定待ち)。
+ * [PURGE-SCOPE-03A・2026-09-25] DEC-PURGE-02Bの利用者決定により、event_logs/
+ * outbox_events/jobs/consents/ai_runsは明示的scope列(workspace_id)でPurge対象になった。
+ * FKで到達しない表はaudit_logsだけで、行は保持し(DOC-09 §1)、本人に関係する行の
+ * ip_addressを墨消しし、行為者参照(actor_user_id)をNULL化する。migration時のbackfillで
+ * 集約を解決できなかった旧行(明示的scope列がNULL)は件数を表示する(自動削除はしない)。
  *
  * 実行方法(dry-runのみ、既定):
  *   cd ~/projects/ismay/app
@@ -103,7 +104,7 @@ async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
 
   const { db } = await import("../app/src/lib/db");
-  const { findEligibleUsersForPurge, dryRunPurgeForUser } = await import("../app/src/lib/admin/purgeJob");
+  const { findEligibleUsersForPurge, dryRunPurgeForUser, countLegacyUnscopedRows } = await import("../app/src/lib/admin/purgeJob");
   const { collectPurgeRunContext, runPurgeItem } = await import("../app/src/lib/admin/purgeRunner");
   const { maskEmail, summarizePurgeOutcomes, PURGE_EXIT } = await import("../app/src/lib/admin/purgeReporting");
   type Manifest = import("../app/src/lib/admin/purgeJob").PurgeManifest;
@@ -152,10 +153,17 @@ async function main(): Promise<number> {
       for (const t of m.perTable) if (t.count > 0) console.log(`      削除 ${t.tableName}: ${t.count}件`);
       for (const u of m.cycleBreakUpdates) console.log(`      循環遮断NULL化 ${u.tableName}(${u.columnNames.join(",")}): ${u.count}件`);
       for (const u of m.anonymizedReferences) console.log(`      匿名化(参照NULL化・行は保持) ${u.tableName}(${u.columnNames.join(",")}): ${u.count}件`);
+      for (const u of m.redactedRetainedRows) console.log(`      保持表の墨消し ${u.tableName}(${u.columnNames.join(",")}): ${u.count}件`);
     }
     if (retainedTables.length > 0) {
       console.log(
-        `\n[注意・DEC-PURGE-02B未決] 次の表はFKで削除対象へ到達しないためPurgeでは触れません(個人識別子・payloadが残り得る): ${retainedTables.join(", ")}`,
+        `\n[保持表・DEC-PURGE-02B §4.5] 次の表は行を保持します(行為者参照はNULL化、audit_logsのip_addressは墨消し): ${retainedTables.join(", ")}`,
+      );
+    }
+    const legacy = (await countLegacyUnscopedRows()).filter((l) => l.count > 0);
+    if (legacy.length > 0) {
+      console.log(
+        `[注意・PURGE-SCOPE-03A] 明示的scope列がNULLの旧行(migration時に集約を解決できなかった孤立行。どのユーザーのPurgeでも削除されません): ${legacy.map((l) => `${l.tableName}=${l.count}件`).join(", ")}`,
       );
     }
 

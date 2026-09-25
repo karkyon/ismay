@@ -147,6 +147,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
       await tx.outboxEvent.create({
         data: {
+          workspaceId,
           eventName: "ProjectContextResponsibilityLinked.v1",
           eventVersion: "1",
           aggregateId: contextId,

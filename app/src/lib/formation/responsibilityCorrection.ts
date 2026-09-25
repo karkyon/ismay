@@ -303,6 +303,7 @@ export async function splitResponsibility(params: SplitResponsibilityParams): Pr
 
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Responsibility",
         aggregateId: sourceResponsibilityId,
         eventType: "RESPONSIBILITY_SPLIT",
@@ -315,6 +316,7 @@ export async function splitResponsibility(params: SplitResponsibilityParams): Pr
     });
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "ResponsibilitySplit.v1",
         eventVersion: "1",
         aggregateId: sourceResponsibilityId,
@@ -668,6 +670,7 @@ export async function mergeResponsibilities(params: MergeResponsibilitiesParams)
 
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Responsibility",
         aggregateId: merged.id,
         eventType: "RESPONSIBILITY_MERGED",
@@ -680,6 +683,7 @@ export async function mergeResponsibilities(params: MergeResponsibilitiesParams)
     });
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "ResponsibilityMerged.v1",
         eventVersion: "1",
         aggregateId: merged.id,

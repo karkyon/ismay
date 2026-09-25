@@ -109,6 +109,7 @@ export async function POST(req: NextRequest) {
     // Event Code: DOC-02(用語・状態・EventCode定義書) 7.4節 Project Context Event。
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "ProjectContext",
         aggregateId: context.id,
         eventType: "CONTEXT_CREATED",
@@ -122,6 +123,7 @@ export async function POST(req: NextRequest) {
 
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "ProjectContextCreated.v1",
         eventVersion: "1",
         aggregateId: context.id,

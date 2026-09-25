@@ -312,6 +312,7 @@ async function resetForNextCycle(
 async function logGenerated(responsibilityId: string, workspaceId: string, mode: string): Promise<void> {
   await db.eventLog.create({
     data: {
+      workspaceId,
       aggregateType: "Responsibility",
       aggregateId: responsibilityId,
       eventType: "RECURRENCE_GENERATED",
@@ -321,6 +322,7 @@ async function logGenerated(responsibilityId: string, workspaceId: string, mode:
   });
   await db.outboxEvent.create({
     data: {
+      workspaceId,
       eventName: "RecurrenceGenerated.v1",
       eventVersion: "1",
       aggregateId: responsibilityId,

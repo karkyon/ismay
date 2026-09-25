@@ -221,6 +221,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Responsibility",
         aggregateId: id,
         eventType:
@@ -241,6 +242,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "ResponsibilityTransitioned.v1",
         eventVersion: "1",
         aggregateId: id,

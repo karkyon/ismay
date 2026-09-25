@@ -159,7 +159,7 @@ async function runOcrForCapture(captureId: string): Promise<OcrRunResult> {
   if (capture.processingPriority === "BATCH" && provider.submitOcrBatch) {
     const submitResult = await provider.submitOcrBatch({ images });
     if (!submitResult.ok) {
-      await persistOcrFailure(capture.id, processingVersion, provider, `Batch投入失敗: ${submitResult.message}`, undefined, true);
+      await persistOcrFailure(capture.id, capture.workspaceId, processingVersion, provider, `Batch投入失敗: ${submitResult.message}`, undefined, true);
       return { status: "FAILED", reason: `Batch投入失敗: ${submitResult.message}` };
     }
     debugServer.event("ocrImageJob", "BATCH_SUBMITTED", { captureId: capture.id, batchId: submitResult.batchId, pageCount: images.length });
@@ -198,7 +198,7 @@ export async function finalizeOcrBatchResult(
 ): Promise<OcrRunResult> {
   const provider = await getActiveOcrProvider(workspaceId);
   if (!provider.fetchOcrBatchResult) {
-    await persistOcrFailure(captureId, processingVersion, provider, "プロバイダーがBatch結果取得に対応していません", undefined, true);
+    await persistOcrFailure(captureId, workspaceId, processingVersion, provider, "プロバイダーがBatch結果取得に対応していません", undefined, true);
     return { status: "FAILED", reason: "プロバイダーがBatch結果取得に対応していません" };
   }
   const outcome = await provider.fetchOcrBatchResult(resultsUrl);
@@ -219,6 +219,7 @@ async function applyOcrOutcome(
   // 踏まえ、ここでも必ず設定する。
   const aiRun = await db.aiRun.create({
     data: {
+      workspaceId,
       captureId,
       provider: provider.providerName,
       model: provider.modelName,
@@ -260,6 +261,7 @@ async function applyOcrOutcome(
     });
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Capture",
         aggregateId: captureId,
         eventType: "CAPTURE_OCR_COMPLETED",
@@ -270,6 +272,7 @@ async function applyOcrOutcome(
     if (aiProcessingConsentGranted) {
       await tx.outboxEvent.create({
         data: {
+          workspaceId,
           eventName: "CaptureAnalysisRequested.v1",
           eventVersion: "1",
           aggregateId: captureId,
@@ -287,6 +290,7 @@ async function applyOcrOutcome(
 /** Batch投入自体が失敗した場合など、outcomeを経由しない失敗をAiRunへ記録しCaptureをFAILEDにする。 */
 async function persistOcrFailure(
   captureId: string,
+  workspaceId: string,
   processingVersion: number,
   provider: { providerName: string; modelName: string },
   reason: string,
@@ -295,6 +299,7 @@ async function persistOcrFailure(
 ): Promise<void> {
   await db.aiRun.create({
     data: {
+      workspaceId,
       captureId,
       provider: provider.providerName,
       model: provider.modelName,

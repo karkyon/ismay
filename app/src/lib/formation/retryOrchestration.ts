@@ -71,6 +71,7 @@ export async function orchestrateRetryAnalysis(params: { sessionId: string; work
       const newVersion = capture.version + 1;
       const job = await tx.job.create({
         data: {
+          workspaceId,
           jobType: "AI_EXTRACT",
           aggregateId: capture.id,
           sourceVersion: newVersion,

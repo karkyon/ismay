@@ -351,7 +351,7 @@ async function main(): Promise<void> {
     {
       const fx = await makeFixture("g");
       const consent = await db.consent.create({
-        data: { subjectId: fx.userId, purpose: "MEETING_RECORDING", scope: {}, grantedAt: new Date(), withdrawnAt: new Date() },
+        data: { workspaceId: fx.workspaceId, subjectId: fx.userId, purpose: "MEETING_RECORDING", scope: {}, grantedAt: new Date(), withdrawnAt: new Date() },
       });
       const seeded = await seedCheckpointFixture(fx, { sourceType: "MEETING", consentId: consent.id });
       const deniedBefore = denyGuard.deniedCallAttempts.length;

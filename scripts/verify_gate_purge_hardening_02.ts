@@ -191,12 +191,13 @@ async function main(): Promise<void> {
       ok("[A] rowsDeletedは表+workspace+userの合計", m.totals.rowsDeleted === tableSum + 2, `${m.totals.rowsDeleted} vs ${tableSum}+2`);
       const anon = m.anonymizedReferences.find((u) => u.tableName === "audit_logs");
       ok("[A] audit_logsの行為者参照は匿名化(更新)として別計上される", anon?.count === 1 && anon.columnNames.join(",") === "actor_user_id", JSON.stringify(m.anonymizedReferences));
-      ok("[A] rowsUpdatedは匿名化+循環遮断の合計", m.totals.rowsUpdated === m.anonymizedReferences.reduce((s, u) => s + u.count, 0) + m.cycleBreakUpdates.reduce((s, u) => s + u.count, 0));
       ok(
-        "[A] FKで到達できない保持表(DEC-PURGE-02B未決)が明示される",
-        ["audit_logs", "consents", "event_logs", "jobs", "outbox_events"].every((t) => m.retainedUnscopedTables.includes(t)),
-        m.retainedUnscopedTables.join(","),
+        "[A] rowsUpdatedは匿名化+循環遮断+保持表墨消しの合計",
+        m.totals.rowsUpdated === [...m.anonymizedReferences, ...m.cycleBreakUpdates, ...m.redactedRetainedRows].reduce((s, u) => s + u.count, 0),
       );
+      // [PURGE-SCOPE-03A・2026-09-25更新] DEC-PURGE-02Bの利用者決定により、consents/event_logs/
+      // jobs/outbox_eventsは明示的scope列で削除対象になった。FKで到達しない保持表はaudit_logsのみ。
+      ok("[A] FKで到達しない保持表はaudit_logsのみ(明示的scope列導入後)", m.retainedUnscopedTables.join(",") === "audit_logs", m.retainedUnscopedTables.join(","));
     }
     ok("[A] ai_runs残存0", (await count(`SELECT COUNT(*)::bigint AS c FROM ai_runs WHERE id = $1`, a.aiRunId)) === 0);
     ok("[A] evidences残存0", (await count(`SELECT COUNT(*)::bigint AS c FROM evidences WHERE id = $1`, a.evidenceId)) === 0);

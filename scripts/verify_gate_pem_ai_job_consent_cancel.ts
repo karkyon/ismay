@@ -212,6 +212,8 @@ async function main(): Promise<void> {
         });
         const job = await db.job.create({
           data: {
+            // [PURGE-SCOPE-03A] jobs.workspace_idは明示的scope列(DB triggerで必須)。
+            workspaceId: (await db.capture.findUniqueOrThrow({ where: { id: capture.id }, select: { workspaceId: true } })).workspaceId,
             jobType: "AI_EXTRACT", aggregateId: capture.id, sourceVersion: capture.version,
             status: "QUEUED", payload: { captureId: capture.id },
           },

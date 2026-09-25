@@ -179,6 +179,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
   await db.eventLog.create({
     data: {
+      workspaceId,
       aggregateType: "ProjectContext",
       aggregateId: id,
       eventType,

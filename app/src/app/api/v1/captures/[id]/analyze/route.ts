@@ -68,6 +68,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Capture",
         aggregateId: capture.id,
         eventType: "CAPTURE_ANALYSIS_REQUESTED",
@@ -82,6 +83,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "CaptureAnalysisRequested.v1",
         eventVersion: "1",
         aggregateId: capture.id,

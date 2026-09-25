@@ -2,7 +2,7 @@
 
 | 項目 | 値 |
 |---|---|
-| 状態 | **PROPOSED（決定待ち）**。この記録はコード上の削除方式を決めない |
+| 状態 | **ACCEPTED（2026-09-25利用者決定、§7）**。§1〜§6は決定前の検討記録として残す |
 | 作成 | 2026-09-25（Gate PURGE-CONTRACT-02B） |
 | 基準コード | `f2299da` + PURGE hardening 02（SCOPE-02F / ELIGIBILITY-02C / AUDIT-02D / REPORT-02E） |
 | 関連 | `app/src/lib/admin/purgeJob.ts`、`purgeGraph.ts`、`scripts/run_account_purge.ts` |
@@ -93,3 +93,28 @@
 
 - CLIは保持表をdry-run・実行時に警告として表示する。「完全削除」という表現は使わない（確認文字列も「物理削除」に変更した）。
 - 決定後、この記録を`ACCEPTED`へ更新し、実装Gate（仮称PURGE-CONTRACT-IMPL-02G）で実装と実DB受入（E2E-02の項目8）を行う。
+
+## 7. 決定（2026-09-25 利用者決定）
+
+### 7.1 利用者の決定
+1. 「FKが無いから保持する」設計を終了する。今後は**明示的なscope列**でPurge対象を特定する。
+2. Object Storage（MinIO）は、DBを先に削除するとobject keyを失い回収不能になるため、次の順序で固定する。
+   1. DB・Object Storageの対象を台帳へsnapshot
+   2. MinIO objectを削除
+   3. objectが存在しないことを確認
+   4. DBを物理削除
+   5. 匿名化・監査記録
+   6. PurgeRunを完了
+
+### 7.2 決定に基づく実装方針
+| 対象 | 方式 | 実装Gate |
+|---|---|---|
+| `event_logs` / `outbox_events` / `jobs` / `consents` | `workspace_id`列（`workspaces`へのFK）を追加し、FKグラフ経由でworkspace scopeとして**物理削除**（§4.1〜4.4の案A） | PURGE-SCOPE-03A |
+| `ai_runs`（captureの無い行を含む） | 既存の`workspace_id`へFKを追加し、明示的scope列として物理削除（§4.6の案A1） | PURGE-SCOPE-03A |
+| 新規行 | `workspace_id`必須（DB trigger `ismay_require_workspace_scope`）と、`src`配下の全書込み箇所の静的検査（`purgeScopeWriteSites.test.ts`） | PURGE-SCOPE-03A |
+| backfillで解決できない旧行 | 集約が既に存在しない孤立行。`workspace_id`はNULLのまま残し、自動削除はしない。Purge CLIに件数を表示する | PURGE-SCOPE-03A |
+| `audit_logs` | 監査証跡として行を保持する（DOC-09 §1）。本人が行為者または対象の行は`ip_address`を墨消しし、`actor_user_id`をNULL化する（§4.5の推奨B。明示的scope列方式を決定した際に推奨どおり採用） | PURGE-SCOPE-03A |
+| Object Storage | §7.1-2の順序で、PurgeRun/PurgeItem台帳とともに実装する | PURGE-OPS-03B |
+| 個別エンティティのsoft deleteの30日Purge | 未着手（§4.8） | 別Gate |
+
+補足：`consents`の法定保持要件は示されていないため、案Aの物理削除とした。要件が出た場合は、この記録を改訂して案Cへ切り替える。

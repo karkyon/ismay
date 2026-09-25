@@ -321,7 +321,7 @@ async function main(): Promise<void> {
     const fx4 = await makeFixture("s4guardstillblocks");
     const cap4 = await makeCapture(fx4, "guardが先に止める確認");
     const aiRun4 = await db.aiRun.create({
-      data: { captureId: cap4.id, provider: "anthropic", model: "claude-haiku-4-5-20251001", promptVersion: "test", schemaVersion: "1.0", status: "SUCCEEDED" },
+      data: { workspaceId: (await db.capture.findUniqueOrThrow({ where: { id: cap4.id }, select: { workspaceId: true } })).workspaceId, captureId: cap4.id, provider: "anthropic", model: "claude-haiku-4-5-20251001", promptVersion: "test", schemaVersion: "1.0", status: "SUCCEEDED" },
     });
     await db.aiInference.create({
       data: {

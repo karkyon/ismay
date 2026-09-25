@@ -82,6 +82,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       // Event Code: DOC-02 7.4節 EXTERNAL_REFERENCE_ATTACHED。
       await tx.eventLog.create({
         data: {
+          workspaceId,
           aggregateType: "ProjectContext",
           aggregateId: contextId,
           eventType: "EXTERNAL_REFERENCE_ATTACHED",
@@ -98,6 +99,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
       await tx.outboxEvent.create({
         data: {
+          workspaceId,
           eventName: "ProjectContextExternalReferenceAttached.v1",
           eventVersion: "1",
           aggregateId: contextId,

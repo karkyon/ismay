@@ -167,6 +167,7 @@ async function bulkComplete(ids: string[], workspaceId: string, userId: string):
       }
       await tx.eventLog.create({
         data: {
+          workspaceId,
           aggregateType: "Responsibility",
           aggregateId: t.id,
           eventType: "STATUS_CHANGED",
@@ -553,6 +554,7 @@ async function executeCompleteUndo(
         // (Execution Ledger対象外型やPEM未同意でも「無音の状態変更」にしない)。
         await tx.eventLog.create({
           data: {
+            workspaceId,
             aggregateType: "Responsibility",
             aggregateId: t.id,
             eventType: "STATUS_CHANGED",
@@ -565,6 +567,7 @@ async function executeCompleteUndo(
         });
         await tx.outboxEvent.create({
           data: {
+            workspaceId,
             eventName: "ResponsibilityTransitioned.v1",
             eventVersion: "1",
             aggregateId: t.id,

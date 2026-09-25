@@ -152,6 +152,7 @@ async function runTranscriptionForCapture(captureId: string): Promise<Transcript
   // 必須列であるため固定文字列を設定する。
   const aiRun = await db.aiRun.create({
     data: {
+      workspaceId: capture.workspaceId,
       captureId: capture.id,
       provider: provider.providerName,
       model: provider.modelName,
@@ -213,6 +214,7 @@ async function processCompletedTranscription(
       });
       await tx.eventLog.create({
         data: {
+          workspaceId: capture.workspaceId,
           aggregateType: "Capture",
           aggregateId: capture.id,
           eventType: "CAPTURE_TRANSCRIBED",
@@ -223,6 +225,7 @@ async function processCompletedTranscription(
       if (aiProcessingConsentGranted) {
         await tx.outboxEvent.create({
           data: {
+            workspaceId: capture.workspaceId,
             eventName: "CaptureAnalysisRequested.v1",
             eventVersion: "1",
             aggregateId: capture.id,
@@ -253,6 +256,7 @@ async function processCompletedTranscription(
     });
     await tx.eventLog.create({
       data: {
+        workspaceId: capture.workspaceId,
         aggregateType: "Capture",
         aggregateId: capture.id,
         eventType: "CAPTURE_TRANSCRIBED",
@@ -263,6 +267,7 @@ async function processCompletedTranscription(
     if (aiProcessingConsentGranted) {
       await tx.outboxEvent.create({
         data: {
+          workspaceId: capture.workspaceId,
           eventName: "CaptureAnalysisRequested.v1",
           eventVersion: "1",
           aggregateId: capture.id,
@@ -289,6 +294,7 @@ async function processCompletedTranscription(
       });
       await tx.eventLog.create({
         data: {
+          workspaceId: capture.workspaceId,
           aggregateType: "Capture",
           aggregateId: child.id,
           eventType: "CAPTURE_SAVED",
@@ -299,6 +305,7 @@ async function processCompletedTranscription(
       if (aiProcessingConsentGranted) {
         await tx.outboxEvent.create({
           data: {
+            workspaceId: capture.workspaceId,
             eventName: "CaptureAnalysisRequested.v1",
             eventVersion: "1",
             aggregateId: child.id,
@@ -322,6 +329,7 @@ async function trySegmentText(captureId: string, workspaceId: string, rawText: s
 
   await db.aiRun.create({
     data: {
+      workspaceId,
       captureId,
       provider: provider.providerName,
       model: provider.modelName,

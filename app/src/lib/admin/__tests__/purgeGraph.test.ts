@@ -94,6 +94,9 @@ const edges: ForeignKeyEdge[] = [
   ...fk("ai_runs", "captures", [["capture_id", "id", true]]),
   ...fk("ai_inferences", "ai_runs", [["ai_run_id", "id", false]]),
   ...fk("audit_logs", "users", [["actor_user_id", "id", true]]),
+  // [PURGE-SCOPE-03A] 明示的scope列(workspacesへ直接のNULL可能FK)。
+  ...fk("event_logs", "workspaces", [["workspace_id", "id", true]]),
+  ...fk("ai_runs", "workspaces", [["workspace_id", "id", true]]),
   ...fk("user_sessions", "users", [["user_id", "id", false]]),
 ];
 
@@ -133,7 +136,21 @@ ok(
   JSON.stringify(fse),
 );
 const aiRuns = chain.get("ai_runs");
-ok("ai_runsはNULL可能なcapture_id経由でworkspace scope(所有関係)", aiRuns?.scopeKind === "workspace" && aiRuns.viaNullableLink === true, JSON.stringify(aiRuns));
+ok(
+  "[03A] ai_runsはcapture_idより明示的scope列workspace_idを優先(captureの無い行も捕捉)",
+  aiRuns?.scopeKind === "workspace" && aiRuns.constraint.referencedTableName === "workspaces" && aiRuns.explicitScopeColumn === true,
+  JSON.stringify(aiRuns),
+);
+const eventLogs = chain.get("event_logs");
+ok("[03A] event_logsは明示的scope列(workspaces直結のNULL可能FK)でworkspace scope", eventLogs?.scopeKind === "workspace" && eventLogs.explicitScopeColumn === true, JSON.stringify(eventLogs));
+ok("[03A] 明示的scope列でない経路はexplicitScopeColumn=false", chain.get("captures")?.explicitScopeColumn === false && chain.get("formation_session_events")?.explicitScopeColumn === false);
+const aiOnlyCapture = buildScopeChain(groupForeignKeyConstraints([
+  ...fk("captures", "workspaces", [["workspace_id", "id", false]]),
+  ...fk("ai_runs", "captures", [["capture_id", "id", true]]),
+]));
+ok("明示的scope列が無ければai_runsはNULL可能なcapture_id経由でworkspace scope(所有関係)", aiOnlyCapture.get("ai_runs")?.viaNullableLink === true && aiOnlyCapture.get("ai_runs")?.constraint.referencedTableName === "captures");
+const usersNullableOnly = buildScopeChain(groupForeignKeyConstraints([...fk("x_logs", "users", [["actor_id", "id", true]])]));
+ok("[03A] usersへ直接のNULL可能FKは明示的scope列として扱わない(行為者参照)", !usersNullableOnly.has("x_logs"));
 ok("ai_runsの子(ai_inferences)もworkspace scope", chain.get("ai_inferences")?.scopeKind === "workspace");
 ok("audit_logs(root直結のNULL可能FKのみ)はscope外=削除しない(行為者参照の匿名化対象)", !chain.has("audit_logs"));
 ok("receiptsはworkspace scope(responsibilities経由のNOT NULL複合FKを優先)", chain.get("responsibility_correction_receipts")?.scopeKind === "workspace");
@@ -141,7 +158,7 @@ ok("user_sessions(usersへのNOT NULLのみ)はuser scope", chain.get("user_sess
 ok("capturesはworkspaces直結(created_byのusersではない)", chain.get("captures")?.constraint.referencedTableName === "workspaces");
 ok("root表自体はchainに含まれない", !chain.has("workspaces") && !chain.has("users"));
 const snapOrder = snapshotCreationOrder(chain);
-ok("snapshot作成順は親が先(captures→ai_runs→ai_inferences)", snapOrder.indexOf("captures") < snapOrder.indexOf("ai_runs") && snapOrder.indexOf("ai_runs") < snapOrder.indexOf("ai_inferences"));
+ok("snapshot作成順は親が先(ai_runs→ai_inferences)", snapOrder.indexOf("ai_runs") < snapOrder.indexOf("ai_inferences"));
 ok("snapshot作成順は親が先(formation_sessions→formation_session_events)", snapOrder.indexOf("formation_sessions") < snapOrder.indexOf("formation_session_events"));
 
 console.log("=== purgeGraph: 30日境界 ===");
@@ -166,11 +183,13 @@ const base: PurgeManifestWithoutDigest = {
   userRowsDeleted: 1,
   cycleBreakUpdates: [{ tableName: "responsibilities", columnNames: ["superseded_by_receipt_id"], referencedTableName: "responsibility_correction_receipts", reason: "CYCLE_BREAK", count: 1 }],
   anonymizedReferences: [{ tableName: "audit_logs", columnNames: ["actor_user_id"], referencedTableName: "users", reason: "ANONYMIZE_EXTERNAL_REFERENCE", count: 4 }],
-  retainedUnscopedTables: ["jobs", "audit_logs"],
+  redactedRetainedRows: [{ tableName: "audit_logs", columnNames: ["ip_address"], referencedTableName: "users", reason: "REDACT_RETAINED_AUDIT", count: 2 }],
+  retainedUnscopedTables: ["audit_logs"],
 };
 const m1 = finalizeManifest(base);
 ok("rowsDeletedは表+workspace+userの合計", m1.totals.rowsDeleted === 3 + 2 + 2 + 1, JSON.stringify(m1.totals));
-ok("rowsUpdatedは循環遮断+匿名化の合計(削除数と区別)", m1.totals.rowsUpdated === 1 + 4, JSON.stringify(m1.totals));
+ok("rowsUpdatedは循環遮断+匿名化+保持表墨消しの合計(削除数と区別)", m1.totals.rowsUpdated === 1 + 4 + 2, JSON.stringify(m1.totals));
+ok("[03A] 墨消し件数の変化もdriftとして検出される", diffManifests(m1, finalizeManifest({ ...base, redactedRetainedRows: [] })).some((d) => d.key.startsWith("updates.REDACT_RETAINED_AUDIT")));
 ok("digestは評価時刻に依存しない", computeManifestDigest({ ...base, evaluatedAt: "2030-01-01T00:00:00.000Z" }) === m1.digest);
 ok("digestはworkspaceIdsの順序に依存しない", computeManifestDigest({ ...base, workspaceIds: ["w1", "w2"] }) === m1.digest);
 const m2 = finalizeManifest({ ...base, perTable: [{ tableName: "responsibilities", scopeKind: "workspace", count: 4 }, base.perTable[1]] });

@@ -53,6 +53,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     .$transaction(async (tx: Prisma.TransactionClient) => {
       const consent = await tx.consent.create({
         data: {
+          workspaceId,
           captureId: capture.id,
           subjectId: auth.user.userId,
           purpose,
@@ -75,6 +76,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
       await tx.eventLog.create({
         data: {
+          workspaceId,
           aggregateType: "Capture",
           aggregateId: capture.id,
           eventType: "CONSENT_REGISTERED",
@@ -88,6 +90,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
       await tx.outboxEvent.create({
         data: {
+          workspaceId,
           eventName: "ConsentRegistered.v1",
           eventVersion: "1",
           aggregateId: capture.id,

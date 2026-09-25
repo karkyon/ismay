@@ -112,6 +112,7 @@ export async function POST(req: NextRequest) {
 
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Responsibility",
         aggregateId: responsibility.id,
         eventType: "RESPONSIBILITY_CREATED",
@@ -125,6 +126,7 @@ export async function POST(req: NextRequest) {
 
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "ResponsibilityCreated.v1",
         eventVersion: "1",
         aggregateId: responsibility.id,

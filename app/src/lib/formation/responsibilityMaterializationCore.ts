@@ -169,6 +169,7 @@ export async function createResponsibilityWithLinks(
 
   await tx.eventLog.create({
     data: {
+      workspaceId: input.workspaceId,
       aggregateType: "Responsibility",
       aggregateId: responsibility.id,
       eventType: "AI_CANDIDATE_DECIDED",
@@ -182,6 +183,7 @@ export async function createResponsibilityWithLinks(
 
   await tx.outboxEvent.create({
     data: {
+      workspaceId: input.workspaceId,
       eventName: "ResponsibilityCreated.v1",
       eventVersion: "1",
       aggregateId: responsibility.id,

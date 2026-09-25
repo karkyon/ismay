@@ -100,6 +100,7 @@ export async function POST(req: NextRequest) {
 
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Capture",
         aggregateId: tempCapture.id,
         eventType: "CAPTURE_SAVED",
@@ -111,6 +112,7 @@ export async function POST(req: NextRequest) {
 
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "AudioTranscriptionRequested.v1",
         eventVersion: "1",
         aggregateId: tempCapture.id,

@@ -128,6 +128,7 @@ export async function POST(req: NextRequest) {
 
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "Capture",
         aggregateId: capture.id,
         eventType: "CAPTURE_SAVED",
@@ -141,6 +142,7 @@ export async function POST(req: NextRequest) {
 
     await tx.outboxEvent.create({
       data: {
+        workspaceId,
         eventName: "CaptureSaved.v1",
         eventVersion: "1",
         aggregateId: capture.id,
@@ -159,6 +161,7 @@ export async function POST(req: NextRequest) {
     if (shouldAutoQueue) {
       await tx.eventLog.create({
         data: {
+          workspaceId,
           aggregateType: "Capture",
           aggregateId: capture.id,
           eventType: "CAPTURE_ANALYSIS_REQUESTED",
@@ -170,6 +173,7 @@ export async function POST(req: NextRequest) {
       });
       await tx.outboxEvent.create({
         data: {
+          workspaceId,
           eventName: "CaptureAnalysisRequested.v1",
           eventVersion: "1",
           aggregateId: capture.id,

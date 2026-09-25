@@ -201,50 +201,74 @@ export interface ScopeLink {
   constraint: FkConstraint;
   /** NULL可能制約経由(NOT NULL経路が無かった表)ならtrue。 */
   viaNullableLink: boolean;
+  /**
+   * [PURGE-SCOPE-03A] `workspaces`へ直接張られたNULL可能FK(明示的scope列、例:
+   * event_logs.workspace_id)を根拠にした場合true。この列がNULLの行(backfillで
+   * 解決できなかった旧行)はscopeへ到達できないため、運用者向けに件数を表示する。
+   */
+  explicitScopeColumn: boolean;
 }
+
+type LinkMode = "notNull" | "explicitWorkspaceColumn" | "nullableIndirect";
 
 /**
  * FKグラフから各表のscope(workspace/user)と、その根拠となるFK制約を推移的に
- * 決める。優先順位:
- *   1. workspace: NOT NULL制約で不動点まで伝播 → NULL可能制約(root直結を除く)で
- *      1段追加 → 再びNOT NULLで伝播…を追加が無くなるまで繰り返す。
- *   2. user: 1で確定しなかった表について同様に行う。
- * root(`workspaces`/`users`)へ直接張られたNULL可能FKは「行為者参照」として
- * scopeの根拠にしない(同じworkspace scope内の表なら1で先に確定するため、
- * ここで除外されるのは他の所有経路を持たない表だけ。現スキーマではaudit_logs)。
+ * 決める。優先順位(各kindで、追加が無くなるまで繰り返す):
+ *   1. NOT NULL制約で不動点まで伝播。
+ *   2. (workspaceのみ)`workspaces`へ直接張られたNULL可能FK=明示的scope列
+ *      [PURGE-SCOPE-03A、DEC-PURGE-02B利用者決定]。workspaceは行為者ではないため、
+ *      この列は所有関係を表す。
+ *   3. scope確定済みの業務表へのNULL可能FK(所有関係)を1本追加し、1へ戻る。
+ * `users`へ直接張られたNULL可能FKは「行為者参照」としてscopeの根拠にしない
+ * (現スキーマではaudit_logs.actor_user_idのみ。削除ではなく参照の匿名化対象)。
  */
 export function buildScopeChain(constraints: FkConstraint[]): Map<string, ScopeLink> {
   const chain = new Map<string, ScopeLink>();
 
-  const tryLink = (c: FkConstraint, kind: ScopeKind, allowNullable: boolean): boolean => {
+  const tryLink = (c: FkConstraint, kind: ScopeKind, mode: LinkMode): boolean => {
     if (chain.has(c.tableName) || isRootTable(c.tableName)) return false;
     if (c.tableName === c.referencedTableName) return false;
-    if (c.isNullable && !allowNullable) return false;
     const root = ROOT_BY_KIND[kind];
-    if (c.referencedTableName === root) {
-      if (c.isNullable) return false; // 行為者参照(root直結のNULL可能FK)はscopeの根拠にしない。
+    const toRoot = c.referencedTableName === root;
+    if (mode === "notNull" && c.isNullable) return false;
+    if (mode === "explicitWorkspaceColumn" && !(kind === "workspace" && toRoot && c.isNullable)) return false;
+    if (mode === "nullableIndirect" && (!c.isNullable || toRoot)) return false;
+    if (toRoot) {
       if (c.referencedColumns.length !== 1 || c.referencedColumns[0] !== "id") return false;
-      chain.set(c.tableName, { scopeKind: kind, constraint: c, viaNullableLink: false });
+      const explicit = mode === "explicitWorkspaceColumn";
+      chain.set(c.tableName, { scopeKind: kind, constraint: c, viaNullableLink: c.isNullable, explicitScopeColumn: explicit });
       return true;
     }
     const parent = chain.get(c.referencedTableName);
     if (parent && parent.scopeKind === kind) {
-      chain.set(c.tableName, { scopeKind: kind, constraint: c, viaNullableLink: c.isNullable });
+      chain.set(c.tableName, { scopeKind: kind, constraint: c, viaNullableLink: c.isNullable, explicitScopeColumn: false });
       return true;
     }
     return false;
   };
 
+  const propagate = (kind: ScopeKind, mode: LinkMode): boolean => {
+    let any = false;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const c of constraints) {
+        if (tryLink(c, kind, mode)) {
+          changed = true;
+          any = true;
+        }
+      }
+    }
+    return any;
+  };
+
   for (const kind of ["workspace", "user"] as const) {
     for (;;) {
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const c of constraints) if (tryLink(c, kind, false)) changed = true;
-      }
+      propagate(kind, "notNull");
+      if (propagate(kind, "explicitWorkspaceColumn")) continue;
       let addedNullable = false;
       for (const c of constraints) {
-        if (tryLink(c, kind, true)) {
+        if (tryLink(c, kind, "nullableIndirect")) {
           addedNullable = true;
           break; // 1本ずつ追加し、直後に再びNOT NULL経路を優先して伝播させる。
         }
@@ -306,7 +330,12 @@ export interface PurgeTableCount {
   count: number;
 }
 
-export type PurgeColumnUpdateReason = "CYCLE_BREAK" | "ANONYMIZE_EXTERNAL_REFERENCE";
+/**
+ * CYCLE_BREAK: 削除順序の循環を断つための削除前NULL化。
+ * ANONYMIZE_EXTERNAL_REFERENCE: 削除対象外の行から削除対象行へのNULL可能参照のNULL化。
+ * REDACT_RETAINED_AUDIT: 保持するaudit_logs(DEC-PURGE-02B §4.5・DOC-09 §1)の墨消し。
+ */
+export type PurgeColumnUpdateReason = "CYCLE_BREAK" | "ANONYMIZE_EXTERNAL_REFERENCE" | "REDACT_RETAINED_AUDIT";
 
 export interface PurgeColumnUpdateCount {
   tableName: string;
@@ -330,12 +359,14 @@ export interface PurgeManifest {
   userRowsDeleted: number;
   cycleBreakUpdates: PurgeColumnUpdateCount[];
   anonymizedReferences: PurgeColumnUpdateCount[];
-  /** FKで到達できずPurge対象外として保持される表(DEC-PURGE-02B未決)。 */
+  /** [PURGE-SCOPE-03A] 保持表の墨消し(audit_logs.ip_address等)。 */
+  redactedRetainedRows: PurgeColumnUpdateCount[];
+  /** FKでscopeへ到達しない表(PURGE-SCOPE-03A以降はaudit_logsのみ、DEC-PURGE-02B §4.5で行を保持)。 */
   retainedUnscopedTables: string[];
   totals: {
     /** perTable + workspace + user の合計(物理削除した行数)。 */
     rowsDeleted: number;
-    /** cycleBreakUpdates + anonymizedReferencesの合計(削除せず更新した行数)。 */
+    /** cycleBreakUpdates + anonymizedReferences + redactedRetainedRowsの合計(削除せず更新した行数)。 */
     rowsUpdated: number;
   };
   digest: string;
@@ -345,14 +376,14 @@ export type PurgeManifestWithoutDigest = Omit<PurgeManifest, "digest" | "totals"
 
 export function computeManifestTotals(m: PurgeManifestWithoutDigest): PurgeManifest["totals"] {
   const tableRows = m.perTable.reduce((s, t) => s + t.count, 0);
-  const updates = [...m.cycleBreakUpdates, ...m.anonymizedReferences].reduce((s, u) => s + u.count, 0);
+  const updates = [...m.cycleBreakUpdates, ...m.anonymizedReferences, ...m.redactedRetainedRows].reduce((s, u) => s + u.count, 0);
   return { rowsDeleted: tableRows + m.workspaceRowsDeleted + m.userRowsDeleted, rowsUpdated: updates };
 }
 
 /** digest対象の正規形(時刻を除く、件数と対象の同一性のみ)。 */
 export function canonicalManifestPayload(m: PurgeManifestWithoutDigest): string {
   return JSON.stringify({
-    v: 1,
+    v: 2,
     userId: m.userId,
     workspaceIds: [...m.workspaceIds].sort(),
     deletedAt: m.deletedAt,
@@ -361,6 +392,7 @@ export function canonicalManifestPayload(m: PurgeManifestWithoutDigest): string 
     userRowsDeleted: m.userRowsDeleted,
     cycleBreakUpdates: m.cycleBreakUpdates.map((u) => [u.tableName, u.columnNames.join(","), u.referencedTableName, u.count]),
     anonymizedReferences: m.anonymizedReferences.map((u) => [u.tableName, u.columnNames.join(","), u.referencedTableName, u.count]),
+    redactedRetainedRows: m.redactedRetainedRows.map((u) => [u.tableName, u.columnNames.join(","), u.referencedTableName, u.count]),
     retainedUnscopedTables: [...m.retainedUnscopedTables].sort(),
   });
 }
@@ -396,8 +428,8 @@ export function diffManifests(expected: PurgeManifest, actual: PurgeManifest): P
   cmp("workspaceRowsDeleted", expected.workspaceRowsDeleted, actual.workspaceRowsDeleted);
   cmp("userRowsDeleted", expected.userRowsDeleted, actual.userRowsDeleted);
   const updKey = (u: PurgeColumnUpdateCount): string => `${u.reason}.${u.tableName}.${u.columnNames.join("+")}->${u.referencedTableName}`;
-  const eUpd = new Map([...expected.cycleBreakUpdates, ...expected.anonymizedReferences].map((u) => [updKey(u), u.count]));
-  const aUpd = new Map([...actual.cycleBreakUpdates, ...actual.anonymizedReferences].map((u) => [updKey(u), u.count]));
+  const eUpd = new Map([...expected.cycleBreakUpdates, ...expected.anonymizedReferences, ...expected.redactedRetainedRows].map((u) => [updKey(u), u.count]));
+  const aUpd = new Map([...actual.cycleBreakUpdates, ...actual.anonymizedReferences, ...actual.redactedRetainedRows].map((u) => [updKey(u), u.count]));
   for (const k of [...new Set([...eUpd.keys(), ...aUpd.keys()])].sort()) cmp(`updates.${k}`, eUpd.get(k) ?? 0, aUpd.get(k) ?? 0);
   return drift;
 }

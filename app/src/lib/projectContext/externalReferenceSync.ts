@@ -96,6 +96,7 @@ export async function registerExternalSnapshot(
 
       await tx.eventLog.create({
         data: {
+          workspaceId,
           aggregateType: "ExternalContextReference",
           aggregateId: referenceId,
           eventType: "EXTERNAL_SNAPSHOT_CONFLICT_DETECTED",
@@ -188,6 +189,7 @@ export async function resolveExternalReferenceConflict(
 
     await tx.eventLog.create({
       data: {
+        workspaceId,
         aggregateType: "ExternalContextReference",
         aggregateId: conflict.referenceId,
         eventType: "EXTERNAL_SNAPSHOT_CONFLICT_RESOLVED",
