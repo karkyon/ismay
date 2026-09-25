@@ -73,7 +73,7 @@ async function main(): Promise<void> {
 
   const { db } = await import("../app/src/lib/db");
   const { cleanupFormationVerifyUser, assertNoLeftoverFormationVerifyUsers } = await import("./lib/formationVerifyCleanup");
-  const { dryRunPurgeForUser, executePurgeForUser, countLegacyUnscopedRows } = await import("../app/src/lib/admin/purgeJob");
+  const { dryRunPurgeForUser, executePurgeForUser, countLegacyUnscopedRows, PURGE_RETENTION_POLICY } = await import("../app/src/lib/admin/purgeJob");
 
   const count = async (sql: string, ...values: unknown[]): Promise<number> =>
     Number((await db.$queryRawUnsafe<{ c: bigint }[]>(sql, ...values))[0]?.c ?? 0);
@@ -145,7 +145,9 @@ async function main(): Promise<void> {
     const per = (m: { perTable: { tableName: string; count: number }[] }, t: string): number => m.perTable.find((x) => x.tableName === t)?.count ?? -1;
     if (plan.status === "ELIGIBLE") {
       for (const t of EXPLICIT_TABLES) ok(`[S1] dry-runの削除対象に${t}が1件含まれる`, per(plan.manifest, t) === 1, String(per(plan.manifest, t)));
-      ok("[S1] 保持表はaudit_logsのみ", plan.manifest.retainedUnscopedTables.join(",") === "audit_logs", plan.manifest.retainedUnscopedTables.join(","));
+      // [PURGE-OPS-03B・2026-09-25更新] 非scope表は保持ポリシー(PURGE_RETENTION_POLICY)に登録された表だけ
+      // (audit_logsと削除証跡台帳3表)。未登録の非scope表があればPurgeは実行を拒否する。
+      ok("[S1] FKで到達しない保持表は保持ポリシー登録表と一致(audit_logs・台帳3表)", plan.manifest.retainedUnscopedTables.join(",") === Object.keys(PURGE_RETENTION_POLICY).sort().join(","), plan.manifest.retainedUnscopedTables.join(","));
     }
     const exec = await executePurgeForUser({ userId: target.userId }, { expected: plan.status === "ELIGIBLE" ? plan.manifest : null });
     ok("[S1] 実行はPURGED", exec.status === "PURGED", JSON.stringify(exec).slice(0, 300));

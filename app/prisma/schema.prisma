@@ -3349,3 +3349,85 @@ model CasePatternDetectionReceipt {
   @@index([workspaceId, ownerSubjectUserId, outcome])
   @@map("case_pattern_detection_receipts")
 }
+
+/// [PURGE-OPS-03B新設・2026-09-25] 30日Purgeの実行単位(運用台帳)。DEC-PURGE-02B §7.1の
+/// 6段順序(台帳snapshot→MinIO削除→不存在確認→DB物理削除→匿名化・監査→Run完了)を追跡する。
+/// 意図的にusers/workspacesへFKを張らない(対象の物理削除後も削除証跡として残す。
+/// purgeJob.tsのPURGE_RETENTION_POLICYで保持理由を登録済み)。
+model PurgeRun {
+  id               String      @id @default(uuid())
+  /// RUNNING / COMPLETED / COMPLETED_WITH_EXCEPTIONS
+  status           String      @default("RUNNING")
+  osUser           String      @map("os_user")
+  hostname         String
+  pid              Int
+  operatorDeclared String?     @map("operator_declared")
+  batchSize        Int         @map("batch_size")
+  maxAttempts      Int         @map("max_attempts")
+  itemCount        Int         @map("item_count")
+  /// 各itemのdry-run manifest digest(または拒否status)を連結したsha256。
+  planDigest       String      @map("plan_digest")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+  finishedAt       DateTime?   @map("finished_at")
+  items            PurgeItem[]
+
+  @@map("purge_runs")
+}
+
+/// [PURGE-OPS-03B新設] 1ユーザー分のPurge台帳。userIdはFK無し(削除後も残る)。emailは保存しない。
+model PurgeItem {
+  id                 String            @id @default(uuid())
+  runId              String            @map("run_id")
+  run                PurgeRun          @relation(fields: [runId], references: [id])
+  userId             String            @map("user_id")
+  /// PENDING / IN_PROGRESS / RETRY_WAIT / COMPLETED / SKIPPED / DEAD_LETTER
+  status             String            @default("PENDING")
+  /// 到達済み工程: NONE / OBJECTS_SNAPSHOTTED / OBJECTS_DELETED / OBJECTS_VERIFIED / DB_PURGED / AUDITED / COMPLETED
+  phase              String            @default("NONE")
+  plannedDigest      String?           @map("planned_digest")
+  plannedManifest    Json?             @map("planned_manifest")
+  actualDigest       String?           @map("actual_digest")
+  actualManifest     Json?             @map("actual_manifest")
+  driftCount         Int?              @map("drift_count")
+  refusalStatus      String?           @map("refusal_status")
+  refusalDetail      String?           @map("refusal_detail")
+  auditRecorded      Boolean           @default(false) @map("audit_recorded")
+  auditError         String?           @map("audit_error")
+  lateObjectsDeleted Int               @default(0) @map("late_objects_deleted")
+  attempts           Int               @default(0)
+  maxAttempts        Int               @map("max_attempts")
+  nextAttemptAt      DateTime?         @map("next_attempt_at")
+  lastError          String?           @map("last_error")
+  leaseOwner         String?           @map("lease_owner")
+  leaseExpiresAt     DateTime?         @map("lease_expires_at")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
+  completedAt        DateTime?         @map("completed_at")
+  objects            PurgeItemObject[]
+
+  @@unique([runId, userId])
+  @@index([runId, status, nextAttemptAt])
+  @@map("purge_items")
+}
+
+/// [PURGE-OPS-03B新設] 削除対象object(MinIO)の台帳。完了後objectKeyはNULLへ墨消しし、hashのみ残す。
+model PurgeItemObject {
+  id            String    @id @default(uuid())
+  itemId        String    @map("item_id")
+  item          PurgeItem @relation(fields: [itemId], references: [id])
+  bucket        String
+  objectKey     String?   @map("object_key")
+  objectKeyHash String    @map("object_key_hash")
+  /// DB_REFERENCE / PREFIX_LISTING / LATE_PREFIX_LISTING
+  source        String
+  /// PENDING / DELETED / VERIFIED_ABSENT
+  status        String    @default("PENDING")
+  deletedAt     DateTime? @map("deleted_at")
+  verifiedAt    DateTime? @map("verified_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@unique([itemId, objectKeyHash])
+  @@map("purge_item_objects")
+}

@@ -299,6 +299,24 @@ export function snapshotCreationOrder(chain: Map<string, ScopeLink>): string[] {
   return order;
 }
 
+/**
+ * [PURGE-OPS-03B・2026-09-25] FKでscopeへ到達しない表の「保持理由」登録。
+ * DEC-PURGE-02B(利用者決定「FKが無いから保持、という設計を終わらせる」)に基づき、
+ * ここに登録されていない非scope表が1つでも存在すればcomputePurgeScopeは停止する
+ * (新しい表を追加したときに、明示的scope列を付け忘れたまま暗黙に保持されることを防ぐ)。
+ */
+export const PURGE_RETENTION_POLICY: Readonly<Record<string, string>> = {
+  audit_logs: "DEC-PURGE-02B §4.5: 監査証跡として行を保持(本人関係行のip_address墨消し・actor_user_idのNULL化)",
+  purge_runs: "PURGE-OPS-03B: Purge実行の削除証跡台帳(users/workspacesへ意図的にFKを持たない)",
+  purge_items: "PURGE-OPS-03B: 1ユーザー分の削除証跡台帳(emailを持たず、件数のみのmanifest)",
+  purge_item_objects: "PURGE-OPS-03B: 削除したobjectの台帳(完了後object_keyを墨消ししhashのみ保持)",
+};
+
+/** 保持理由が登録されていない非scope表(1件でもあればPurgeは実行を拒否する)。 */
+export function unregisteredRetainedTables(retainedUnscopedTables: string[]): string[] {
+  return retainedUnscopedTables.filter((t) => !Object.prototype.hasOwnProperty.call(PURGE_RETENTION_POLICY, t));
+}
+
 // ---------------------------------------------------------------------------
 // 30日保持期間(DB設計書8章「通常削除はdeleted_at。30日後にPurge Job」)
 // ---------------------------------------------------------------------------

@@ -114,7 +114,18 @@
 | 新規行 | `workspace_id`必須（DB trigger `ismay_require_workspace_scope`）と、`src`配下の全書込み箇所の静的検査（`purgeScopeWriteSites.test.ts`） | PURGE-SCOPE-03A |
 | backfillで解決できない旧行 | 集約が既に存在しない孤立行。`workspace_id`はNULLのまま残し、自動削除はしない。Purge CLIに件数を表示する | PURGE-SCOPE-03A |
 | `audit_logs` | 監査証跡として行を保持する（DOC-09 §1）。本人が行為者または対象の行は`ip_address`を墨消しし、`actor_user_id`をNULL化する（§4.5の推奨B。明示的scope列方式を決定した際に推奨どおり採用） | PURGE-SCOPE-03A |
-| Object Storage | §7.1-2の順序で、PurgeRun/PurgeItem台帳とともに実装する | PURGE-OPS-03B |
+| Object Storage | §7.1-2の順序で、PurgeRun/PurgeItem台帳とともに実装した（§7.3） | PURGE-OPS-03B |
 | 個別エンティティのsoft deleteの30日Purge | 未着手（§4.8） | 別Gate |
 
 補足：`consents`の法定保持要件は示されていないため、案Aの物理削除とした。要件が出た場合は、この記録を改訂して案Cへ切り替える。
+
+### 7.3 PURGE-OPS-03Bの実装（2026-09-25）
+- 台帳は`purge_runs` / `purge_items` / `purge_item_objects`の3表。`purge_items.phase`が§7.1の工程（`OBJECTS_SNAPSHOTTED → OBJECTS_DELETED → OBJECTS_VERIFIED → DB_PURGED → AUDITED → COMPLETED`）を前進のみで記録する。
+- 工程1〜4は、users/workspaces行を`FOR UPDATE`で保持し30日条件を再検証した**同じtransaction**の中で行う。lockを取らずにobjectを先に消すと、その間に復元されたユーザーのファイルだけが失われるため。
+  - 工程1〜3の台帳更新は別接続で即時commitする（途中で停止しても、何を消したかが残る）。
+  - 工程4は、DB削除と同じtransactionで`DB_PURGED`を記録する（原子的）。
+- 匿名化（外部参照のNULL化・audit_logsの墨消し）は、FK上users行の削除と不可分のため工程4のtransactionで行う。工程5は監査記録。
+- 削除対象objectは「DB参照key（`OBJECT_KEY_COLUMNS`）∪ workspace接頭辞`{workspaceId}/`の一覧」。不存在の確認は、statObjectのNotFoundと、接頭辞一覧が空であること。確認できなければDBへ進まずretryする。
+- 工程6では、commit後に現れた遅延objectを再回収し、object keyを墨消しする（hashのみ残す）。
+- 運用：batch size、lease（`FOR UPDATE SKIP LOCKED`、期限切れは再取得可）、指数backoff、`max_attempts`到達でDEAD_LETTER、`--resume`、planned/actual digest、run plan digest。
+- scopeへ到達しない表は`PURGE_RETENTION_POLICY`への登録を必須とし、未登録の表があればPurgeは実行を拒否する。現在の登録はaudit_logsと台帳3表。

@@ -50,7 +50,9 @@
  */
 import { db } from "@/lib/db";
 import { Prisma } from "@/generated/prisma/client";
+import { OBJECT_KEY_COLUMNS } from "./purgeObjects";
 import {
+  unregisteredRetainedTables,
   assertSafeIdentifier,
   buildScopeChain,
   diffManifests,
@@ -73,6 +75,7 @@ import {
 } from "./purgeGraph";
 
 export {
+  PURGE_RETENTION_POLICY,
   PURGE_RETENTION_DAYS,
   isRetentionElapsed,
   purgeEligibleAt,
@@ -178,6 +181,7 @@ export interface PurgeScope {
   pkByTable: Map<string, string[]>;
 }
 
+
 export async function computePurgeScope(): Promise<PurgeScope> {
   const [edges, pkByTable, tables] = await Promise.all([discoverForeignKeyEdges(), discoverPrimaryKeys(), discoverPublicTables()]);
   const constraints = groupForeignKeyConstraints(edges);
@@ -206,12 +210,20 @@ export async function computePurgeScope(): Promise<PurgeScope> {
     return { tableName, scopeKind: link.scopeKind, pkColumns: pk, link };
   };
 
+  const retainedUnscopedTables = tables.filter((t) => !chain.has(t) && !isRootTable(t));
+  const unregistered = unregisteredRetainedTables(retainedUnscopedTables);
+  if (unregistered.length > 0) {
+    throw new Error(
+      `[purgeJob] 削除scope(workspaces/usersへのFK経路)に到達せず、保持理由(PURGE_RETENTION_POLICY)も登録されていない表があるため実行を拒否します(DEC-PURGE-02B): ${unregistered.join(", ")}`,
+    );
+  }
+
   return {
     deleteOrder: order.filter((t) => chain.has(t)).map(toScopeTable),
     snapshotOrder: snapshotCreationOrder(chain).map(toScopeTable),
     cycleBreakers: cycleBreakers.filter((c) => chain.has(c.tableName)),
     constraints,
-    retainedUnscopedTables: tables.filter((t) => !chain.has(t) && !isRootTable(t)),
+    retainedUnscopedTables,
     pkByTable,
   };
 }
@@ -303,7 +315,14 @@ export interface PurgeRefusal {
   detail: string;
 }
 
-export type PurgePlanResult = { status: "ELIGIBLE"; manifest: PurgeManifest } | PurgeRefusal;
+export type PurgePlanResult =
+  | {
+      status: "ELIGIBLE";
+      manifest: PurgeManifest;
+      /** [PURGE-OPS-03B] 削除対象行が参照するobject key(OBJECT_KEY_COLUMNS)。接頭辞一覧は含まない。 */
+      dbObjectKeys: string[];
+    }
+  | PurgeRefusal;
 
 export type PurgeExecutionResult =
   | {
@@ -327,7 +346,23 @@ export interface PurgeRunOptions {
   transactionTimeoutMs?: number;
 }
 
+/**
+ * [PURGE-OPS-03B] 台帳・Object Storage段を1ユーザーtransactionへ組み込むためのhook。
+ * どちらもusers/workspaces行lockと30日再検証・snapshot確定の後に呼ばれる。例外を投げると
+ * transaction全体がrollbackされ、DBは一切変更されない。
+ */
+export interface PurgeExecuteHooks {
+  /**
+   * DB変更の直前(DEC-PURGE-02B §7.1の工程1〜3: 台帳snapshot・object削除・不存在確認)。
+   * lockを保持したまま呼ばれるため、この間に対象ユーザーの復元等は割り込めない。
+   */
+  beforeDatabaseMutation?: (input: { userId: string; workspaceIds: string[]; dbObjectKeys: string[]; plannedManifest: PurgeManifest }) => Promise<void>;
+  /** DB削除後・commit直前(同じtransaction内。台帳のDB_PURGEDを原子的に記録する)。 */
+  beforeCommit?: (tx: Prisma.TransactionClient, input: { manifest: PurgeManifest; drift: PurgeDriftEntry[] | null }) => Promise<void>;
+}
+
 export interface PurgeExecuteOptions extends PurgeRunOptions {
+  hooks?: PurgeExecuteHooks;
   /** dry-runのmanifest(参考値)。実値との差分をresult.driftへ記録する。 */
   expected?: PurgeManifest | null;
 }
@@ -601,6 +636,42 @@ function buildManifest(
   });
 }
 
+/** [PURGE-OPS-03B] snapshot内の行が参照するobject key(重複除去・昇順)。 */
+async function collectDbObjectKeys(ctx: PlanContext): Promise<string[]> {
+  const keys = new Set<string>();
+  for (const entry of OBJECT_KEY_COLUMNS) {
+    const snap = ctx.snapshotName.get(entry.tableName);
+    const pk = ctx.scope.pkByTable.get(entry.tableName);
+    if (!snap || !pk) continue;
+    for (const col of entry.columnNames) {
+      const rows = await ctx.tx.$queryRawUnsafe<{ k: string | null }[]>(
+        `SELECT DISTINCT t.${q(col)} AS k FROM ${q(entry.tableName)} t JOIN ${snap} s ON ${pkJoin("t", "s", pk)} WHERE t.${q(col)} IS NOT NULL`,
+      );
+      for (const r of rows) if (r.k) keys.add(r.k);
+    }
+  }
+  return [...keys].sort();
+}
+
+function plannedManifestOf(scope: PurgeScope, eligibility: EligibilityOk, plan: PlanOutcome): PurgeManifest {
+  return buildManifest(
+    scope,
+    eligibility,
+    plan.plannedPerTable,
+    plan.ctx.snapshotCount.get("workspaces") ?? 0,
+    plan.ctx.snapshotCount.get("users") ?? 0,
+    plan.plannedCycleBreaks,
+    plan.plannedAnonymized.map(({ constraint: c, count }) => ({
+      tableName: c.tableName,
+      columnNames: c.nullableColumns,
+      referencedTableName: c.referencedTableName,
+      reason: "ANONYMIZE_EXTERNAL_REFERENCE" as const,
+      count,
+    })),
+    plan.plannedRedactions,
+  );
+}
+
 class DryRunRollback extends Error {
   constructor(readonly result: PurgePlanResult) {
     super("PURGE_DRY_RUN_ROLLBACK");
@@ -621,23 +692,9 @@ export async function dryRunPurgeForUser(request: PurgeRequest, options: PurgeRu
         if (eligibility.status !== "ELIGIBLE") throw new DryRunRollback(eligibility);
         const plan = await planInTransaction(tx, scope, eligibility);
         if (plan.refusal) throw new DryRunRollback(plan.refusal);
-        const manifest = buildManifest(
-          scope,
-          eligibility,
-          plan.plannedPerTable,
-          plan.ctx.snapshotCount.get("workspaces") ?? 0,
-          plan.ctx.snapshotCount.get("users") ?? 0,
-          plan.plannedCycleBreaks,
-          plan.plannedAnonymized.map(({ constraint: c, count }) => ({
-            tableName: c.tableName,
-            columnNames: c.nullableColumns,
-            referencedTableName: c.referencedTableName,
-            reason: "ANONYMIZE_EXTERNAL_REFERENCE" as const,
-            count,
-          })),
-          plan.plannedRedactions,
-        );
-        throw new DryRunRollback({ status: "ELIGIBLE", manifest });
+        const manifest = plannedManifestOf(scope, eligibility, plan);
+        const dbObjectKeys = await collectDbObjectKeys(plan.ctx);
+        throw new DryRunRollback({ status: "ELIGIBLE", manifest, dbObjectKeys });
       },
       { timeout: options.transactionTimeoutMs ?? DEFAULT_TRANSACTION_TIMEOUT_MS, maxWait: TRANSACTION_MAX_WAIT_MS },
     );
@@ -674,6 +731,17 @@ export async function executePurgeForUser(request: PurgeRequest, options: PurgeE
         const plan = await planInTransaction(tx, scope, eligibility);
         if (plan.refusal) return plan.refusal;
         const { ctx } = plan;
+
+        // [PURGE-OPS-03B] DEC-PURGE-02B §7.1の工程1〜3(台帳snapshot・object削除・不存在確認)は
+        // lockを保持したままDB変更より前に行う(DBを先に消すとobject keyを失い回収不能になるため)。
+        if (options.hooks?.beforeDatabaseMutation) {
+          await options.hooks.beforeDatabaseMutation({
+            userId: eligibility.userId,
+            workspaceIds: eligibility.workspaceIds,
+            dbObjectKeys: await collectDbObjectKeys(ctx),
+            plannedManifest: plannedManifestOf(scope, eligibility, plan),
+          });
+        }
 
         // 0) 保持するaudit_logsの墨消し(行為者参照のNULL化より前に、本人の行を特定できるうちに行う)。
         const redactedRetainedRows: PurgeColumnUpdateCount[] = [];
@@ -716,10 +784,14 @@ export async function executePurgeForUser(request: PurgeRequest, options: PurgeE
 
         const manifest = buildManifest(scope, eligibility, perTable, workspaceRowsDeleted, userRowsDeleted, cycleBreakUpdates, anonymizedReferences, redactedRetainedRows);
         const expected = options.expected ?? null;
+        const drift = expected ? diffManifests(expected, manifest) : null;
+        if (options.hooks?.beforeCommit) {
+          await options.hooks.beforeCommit(tx, { manifest, drift });
+        }
         return {
           status: "PURGED",
           manifest,
-          drift: expected ? diffManifests(expected, manifest) : null,
+          drift,
           expectedDigest: expected ? expected.digest : null,
         };
       },

@@ -9,43 +9,36 @@
  * fail closedのまま。サーバーへの直接アクセス権(このコマンドを実行できること)が
  * 実質的な認可境界になる。
  *
- * [PURGE-ELIGIBILITY-02C・2026-09-25] 旧版は対象一覧(JS配列)をdry-run表示と
- * 実削除で使い回し、それを「同一スナップショット」と呼んでいたが、DBの
- * snapshotではなかった(確認待ちの間に復元・membership変更があっても古い配列の
- * まま削除し得た)。以後、一覧(findEligibleUsersForPurge)は対象選択の参考値に
- * すぎず、実削除はuserIdだけを渡し、executePurgeForUserがtransaction内で
- * users行lock・30日再検証・membership再取得を行う。dry-runのmanifestは参考値
- * として渡し、実値との差分(drift)とdigestを結果・AuditLogへ記録する。
+ * [PURGE-ELIGIBILITY-02C・2026-09-25] 一覧(findEligibleUsersForPurge)は対象選択の参考値。
+ * 実削除はuserIdだけを渡し、transaction内でusers行lock・30日再検証・membership再取得を行う。
  *
- * [PURGE-AUDIT-02D・2026-09-25] 物理削除の成否と監査記録(AuditLog)の成否を
- * 分離した(lib/admin/purgeRunner.ts)。AuditLog書込み失敗で完了済みの削除を
- * 「失敗」と数えない。行為者はOS user・hostname・pid・run IDを自動記録し、
- * --operatorは自己申告の補足情報とする。画面出力のemailはmaskする。
+ * [PURGE-AUDIT-02D・2026-09-25] 物理削除の成否と監査記録(AuditLog)の成否を分離。
+ * 行為者はOS user・hostname・pid・run IDを自動記録し、--operatorは自己申告の補足。
+ *
+ * [PURGE-SCOPE-03A・2026-09-25] event_logs/outbox_events/jobs/consents/ai_runsは明示的scope列
+ * (workspace_id)でPurge対象。FKで到達しない表は保持理由の登録(PURGE_RETENTION_POLICY)が
+ * 必須で、未登録の表があればPurgeは実行を拒否する。
+ *
+ * [PURGE-OPS-03B・2026-09-25] 実行は運用台帳(purge_runs/purge_items/purge_item_objects)に
+ * 記録し、DEC-PURGE-02B §7.1の順序(台帳snapshot→MinIO削除→不存在確認→DB物理削除→
+ * 匿名化・監査記録→Run完了)で1ユーザーずつ処理する。batch size・lease・retry(指数backoff)・
+ * dead-letter・中断再開(--resume)に対応し、dry-run manifestと実行manifestのdigestを台帳で対応付ける。
  *
  * exit code(bitmask、lib/admin/purgeReporting.ts PURGE_EXIT):
- *   0 = 全件の削除と監査記録が成功 / 1 = 致命的エラー
- *   2 = 1件以上が削除されなかった / 4 = 1件以上で監査記録に失敗 / 6 = 2と4の両方
+ *   0 = run内の全itemが完了し監査記録済み / 1 = 致命的エラー
+ *   2 = 完了していないitemがある(SKIPPED・DEAD_LETTER・RETRY_WAIT等) / 4 = 監査記録未完了のitemがある
  *
- * [安全策]
- *   - 既定はdry-runのみ(何も削除しない)。実削除には`--execute`が必要。
- *   - `--execute`時は対話的に確認文字列「物理削除」の入力を要求する。
- *   - 既定では最初の対象1件のみ。全件は`--all`、特定ユーザーは`--email=<address>`。
- *
- * [PURGE-SCOPE-03A・2026-09-25] DEC-PURGE-02Bの利用者決定により、event_logs/
- * outbox_events/jobs/consents/ai_runsは明示的scope列(workspace_id)でPurge対象になった。
- * FKで到達しない表はaudit_logsだけで、行は保持し(DOC-09 §1)、本人に関係する行の
- * ip_addressを墨消しし、行為者参照(actor_user_id)をNULL化する。migration時のbackfillで
- * 集約を解決できなかった旧行(明示的scope列がNULL)は件数を表示する(自動削除はしない)。
- *
- * 実行方法(dry-runのみ、既定):
+ * 実行方法(dry-runのみ、既定。何も削除しない):
  *   cd ~/projects/ismay/app
- *   npx tsx ../scripts/run_account_purge.ts
+ *   npx tsx ../scripts/run_account_purge.ts [--email=<address> | --all]
  *
- * 実行方法(特定の1ユーザーを実削除):
+ * 実削除(新しいrunを作成して処理):
  *   npx tsx ../scripts/run_account_purge.ts --execute --email=user@example.com --operator=karkyon
+ *   npx tsx ../scripts/run_account_purge.ts --execute --all --batch-size=10 --max-attempts=5 --operator=karkyon
  *
- * 実行方法(対象全員を実削除・通常は非推奨):
- *   npx tsx ../scripts/run_account_purge.ts --execute --all --operator=karkyon
+ * 中断・retry待ちのrunを再開 / 状況表示:
+ *   npx tsx ../scripts/run_account_purge.ts --resume=<runId> --operator=karkyon
+ *   npx tsx ../scripts/run_account_purge.ts --status=<runId>
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -83,35 +76,108 @@ interface CliArgs {
   all: boolean;
   email: string | null;
   operator: string | null;
+  resume: string | null;
+  status: string | null;
+  batchSize: number | null;
+  maxAttempts: number | null;
+}
+
+function parsePositiveInt(raw: string, name: string): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${name} は1以上の整数で指定してください: ${raw}`);
+  return n;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { execute: false, all: false, email: null, operator: null };
+  const args: CliArgs = { execute: false, all: false, email: null, operator: null, resume: null, status: null, batchSize: null, maxAttempts: null };
   for (const raw of argv) {
     if (raw === "--execute") args.execute = true;
     else if (raw === "--all") args.all = true;
     else if (raw.startsWith("--email=")) args.email = raw.slice("--email=".length);
     else if (raw.startsWith("--operator=")) args.operator = raw.slice("--operator=".length);
+    else if (raw.startsWith("--resume=")) args.resume = raw.slice("--resume=".length);
+    else if (raw.startsWith("--status=")) args.status = raw.slice("--status=".length);
+    else if (raw.startsWith("--batch-size=")) args.batchSize = parsePositiveInt(raw.slice("--batch-size=".length), "--batch-size");
+    else if (raw.startsWith("--max-attempts=")) args.maxAttempts = parsePositiveInt(raw.slice("--max-attempts=".length), "--max-attempts");
     else {
-      throw new Error(`未知の引数です: ${raw}(使用可能: --execute, --all, --email=<address>, --operator=<name>)`);
+      throw new Error(
+        `未知の引数です: ${raw}(使用可能: --execute, --all, --email=<address>, --operator=<name>, --resume=<runId>, --status=<runId>, --batch-size=<n>, --max-attempts=<n>)`,
+      );
     }
   }
   if (args.all && args.email) throw new Error("--all と --email は同時に指定できません。");
+  const modes = [args.execute, args.resume !== null, args.status !== null].filter(Boolean).length;
+  if (modes > 1) throw new Error("--execute / --resume / --status は同時に指定できません。");
   return args;
+}
+
+async function confirm(message: string): Promise<boolean> {
+  console.log(message);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await rl.question(`続行するには "${CONFIRM_TEXT}" と正確に入力してEnterを押してください: `);
+  rl.close();
+  return answer === CONFIRM_TEXT;
 }
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
 
   const { db } = await import("../app/src/lib/db");
-  const { findEligibleUsersForPurge, dryRunPurgeForUser, countLegacyUnscopedRows } = await import("../app/src/lib/admin/purgeJob");
-  const { collectPurgeRunContext, runPurgeItem } = await import("../app/src/lib/admin/purgeRunner");
-  const { maskEmail, summarizePurgeOutcomes, PURGE_EXIT } = await import("../app/src/lib/admin/purgeReporting");
-  type Manifest = import("../app/src/lib/admin/purgeJob").PurgeManifest;
-  type Outcome = import("../app/src/lib/admin/purgeReporting").PurgeItemOutcome;
+  const { findEligibleUsersForPurge, dryRunPurgeForUser, countLegacyUnscopedRows, PURGE_RETENTION_POLICY } = await import("../app/src/lib/admin/purgeJob");
+  const { collectPurgeRunContext } = await import("../app/src/lib/admin/purgeRunner");
+  const { maskEmail, PURGE_EXIT } = await import("../app/src/lib/admin/purgeReporting");
+  const { createPurgeRun, processPurgeRun, getPurgeRunSummary } = await import("../app/src/lib/admin/purgeLedger");
+  const { workspaceObjectPrefix } = await import("../app/src/lib/admin/purgeObjects");
+  const { createMinioPurgeObjectStore } = await import("../app/src/lib/storage");
+  type Summary = Awaited<ReturnType<typeof getPurgeRunSummary>>;
+
+  const printSummary = async (summary: Summary): Promise<void> => {
+    console.log(`\n=== run ${summary.runId}: ${summary.runStatus} ===`);
+    console.log(`  plan digest: ${summary.planDigest}`);
+    console.log(`  status別: ${JSON.stringify(summary.byStatus)}  phase別: ${JSON.stringify(summary.byPhase)}`);
+    console.log(`  不存在確認済みobject: ${summary.objectsVerifiedAbsent}件  完了後に回収した遅延object: ${summary.lateObjectsDeleted}件`);
+    console.log(`  dry-runから差分のあったitem: ${summary.driftItems}件  監査記録未完了: ${summary.auditPending}件`);
+    const items = await db.purgeItem.findMany({ where: { runId: summary.runId }, orderBy: { createdAt: "asc" } });
+    for (const i of items) {
+      const extra = [
+        i.refusalStatus ? `refusal=${i.refusalStatus}` : null,
+        i.lastError ? `lastError=${i.lastError.slice(0, 160)}` : null,
+        i.auditError ? `auditError=${i.auditError.slice(0, 160)}` : null,
+        i.nextAttemptAt ? `next=${i.nextAttemptAt.toISOString()}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      console.log(`  - item=${i.id} userId=${i.userId} ${i.status}/${i.phase} attempts=${i.attempts}/${i.maxAttempts} audit=${i.auditRecorded ? "ok" : "未"} ${extra}`);
+    }
+    if (summary.auditPending > 0) console.error(`[運用警告] 監査記録未完了のitemが${summary.auditPending}件あります。--resume=${summary.runId} で再試行してください。`);
+    console.log(`exit code=${summary.exitCode}`);
+  };
+  const logItem = (r: { status: string; phase: string; detail: string | null }, userId: string): void => {
+    console.log(`  ${r.status}/${r.phase} userId=${userId} ${r.detail ?? ""}`);
+  };
 
   try {
     const context = collectPurgeRunContext(args.operator);
+
+    if (args.status) {
+      const summary = await getPurgeRunSummary(args.status);
+      await printSummary(summary);
+      return summary.exitCode;
+    }
+
+    const store = createMinioPurgeObjectStore();
+
+    if (args.resume) {
+      await printSummary(await getPurgeRunSummary(args.resume));
+      if (!(await confirm(`\n⚠️ run ${args.resume} の未完了itemを再開します(不可逆な物理削除を含みます)。`))) {
+        console.log("[中止] 確認文字列が一致しなかったため、何もせずに終了します。");
+        return PURGE_EXIT.OK;
+      }
+      const summary = await processPurgeRun({ runId: args.resume, store, context: { ...context, runId: args.resume }, onItem: logItem });
+      await printSummary(summary);
+      return summary.exitCode;
+    }
+
     console.log("=== 30日Purge 運用者CLI ===");
     console.log(`モード: ${args.execute ? "EXECUTE(実削除)" : "DRY-RUN(何も削除しません)"}`);
     console.log(`run=${context.runId} osUser=${context.osUser} host=${context.hostname} pid=${context.pid} operator(自己申告)=${context.operatorDeclared ?? "-"}`);
@@ -134,7 +200,6 @@ async function main(): Promise<number> {
     }
 
     console.log(`\n--- dry-run(transaction内で計画しrollback): ${eligible.length}件 ---`);
-    const expectedByUser = new Map<string, Manifest>();
     let retainedTables: string[] = [];
     for (const target of eligible) {
       const plan = await dryRunPurgeForUser({ userId: target.userId });
@@ -144,7 +209,6 @@ async function main(): Promise<number> {
         continue;
       }
       const m = plan.manifest;
-      expectedByUser.set(target.userId, m);
       retainedTables = m.retainedUnscopedTables;
       console.log(`    deletedAt=${m.deletedAt} workspace数=${m.workspaceIds.length} digest=${m.digest}`);
       console.log(
@@ -154,11 +218,18 @@ async function main(): Promise<number> {
       for (const u of m.cycleBreakUpdates) console.log(`      循環遮断NULL化 ${u.tableName}(${u.columnNames.join(",")}): ${u.count}件`);
       for (const u of m.anonymizedReferences) console.log(`      匿名化(参照NULL化・行は保持) ${u.tableName}(${u.columnNames.join(",")}): ${u.count}件`);
       for (const u of m.redactedRetainedRows) console.log(`      保持表の墨消し ${u.tableName}(${u.columnNames.join(",")}): ${u.count}件`);
+      try {
+        const listed = new Set<string>();
+        for (const ws of m.workspaceIds) for (const k of await store.list(workspaceObjectPrefix(ws))) listed.add(k);
+        const union = new Set([...plan.dbObjectKeys, ...listed]);
+        console.log(`    Object Storage(${store.bucket}): 削除見込み${union.size}件(DB参照${plan.dbObjectKeys.length}件・接頭辞一覧${listed.size}件)`);
+      } catch (err) {
+        console.log(`    Object Storage: 確認できません(${err instanceof Error ? err.message : String(err)})。実行時はobject削除と不存在確認ができるまでDB削除へ進みません。`);
+      }
     }
     if (retainedTables.length > 0) {
-      console.log(
-        `\n[保持表・DEC-PURGE-02B §4.5] 次の表は行を保持します(行為者参照はNULL化、audit_logsのip_addressは墨消し): ${retainedTables.join(", ")}`,
-      );
+      console.log(`\n[保持表] 次の表は行を保持します(保持理由はPURGE_RETENTION_POLICY):`);
+      for (const t of retainedTables) console.log(`  - ${t}: ${PURGE_RETENTION_POLICY[t] ?? "(未登録)"}`);
     }
     const legacy = (await countLegacyUnscopedRows()).filter((l) => l.count > 0);
     if (legacy.length > 0) {
@@ -172,43 +243,27 @@ async function main(): Promise<number> {
       return PURGE_EXIT.OK;
     }
 
-    console.log(`\n⚠️ これは不可逆な物理削除です。上記${eligible.length}件を削除しますか?(実行時にtransaction内で再検証し、条件を満たさない対象は削除しません)`);
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await rl.question(`続行するには "${CONFIRM_TEXT}" と正確に入力してEnterを押してください: `);
-    rl.close();
-    if (answer !== CONFIRM_TEXT) {
+    if (
+      !(await confirm(
+        `\n⚠️ これは不可逆な物理削除です。上記${eligible.length}件について新しいrunを作成し、Object Storage→DBの順に削除します(実行時にtransaction内で再検証し、条件を満たさない対象は削除しません)。`,
+      ))
+    ) {
       console.log("[中止] 確認文字列が一致しなかったため、何も削除せずに終了します。");
       return PURGE_EXIT.OK;
     }
 
-    console.log("\n--- 実行中 ---");
-    const outcomes: Outcome[] = [];
-    for (const target of eligible) {
-      const outcome = await runPurgeItem({ userId: target.userId, context, expected: expectedByUser.get(target.userId) ?? null });
-      outcomes.push(outcome);
-      const label = `userId=${target.userId} email=${maskEmail(target.email)}`;
-      if (outcome.purgeSucceeded) {
-        console.log(
-          `  削除成功 - ${label} 削除=${outcome.totals?.rowsDeleted}行 更新=${outcome.totals?.rowsUpdated}行 drift=${outcome.driftCount ?? "-"} digest=${outcome.digest}`,
-        );
-        if ((outcome.driftCount ?? 0) > 0) console.log("    [注意] dry-run時点から件数・対象が変化していました(実行時の実値で削除済み)。");
-      } else {
-        console.log(`  削除せず - ${label} status=${outcome.purgeStatus} ${outcome.detail ?? ""}`);
-      }
-      if (!outcome.auditRecorded) {
-        console.error(
-          `  [監査記録失敗] ${label} 削除結果=${outcome.purgeSucceeded ? "削除済み" : "未削除"}(監査記録の失敗は削除結果を変えません) error=${outcome.auditError}`,
-        );
-      }
+    const runId = await createPurgeRun({
+      userIds: eligible.map((e) => e.userId),
+      context,
+      batchSize: args.batchSize ?? undefined,
+      maxAttempts: args.maxAttempts ?? undefined,
+    });
+    console.log(`\n--- run ${runId} を作成しました。処理中 ---`);
+    const summary = await processPurgeRun({ runId, store, context, onItem: logItem });
+    await printSummary(summary);
+    if (summary.byStatus["RETRY_WAIT"] || summary.byStatus["PENDING"]) {
+      console.log(`[再開] 未完了のitemがあります。時間をおいて --resume=${runId} で再開してください。`);
     }
-
-    const summary = summarizePurgeOutcomes(outcomes);
-    console.log(`\n=== 結果: 削除成功 ${summary.purged}件 / 削除せず ${summary.notPurged}件 / 監査記録失敗 ${summary.auditFailed}件 ===`);
-    if (summary.notPurged > 0) console.log(`  削除せずの内訳: ${JSON.stringify(summary.notPurgedByStatus)}`);
-    if (summary.auditFailed > 0) {
-      console.error(`[運用警告] ${summary.auditFailed}件で監査記録(AuditLog)に失敗しました。run=${context.runId} の出力を保全し、手動で記録してください。`);
-    }
-    console.log(`exit code=${summary.exitCode}`);
     return summary.exitCode;
   } finally {
     await db.$disconnect();

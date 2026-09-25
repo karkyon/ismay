@@ -105,3 +105,44 @@ export function buildImageObjectKey(workspaceId: string, captureId: string, page
   const safeName = originalFileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80);
   return `${workspaceId}/${captureId}/p${pageIndex}_${safeName}`;
 }
+
+/**
+ * [PURGE-OPS-03B新設・2026-09-25] 30日PurgeのObject Storage段(lib/admin/purgeObjects.ts
+ * PurgeObjectStore)のMinIO実装。バケットは音声・画像共用のBUCKET_NAME。
+ * 存在確認はstatObjectのNotFound(コードNotFound/NoSuchKey)だけを「不存在」とし、
+ * それ以外の障害(接続不可・権限等)は例外として伝播させる(不存在と誤認しない)。
+ */
+export function createMinioPurgeObjectStore(): { bucket: string; list(prefix: string): Promise<string[]>; remove(keys: string[]): Promise<void>; exists(key: string): Promise<boolean> } {
+  return {
+    bucket: BUCKET_NAME,
+    async list(prefix: string): Promise<string[]> {
+      const c = getClient();
+      const exists = await c.bucketExists(BUCKET_NAME);
+      if (!exists) return [];
+      const keys: string[] = [];
+      for await (const item of c.listObjectsV2(BUCKET_NAME, prefix, true)) {
+        const name = (item as { name?: string }).name;
+        if (name) keys.push(name);
+      }
+      return keys;
+    },
+    async remove(keys: string[]): Promise<void> {
+      if (keys.length === 0) return;
+      const c = getClient();
+      for (let i = 0; i < keys.length; i += 1000) {
+        await c.removeObjects(BUCKET_NAME, keys.slice(i, i + 1000));
+      }
+    },
+    async exists(key: string): Promise<boolean> {
+      const c = getClient();
+      try {
+        await c.statObject(BUCKET_NAME, key);
+        return true;
+      } catch (err) {
+        const code = (err as { code?: string } | null)?.code;
+        if (code === "NotFound" || code === "NoSuchKey") return false;
+        throw err;
+      }
+    },
+  };
+}

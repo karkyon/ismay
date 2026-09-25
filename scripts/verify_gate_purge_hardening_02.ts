@@ -80,7 +80,7 @@ async function main(): Promise<void> {
 
   const { db } = await import("../app/src/lib/db");
   const { cleanupFormationVerifyUser, assertNoLeftoverFormationVerifyUsers } = await import("./lib/formationVerifyCleanup");
-  const { findEligibleUsersForPurge, dryRunPurgeForUser, executePurgeForUser } = await import("../app/src/lib/admin/purgeJob");
+  const { findEligibleUsersForPurge, dryRunPurgeForUser, executePurgeForUser, PURGE_RETENTION_POLICY } = await import("../app/src/lib/admin/purgeJob");
   const { collectPurgeRunContext, runPurgeItem } = await import("../app/src/lib/admin/purgeRunner");
   const { summarizePurgeOutcomes, PURGE_EXIT } = await import("../app/src/lib/admin/purgeReporting");
 
@@ -197,7 +197,9 @@ async function main(): Promise<void> {
       );
       // [PURGE-SCOPE-03A・2026-09-25更新] DEC-PURGE-02Bの利用者決定により、consents/event_logs/
       // jobs/outbox_eventsは明示的scope列で削除対象になった。FKで到達しない保持表はaudit_logsのみ。
-      ok("[A] FKで到達しない保持表はaudit_logsのみ(明示的scope列導入後)", m.retainedUnscopedTables.join(",") === "audit_logs", m.retainedUnscopedTables.join(","));
+      // [PURGE-OPS-03B・2026-09-25更新] 非scope表は保持ポリシー(PURGE_RETENTION_POLICY)に登録された表だけ
+      // (audit_logsと削除証跡台帳3表)。未登録の非scope表があればPurgeは実行を拒否する。
+      ok("[A] FKで到達しない保持表は保持ポリシー登録表と一致(audit_logs・台帳3表)", m.retainedUnscopedTables.join(",") === Object.keys(PURGE_RETENTION_POLICY).sort().join(","), m.retainedUnscopedTables.join(","));
     }
     ok("[A] ai_runs残存0", (await count(`SELECT COUNT(*)::bigint AS c FROM ai_runs WHERE id = $1`, a.aiRunId)) === 0);
     ok("[A] evidences残存0", (await count(`SELECT COUNT(*)::bigint AS c FROM evidences WHERE id = $1`, a.evidenceId)) === 0);
