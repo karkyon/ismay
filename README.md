@@ -357,3 +357,13 @@ sudo systemctl status ismay-app.service
 
 旧世代(v1.x)の設計文書群(`ISMAY_Webシステム要件定義書_v2_2.md`等)はv5正本セットへの移行元として
 参照価値が残るが、v5正本セットと矛盾する場合はv5正本セットを優先する。
+
+### 正本への追補(リポジトリ側、`docs/`)
+
+プロジェクトナレッジの正本v5.0は2026-08-27時点で固定しており、それ以降の決定・改訂は`docs/`に
+追補として記録する(追補が正本と矛盾する場合は追補を優先)。一覧は[`docs/README.md`](docs/README.md)。
+
+- [`docs/spec-addenda/ADD-2026-09-25-PURGE.md`](docs/spec-addenda/ADD-2026-09-25-PURGE.md): アカウント30日Purgeの正本追補
+- [`docs/runbooks/PURGE_RUNBOOK.md`](docs/runbooks/PURGE_RUNBOOK.md): Purge運用手順
+- [`docs/status/実装状況台帳_PURGE.md`](docs/status/実装状況台帳_PURGE.md) / [`docs/status/未決事項台帳.md`](docs/status/未決事項台帳.md)
+- [`docs/decisions/`](docs/decisions/): Decision Record

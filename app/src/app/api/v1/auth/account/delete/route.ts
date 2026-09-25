@@ -22,6 +22,10 @@ import { apiOk, apiError } from "@/lib/auth/response";
  * soft-delete(deletedAt設定)までを行う。Purge Job(30日後の完全物理削除)は
  * 別途スケジュールジョブが必要な独立した機能のため、本パッチのスコープ外とする
  * (「処理状況」を追跡する仕組み自体もPurge Job実装時に併せて設計する)。
+ *
+ * [2026-09-25注記・現状] 30日後の物理削除は実装済み(運用CLI scripts/run_account_purge.ts、
+ * lib/admin/purgeJob.ts・purgeLedger.ts)。処理状況は台帳purge_runs/purge_itemsで追跡する
+ * (docs/spec-addenda/ADD-2026-09-25-PURGE.md、docs/runbooks/PURGE_RUNBOOK.md)。
  */
 const DeleteAccountSchema = z.object({
   currentPassword: z.string().min(1),

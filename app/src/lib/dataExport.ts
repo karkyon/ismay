@@ -18,6 +18,10 @@ import { db } from "@/lib/db";
  * 別途スケジュールジョブが必要な大きめの機能のため、本パッチでは対象外とする。
  * 本パッチが実装するのは、エクスポートと、削除要求時点でのsoft-delete
  * (deletedAt設定)までである。
+ *
+ * [2026-09-25注記・現状] アカウントの30日Purgeは実装済み(scripts/run_account_purge.ts、
+ * docs/spec-addenda/ADD-2026-09-25-PURGE.md)。個別エンティティのsoft deleteに対する30日Purgeは
+ * 未実装(docs/status/未決事項台帳.md OPEN-PURGE-04)。
  */
 
 function csvEscape(value: unknown): string {
