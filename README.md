@@ -139,7 +139,8 @@ find src/lib -path '*/__tests__/*.test.ts' | wc -l   # pure/invariant testファ
 DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参照すること。本READMEは
 「存在する／しない」の見取り図に留め、詳細な受入状況までは追跡しない（DOC-13が本来の役割）。
 
-- **認証**：OIDC準拠セッション、TOTP MFA、Refresh Tokenローテーション、セッション一覧・個別失効
+- **認証**：OIDC準拠セッション、TOTP MFA、Refresh Tokenローテーション、セッション一覧・個別失効、
+  メールアドレス確認(未確認はログイン不可)・確認メール再送・パスワード再設定(Gate AUTH-EMAIL-01)
 - **Capture→AI候補→本人決定**：テキスト/音声/画像入力、AI抽出、Responsibility化
 - **Formation Session**：候補分析→質問→本人回答→確定のドメイン(`lib/formation/`)。
   Atomicity Assessment、PII分類、Source Anchor、Question Policy等を含む
@@ -206,7 +207,7 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 
 | 項目 | 状態 |
 |---|---|
-| メールアドレス確認 | **未実装**。登録時に暫定的に即時検証済み扱い(`register/route.ts`にコメント明記)。Notification基盤(provider)未確定のため |
+| メールアドレス確認・パスワード再設定 | **実装済み(AUTH-EMAIL-01)**。登録時は未確認で作成し、確認リンク(24時間・1回限り)で確認するまでログイン不可。再送は60秒間隔かつ1時間5回まで、新リンク発行で旧リンク無効。パスワード再設定は確認済みユーザーのみ(リンク60分・1回限り、成功で全セッション失効)。送信はSMTP(nodemailer)または開発用のログ出力(`MAIL_TRANSPORT`、既定はlog)。本番のSMTP事業者・送信ドメインは未決定(`docs/status/未決事項台帳.md` OPEN-AUTH-01)。詳細は`docs/spec-addenda/ADD-2026-09-26-AUTH-EMAIL.md`、受入: `scripts/verify_gate_auth_email_01.ts` |
 | 管理者ロール(RBAC) | **実装済み**(Gate SECURITY-RBAC-01)。統合正本仕様書v5.0 §20.2の正式語彙(`OWNER/ADMIN/MEMBER/VIEWER/SERVICE`)に基づき、管理API5エンドポイント(`/api/v1/admin/ai-providers`GET/PATCH、`/api/v1/admin/ai-providers/credentials`PUT/DELETE、`/api/v1/admin/ai-usage`GET)をOWNER/ADMINへ限定(`lib/auth/roleGuard.ts`)。拒否時はAuditLogへ記録。現状メンバー招待機能が未実装のため、各Workspaceの唯一のmemberは常にOWNERであり、単一利用者運用に挙動変化はない(招待機能実装への先行防御)。`/api/v1/audit-logs`は本人スコープの自己監査ログのため対象外(意図的) |
 | 30日Purge Job | **実装済み(CLI限定)**。アカウント削除は`deletedAt`によるsoft delete後、30日経過で物理削除対象になる(`lib/admin/purgeJob.ts`、94テーブル中の外部キーグラフを実行時に動的発見し削除順序・スコープを算出)。HTTP経路(`/api/v1/admin/purge/dry-run`・`execute`)は2026-09-20の実DB再監査でP0(全テナント横断の情報漏洩・物理削除を通常のWorkspace OWNER/ADMIN権限で実行できてしまう欠陥、正本にプラットフォーム管理者ロールの契約が無いことに起因)が判明したためfail closedにした。運用者は`scripts/run_account_purge.ts`をサーバー上でCLI直接実行すること(詳細は同ファイル冒頭コメント参照)。プラットフォーム管理者ロールの契約が正本で確定次第、HTTP経路の再開を検討する。**2026-09-25 hardening 02**: 削除対象行をtransaction内でPKのsnapshotとして確定してから処理する方式へ変更(旧実装ではFormationを使ったユーザーがCHECK違反でPurge不能、ai_runs/evidencesが残存していた)。実行時にusers行lock・30日再検証(DB時刻基準)・membership再取得を行い、復元済み・30日未満・共有workspace・外部NOT NULL参照・lock競合は副作用0で拒否する。削除結果と監査記録(AuditLog)を分離し、exit codeはbitmask(2=未削除あり、4=監査記録失敗)。件数は削除(表/workspace/user)と更新(循環遮断・参照匿名化)を分けて報告する。受入: `scripts/verify_gate_purge_hardening_02.ts` |
 | 30日Purge：FKを持たなかった表 | **明示的scope列で削除対象化(PURGE-SCOPE-03A、DEC-PURGE-02B ACCEPTED)**。`event_logs`/`outbox_events`/`jobs`/`consents`へ`workspace_id`(FK)を追加し、`ai_runs.workspace_id`にもFKを張ってFKグラフ経由で削除する。新規行は`workspace_id`必須(DB trigger+`purgeScopeWriteSites.test.ts`)。`audit_logs`は行を保持し、本人関係行の`ip_address`墨消しと`actor_user_id`のNULL化を行う。backfillで解決できない旧行(集約が存在しない孤立行)はNULLのまま残り、CLIに件数を表示する。Object Storage(MinIO)の削除はPURGE-OPS-03Bで実装済み |
@@ -242,6 +243,9 @@ docker compose ps   # 全てhealthyになるまで待つ
 | `MFA_ENCRYPTION_KEY` | TOTP秘密鍵暗号化用(base64, 32byte)。`openssl rand -base64 32` |
 | `ANTHROPIC_API_KEY` | AI抽出/OCR/セグメンテーション/PEM対話・助言のフォールバック用(Workspace単位のBYOK未登録時) |
 | `OPENAI_API_KEY` | Embedding/文字起こしのフォールバック用(同上) |
+| `MAIL_TRANSPORT` | `smtp`または`log`(未設定時は`log`=送信せず本文をサーバーログへ出力。一般公開環境では使わない) |
+| `APP_BASE_URL` | メール内リンクの基点(例: `https://ismay.example.com`)。smtp時は必須。log時の既定は`http://localhost:13000` |
+| `MAIL_FROM` / `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` | SMTP設定(詳細は`docs/runbooks/MAIL_RUNBOOK.md`) |
 
 `.env.example`は現時点で用意されていない。上記変数がリポジトリの唯一の一次情報である
 (2026-09-03時点)。
@@ -365,5 +369,7 @@ sudo systemctl status ismay-app.service
 
 - [`docs/spec-addenda/ADD-2026-09-25-PURGE.md`](docs/spec-addenda/ADD-2026-09-25-PURGE.md): アカウント30日Purgeの正本追補
 - [`docs/runbooks/PURGE_RUNBOOK.md`](docs/runbooks/PURGE_RUNBOOK.md): Purge運用手順
+- [`docs/spec-addenda/ADD-2026-09-26-AUTH-EMAIL.md`](docs/spec-addenda/ADD-2026-09-26-AUTH-EMAIL.md): メールアドレス確認・パスワード再設定の正本追補
+- [`docs/runbooks/MAIL_RUNBOOK.md`](docs/runbooks/MAIL_RUNBOOK.md): メール送信の設定・運用
 - [`docs/status/実装状況台帳_PURGE.md`](docs/status/実装状況台帳_PURGE.md) / [`docs/status/未決事項台帳.md`](docs/status/未決事項台帳.md)
 - [`docs/decisions/`](docs/decisions/): Decision Record

@@ -64,6 +64,15 @@ export async function POST(req: NextRequest) {
   }
   clearFailures(email);
 
+  // [AUTH-EMAIL-01・2026-09-26] メール未確認のユーザーはログイン不可(利用者決定)。
+  // パスワードが正しい場合にだけ返すため、登録有無の列挙には使えない。
+  // 画面側はreason=EMAIL_NOT_VERIFIEDを見て確認メールの再送を案内する。
+  if (!user.emailVerifiedAt) {
+    return apiError("ACCESS_DENIED", "メールアドレスの確認が完了していません。確認メールのリンクを開いてください", {
+      extra: { reason: "EMAIL_NOT_VERIFIED" },
+    });
+  }
+
   const totp = await db.userTotpSecret.findUnique({ where: { userId: user.id } });
   const mfaEnabled = !!totp && !totp.disabledAt;
 

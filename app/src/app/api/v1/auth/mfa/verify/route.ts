@@ -35,6 +35,13 @@ export async function POST(req: NextRequest) {
   if (!user || user.deletedAt || !totp || totp.disabledAt) {
     return apiError("AUTH_REQUIRED", "認証状態が不正です。ログインをやり直してください");
   }
+  // [AUTH-EMAIL-01・2026-09-26] login側で未確認ユーザーにはchallengeTokenを発行しないが、
+  // 念のためセッション発行の直前でも確認する。
+  if (!user.emailVerifiedAt) {
+    return apiError("ACCESS_DENIED", "メールアドレスの確認が完了していません。確認メールのリンクを開いてください", {
+      extra: { reason: "EMAIL_NOT_VERIFIED" },
+    });
+  }
 
   const normalizedCode = code.trim();
   let valid = false;

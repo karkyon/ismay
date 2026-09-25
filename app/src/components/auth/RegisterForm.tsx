@@ -1,19 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { ResendVerificationButton } from "@/components/auth/ResendVerificationButton";
 
 interface ApiError {
   error?: { code: string; message: string };
 }
 
 export function RegisterForm() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // [AUTH-EMAIL-01・2026-09-26] 登録直後はメール未確認でログインできないため、
+  // ログイン画面へ遷移せず確認メールの案内を表示する。
+  const [registeredEmail, setRegisteredEmail] = useState("");
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -30,7 +33,7 @@ export function RegisterForm() {
         setError((body as ApiError).error?.message ?? "登録に失敗しました");
         return;
       }
-      router.push("/login");
+      setRegisteredEmail(email);
     } catch {
       setError("通信に失敗しました。時間をおいて再度お試しください");
     } finally {
@@ -43,6 +46,17 @@ export function RegisterForm() {
       <div className="bg-white rounded-xl shadow-md p-8 w-full max-w-sm">
         <h1 className="text-xl font-bold text-slate-800 mb-1">アカウント登録</h1>
         <p className="text-sm text-slate-500 mb-6">ISMAY（動作確認用）</p>
+        {registeredEmail ? (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-700 bg-slate-50 rounded-lg px-3 py-2">
+              {registeredEmail} 宛てに確認メールを送信しました。メールのリンク(有効期限24時間)を開いて登録を完了してください。確認が済むまでログインできません。
+            </p>
+            <ResendVerificationButton email={registeredEmail} />
+            <Link href="/login" className="block text-center text-sm text-slate-500 underline">
+              ログイン画面へ
+            </Link>
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">表示名(任意)</label>
@@ -82,7 +96,11 @@ export function RegisterForm() {
           >
             {loading ? "登録中..." : "登録する"}
           </button>
+          <Link href="/login" className="block text-center text-xs text-slate-500 underline">
+            ログイン画面へ戻る
+          </Link>
         </form>
+        )}
       </div>
     </div>
   );

@@ -1,12 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ResendVerificationButton } from "@/components/auth/ResendVerificationButton";
 
 type Step = "login" | "mfa-verify";
 
 interface ApiError {
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; reason?: string };
 }
 
 export function LoginForm() {
@@ -18,10 +20,13 @@ export function LoginForm() {
   const [challengeToken, setChallengeToken] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // [AUTH-EMAIL-01・2026-09-26] メール未確認でログインを拒否された場合に再送ボタンを出す
+  const [emailNotVerified, setEmailNotVerified] = useState(false);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    setEmailNotVerified(false);
     setLoading(true);
     try {
       const res = await fetch("/api/v1/auth/login", {
@@ -32,6 +37,7 @@ export function LoginForm() {
       const body = await res.json();
       if (!res.ok) {
         setError((body as ApiError).error?.message ?? "ログインに失敗しました");
+        setEmailNotVerified((body as ApiError).error?.reason === "EMAIL_NOT_VERIFIED");
         return;
       }
       if (body.data.mfaRequired) {
@@ -102,6 +108,7 @@ export function LoginForm() {
               />
             </div>
             {error && <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
+            {emailNotVerified && <ResendVerificationButton email={email} />}
             <button
               type="submit"
               disabled={loading}
@@ -109,6 +116,14 @@ export function LoginForm() {
             >
               {loading ? "確認中..." : "サインイン"}
             </button>
+            <div className="flex justify-between text-xs text-slate-500">
+              <Link href="/forgot-password" className="underline">
+                パスワードをお忘れの方
+              </Link>
+              <Link href="/register" className="underline">
+                アカウント登録
+              </Link>
+            </div>
           </form>
         )}
 

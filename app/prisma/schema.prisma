@@ -105,6 +105,8 @@ model User {
   responsibilityMergeReceiptsAsActor      ResponsibilityMergeReceipt[]
   /// [M1-A4新設] ExternalReferenceConflict.resolvedById逆参照。
   externalReferenceConflictsResolved      ExternalReferenceConflict[]
+  /// [AUTH-EMAIL-01新設・2026-09-26] メール確認・パスワード再設定tokenの逆参照。
+  authEmailTokens                         AuthEmailToken[]
 
   @@map("users")
 }
@@ -133,6 +135,36 @@ model UserSession {
 }
 
 /// FR-AUTH-03対応: TOTP MFA秘密鍵と復旧コード。[新設・推論]
+/// [AUTH-EMAIL-01新設・2026-09-26] メールアドレス確認(EMAIL_VERIFICATION)・
+/// パスワード再設定(PASSWORD_RESET)用の1回限りtoken。
+/// 出典: 全機能仕様一覧 AUTH-RESET「token、期限、rate limit、mail provider、監査」、
+/// 利用者決定(2026-09-26): SMTP+nodemailer、未確認はログイン不可、確認リンク24時間・1回限り、
+/// 再送60秒間隔かつ1時間5回まで、新リンク発行で旧リンク無効。
+/// tokenの平文は保存せずSHA-256のみ保存する。usersへのNOT NULL FK(CASCADE)により
+/// アカウントPurgeのFKグラフでuser scopeとして物理削除される。
+model AuthEmailToken {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// EMAIL_VERIFICATION / PASSWORD_RESET (DB CHECK)
+  purpose      String
+  /// token平文のSHA-256(hex)。平文はメール本文にのみ含まれる
+  tokenHash    String    @unique @map("token_hash")
+  /// 発行時点の送信先。消費時にusers.emailと一致しなければ無効
+  sentToEmail  String    @map("sent_to_email")
+  /// 発行要求元IP(IP単位の発行上限に使用。Purge時は行ごと削除)
+  requestIp    String?   @map("request_ip")
+  expiresAt    DateTime  @map("expires_at")
+  consumedAt   DateTime? @map("consumed_at")
+  /// 同一user・同一purposeで新しいtokenを発行した時点で旧tokenに設定(旧リンク無効)
+  supersededAt DateTime? @map("superseded_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([userId, purpose, createdAt])
+  @@index([requestIp, createdAt])
+  @@map("auth_email_tokens")
+}
+
 model UserTotpSecret {
   id                String    @id @default(uuid())
   userId            String    @unique @map("user_id")

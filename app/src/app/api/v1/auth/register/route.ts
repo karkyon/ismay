@@ -1,9 +1,11 @@
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { debugServer, redactSensitive } from "@/lib/debugServer";
 import { hashPassword, validatePasswordPolicy } from "@/lib/auth/password";
 import { apiOk, apiError } from "@/lib/auth/response";
+import { clientIp } from "@/lib/auth/guard";
+import { deliverEmailToken, issueEmailToken } from "@/lib/auth/emailToken";
 
 const RegisterSchema = z.object({
   email: z.string().email(),
@@ -41,18 +43,33 @@ export async function POST(req: NextRequest) {
 
   const passwordHash = await hashPassword(password);
 
-  // TODO(FR-AUTH-01): メール送信基盤(Notification/MOD-08)が未実装のため、
-  // 暫定的に emailVerifiedAt を即時設定している。基盤実装後は検証メール送信＋
-  // 別途確認エンドポイントでの検証完了を必須化すること。
+  // [AUTH-EMAIL-01・2026-09-26] 旧実装はメール送信基盤が無いため emailVerifiedAt を即時設定していた。
+  // 現在は未確認(null)で作成し、確認メールのリンク(POST /auth/email/verify)で確認を完了する。
+  // 未確認のユーザーはログインできない(利用者決定)。
   const user = await db.user.create({
     data: {
       email: email.toLowerCase(),
       passwordHash,
       displayName: displayName ?? null,
-      emailVerifiedAt: new Date(),
+      emailVerifiedAt: null,
     },
     select: { id: true, email: true, displayName: true, createdAt: true },
   });
 
-  return apiOk({ user }, { status: 201 });
+  const requestIp = clientIp(req);
+  const issued = await issueEmailToken({ purpose: "EMAIL_VERIFICATION", userId: user.id, requestIp });
+  if (issued.status === "ISSUED") {
+    // 送信は応答後に行う(SMTPの遅延・障害で登録応答を止めない)。結果はaudit_logsへ記録する。
+    after(async () => {
+      try {
+        await deliverEmailToken(issued, requestIp);
+      } catch (err) {
+        debugServer.error("POST /auth/register", "確認メール送信処理で例外", err);
+      }
+    });
+  } else {
+    debugServer.event("POST /auth/register", "確認メール未発行", { userId: user.id, reason: issued.reason });
+  }
+
+  return apiOk({ user, verificationRequired: true }, { status: 201 });
 }

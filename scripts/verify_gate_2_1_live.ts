@@ -67,6 +67,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { markTestUserEmailVerified } from "./lib/testEmailVerification";
 
 function loadDotEnv(envPath: string): void {
   let content: string;
@@ -386,6 +387,8 @@ async function main(): Promise<void> {
     if (regRes.status !== 200 && regRes.status !== 201) {
       throw new Error(`テストユーザー登録に失敗しました。status=${regRes.status} body=${JSON.stringify(regRes.json)}`);
     }
+    // [AUTH-EMAIL-01] 未確認ユーザーはログイン不可のため、テストユーザーを確認済みにする
+    await markTestUserEmailVerified(db, TEST_EMAIL);
     const loginRes = await api(jar, "POST", "/api/v1/auth/login", {
       email: TEST_EMAIL,
       password: TEST_PASSWORD,

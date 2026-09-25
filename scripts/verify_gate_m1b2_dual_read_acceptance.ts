@@ -37,6 +37,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { markTestUserEmailVerified } from "./lib/testEmailVerification";
 
 function loadDotEnv(envPath: string): void {
   let content: string;
@@ -128,6 +129,8 @@ async function registerAndLogin(email: string, password: string): Promise<{ jar:
   const jar: CookieJar = {};
   const reg = await api(jar, "POST", "/api/v1/auth/register", { email, password, displayName: "Gate M1B2 DualRead Verify" });
   if (reg.status !== 200 && reg.status !== 201) throw new Error(`登録失敗: ${JSON.stringify(reg.json)}`);
+  // [AUTH-EMAIL-01] 未確認ユーザーはログイン不可のため、テストユーザーを確認済みにする
+  await markTestUserEmailVerified(db, email);
   const login = await api(jar, "POST", "/api/v1/auth/login", { email, password });
   if (login.status !== 200) throw new Error(`ログイン失敗: ${JSON.stringify(login.json)}`);
   return { jar, userId: login.json.data.user.id };
