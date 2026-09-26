@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { markTestUserEmailVerified } from "./lib/testEmailVerification";
+import { grantPemConsentViaApi } from "./lib/pemConsentFixture";
 
 function loadDotEnv(envPath: string): void {
   let content: string;
@@ -144,55 +145,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function cleanupTestUser(userId: string, workspaceId: string | null): Promise<void> {
-  if (workspaceId) {
-    const captures = await db.capture.findMany({ where: { workspaceId }, select: { id: true } }).catch(() => [] as { id: string }[]);
-    const captureIds = captures.map((c: { id: string }) => c.id);
-    if (captureIds.length > 0) {
-      const sessions = await db.formationSession.findMany({ where: { captureId: { in: captureIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-      const sessionIds = sessions.map((s: { id: string }) => s.id);
-      if (sessionIds.length > 0) {
-        const candidates = await db.formationCandidateIdentity.findMany({ where: { sessionId: { in: sessionIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-        const candidateIds = candidates.map((c: { id: string }) => c.id);
-        if (candidateIds.length > 0) {
-          const revisions = await db.formationCandidateRevision.findMany({ where: { candidateId: { in: candidateIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-          const revisionIds = revisions.map((r: { id: string }) => r.id);
-          if (revisionIds.length > 0) {
-            await db.formationSourceAnchor.deleteMany({ where: { revisionId: { in: revisionIds } } }).catch(() => null);
-            await db.formationCandidateDecisionEvent.deleteMany({ where: { revisionId: { in: revisionIds } } }).catch(() => null);
-          }
-          await db.formationCandidateRevision.deleteMany({ where: { candidateId: { in: candidateIds } } }).catch(() => null);
-          await db.formationCandidateDecisionEvent.deleteMany({ where: { candidateId: { in: candidateIds } } }).catch(() => null);
-        }
-        const questions = await db.formationQuestion.findMany({ where: { sessionId: { in: sessionIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-        const questionIds = questions.map((q: { id: string }) => q.id);
-        if (questionIds.length > 0) {
-          await db.formationAnswerEvent.deleteMany({ where: { questionId: { in: questionIds } } }).catch(() => null);
-        }
-        await db.formationQuestion.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationCandidateIdentity.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.materializationReceiptItem.deleteMany({ where: { receipt: { sessionId: { in: sessionIds } } } }).catch(() => null);
-        await db.materializationReceipt.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationSessionEvent.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationSession.deleteMany({ where: { id: { in: sessionIds } } }).catch(() => null);
-      }
-      await db.aiInference.deleteMany({ where: { captureId: { in: captureIds } } }).catch(() => null);
-      await db.aiRun.deleteMany({ where: { captureId: { in: captureIds } } }).catch(() => null);
-      await db.eventLog.deleteMany({ where: { aggregateId: { in: captureIds } } }).catch(() => null);
-      await db.outboxEvent.deleteMany({ where: { aggregateId: { in: captureIds } } }).catch(() => null);
-      // Job.payloadはJsonのため「captureIdがcaptureIds内のいずれか」という一括条件は
-      // Prismaの単純なJSONフィルタでは表現できない。1件ずつpath一致で削除する
-      // (完了済みJob行の掃除はbest-effortであり、これ自体が失敗しても他のcleanupは続行する)。
-      for (const cid of captureIds) {
-        await db.job.deleteMany({ where: { payload: { path: ["captureId"], equals: cid } } }).catch(() => null);
-      }
-      await db.capture.deleteMany({ where: { id: { in: captureIds } } }).catch(() => null);
-    }
+// [AUDIT-BASELINE-01・2026-09-26是正] 旧版は独自のcleanupで表を手書き列挙し、全削除を
+// `.catch(() => null)`で握り潰していた。後続Gateで追加された表(FormationAtomicityAssessment・
+// FormationShadowCheckpoint・Case Pattern Suggest Job等)が漏れ、実DB(omega-dev2)でFK違反となり
+// テストデータが残存した。アカウントPurge本体でFKグラフごと削除する共通処理へ置き換え、
+// 失敗は握り潰さず最終結果のNGとして報告する(scripts/lib/httpVerifyUserCleanup.ts)。
+const cleanupErrors: string[] = [];
+async function cleanupTestUser(userId: string, _workspaceId: string | null): Promise<void> {
+  const { purgeHttpVerifyUser } = await import("./lib/httpVerifyUserCleanup");
+  try {
+    cleanupErrors.push(...(await purgeHttpVerifyUser(db, userId, EMAIL_PREFIX)));
+  } catch (err) {
+    cleanupErrors.push(`${userId}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  await db.workspaceMember.deleteMany({ where: { userId } }).catch(() => null);
-  if (workspaceId) await db.workspace.deleteMany({ where: { id: workspaceId } }).catch(() => null);
-  await db.userSession.deleteMany({ where: { userId } }).catch(() => null);
-  await db.user.deleteMany({ where: { id: userId } }).catch(() => null);
 }
 
 async function sweepOrphans(): Promise<void> {
@@ -224,6 +189,10 @@ async function main(): Promise<void> {
   try {
     const { jar, userId: uid } = await registerAndLogin(TEST_EMAIL, TEST_PASSWORD);
     userId = uid;
+    // [AUDIT-BASELINE-01] PEM-CONSENT-ENQUEUE-GATE以降、解析要求にはPEM_AI_PROCESSING同意が必須。
+    // 本番の同意API経由で付与する(同意なしで通す本番変更はしない)。
+    await grantPemConsentViaApi(api, jar, "PEM_AI_PROCESSING");
+    ok("前提. PEM_AI_PROCESSING同意を正規API(POST /pem/consent)で付与できる", true);
     const warmup = await api(jar, "GET", "/api/v1/captures");
     if (warmup.status !== 200) throw new Error(`ウォームアップ失敗: status=${warmup.status}`);
     const membership = await db.workspaceMember.findFirst({ where: { userId } });
@@ -264,16 +233,27 @@ async function main(): Promise<void> {
     const aiInferences = await db.aiInference.findMany({ where: { captureId, aiRunId: aiRun.id } });
     console.log(`AiRun: ${aiRun.id} status=${aiRun.status} candidateCount=${aiInferences.length}`);
 
-    if (aiRun.status !== "SUCCEEDED") {
-      // FAILEDだった場合、shadow SessionはFAILED状態で作られているはず(候補0件扱い)。
-      ok("1a. AiRun status=SUCCEEDEDでない場合はshadow書込み対象外として扱われている", true, "AiRun failed — skip candidate-level checks");
-    }
-
     // ==== shadow(FormationSession)を読む ====
     const clientSessionKey = `shadow:${aiRun.id}`;
     const sessions = await db.formationSession.findMany({ where: { captureId, clientSessionKey } });
-    ok("1. AiRun 1件につきFormationSessionが1件だけ作られる(冪等キーの一意性)", sessions.length === 1, `count=${sessions.length}`);
-    const session = sessions[0];
+
+    if (aiRun.status !== "SUCCEEDED") {
+      // [AUDIT-BASELINE-01・2026-09-26是正] 旧版は「shadow書込み対象外」とok(true)で記録した直後に
+      // 「FormationSessionが1件」を要求しており自己矛盾していた。lib/ai/extract.tsの失敗経路
+      // (AiRun FAILED・Capture FAILED)はshadow checkpointを作らず、shadow Sessionも作らない。
+      // 実コードの契約どおり「失敗したAiRunからshadow Sessionが作られていない」ことを検証し、
+      // 候補単位の突合(B1の本来の受入対象)は成功したAiRunでのみ行う。失敗経路はB1の受入を
+      // 満たしたことにならないため、最後に明示的にNGとして残す(成功扱いにしない)。
+      ok("1a. 失敗したAiRunからshadow FormationSessionは作られない(extract.ts失敗経路の契約)", sessions.length === 0, `count=${sessions.length}`);
+      ok(
+        "1b. B1受入には成功したAiRunが必要(AI providerの実呼び出しが成功する環境で再実行すること)",
+        false,
+        `AiRun status=${aiRun.status} errorCode=${(aiRun as { errorCode?: string | null }).errorCode ?? "null"}`,
+      );
+    } else {
+      ok("1. AiRun 1件につきFormationSessionが1件だけ作られる(冪等キーの一意性)", sessions.length === 1, `count=${sessions.length}`);
+    }
+    const session = aiRun.status === "SUCCEEDED" ? sessions[0] : undefined;
 
     if (session) {
       const capture = await db.capture.findUnique({ where: { id: captureId } });
@@ -281,8 +261,20 @@ async function main(): Promise<void> {
       ok("3. FormationSession.captureIdが一致", session.captureId === captureId);
       ok("4. FormationSession.subjectUserIdがCapture.createdByと一致", session.subjectUserId === capture?.createdById);
 
-      const expectedState = aiInferences.length > 0 ? "REVIEW_READY" : "FAILED";
-      ok(`5. FormationSession.state=${expectedState}(候補${aiInferences.length}件から期待される状態)`, session.state === expectedState, `actual=${session.state}`);
+      // [AUDIT-BASELINE-01・2026-09-26是正] 旧版は候補1件以上なら常にREVIEW_READYを期待していたが、
+      // M1-B5a(2026-08-30)以降、shadowWrite.tsは候補作成後にQuestion Policyを適用し、
+      // 質問が生成されればCLARIFYING、無ければREVIEW_READYへ遷移する(統合正本§6.3/§6.4、
+      // shadowWrite.ts冒頭コメント)。候補0件はFAILED。期待状態を実際に生成された質問数から導く。
+      const questionCount = await db.formationQuestion.count({ where: { sessionId: session.id } });
+      const expectedState = aiInferences.length === 0 ? "FAILED" : questionCount > 0 ? "CLARIFYING" : "REVIEW_READY";
+      ok(
+        `5. FormationSession.state=${expectedState}(候補${aiInferences.length}件・質問${questionCount}件から期待される状態)`,
+        session.state === expectedState,
+        `actual=${session.state}`,
+      );
+      ok("5b. 生成された質問は3問以内(統合正本§6.4、FORMATION_MAX_QUESTIONS)", questionCount <= 3, `questions=${questionCount}`);
+      const questionAskedEvents = await db.formationSessionEvent.count({ where: { sessionId: session.id, eventType: "QUESTION_ASKED" } });
+      ok("5c. QUESTION_ASKEDイベント数が質問の実件数と一致", questionAskedEvents === questionCount, `events=${questionAskedEvents} questions=${questionCount}`);
 
       const events = await db.formationSessionEvent.findMany({ where: { sessionId: session.id }, orderBy: { sequence: "asc" } });
       const sequences = events.map((e: { sequence: number }) => e.sequence);
@@ -296,24 +288,46 @@ async function main(): Promise<void> {
       ok("8. FormationCandidateIdentity件数がAiInference件数と一致", identities.length === aiInferences.length, `identities=${identities.length}`);
 
       // 候補ごとに、正本(AiInference.payload)とshadow(CandidateRevision)を突合する。
+      // [AUDIT-BASELINE-01・2026-09-26是正] 旧版はrevision.confidenceとAiInference.confidenceの
+      // 数値一致を要求していたが、両者は同じ値の別表現ではない:
+      //   (a) AiInference.confidenceはDecimal(4,3)、FormationCandidateRevision.confidenceは
+      //       Decimal(5,4)で、AIが小数4桁の値を返すと丸めが異なる(実AIで観測、1回目はPASS・2回目はNG)。
+      //   (b) M1-B6A(2026-08-31)以降、有効な根拠範囲(TEXT_OFFSET)を1件も持たない候補は、revisionへ
+      //       NO_EVIDENCE_CONFIDENCE_CAP(0.49)以下で保存される(shadowWrite.ts、capConfidenceForMissingEvidence)。
+      // 正本はAI出力そのもの(AiInference.payload.confidence)とし、revisionは「payload.confidenceへ
+      // 根拠capを適用した値(Decimal(5,4)の丸め誤差内)」、AiInference.confidenceは「payload.confidenceの
+      // Decimal(4,3)丸め誤差内」であることを、それぞれ検証する。
+      const { capConfidenceForMissingEvidence, isValidTextOffsetRange } = await import("../app/src/lib/formation/coreTypes");
+      const fieldMismatches: string[] = [];
       let allFieldsMatch = true;
       let allAnchorsMatch = true;
       let totalExpectedSpans = 0;
       let totalActualAnchors = 0;
       for (const inference of aiInferences) {
-        const payload = inference.payload as { candidateId: string; type: string; title: string; evidenceSpans: { start: number; end: number }[] };
+        const payload = inference.payload as { candidateId: string; type: string; title: string; confidence: number; evidenceSpans: { start: number; end: number }[] };
         const identity = identities.find((i: { candidateKey: string }) => i.candidateKey === payload.candidateId);
         if (!identity) {
           allFieldsMatch = false;
+          fieldMismatches.push(`${payload.candidateId}: identityなし`);
           continue;
         }
         const revision = await db.formationCandidateRevision.findFirst({ where: { candidateId: identity.id, revision: 1 } });
         if (!revision) {
           allFieldsMatch = false;
+          fieldMismatches.push(`${payload.candidateId}: revision 1なし`);
           continue;
         }
-        if (revision.type !== payload.type || revision.title !== payload.title || Number(revision.confidence) !== Number(inference.confidence)) {
+        const hasValidEvidence = payload.evidenceSpans.some((span) => isValidTextOffsetRange(span.start, span.end, RAW_TEXT.length));
+        const expectedRevisionConfidence = capConfidenceForMissingEvidence(payload.confidence, hasValidEvidence);
+        const revisionConfidenceOk = Math.abs(Number(revision.confidence) - expectedRevisionConfidence) <= 0.00005 + 1e-9;
+        const inferenceConfidenceOk = Math.abs(Number(inference.confidence) - payload.confidence) <= 0.0005 + 1e-9;
+        if (revision.type !== payload.type || revision.title !== payload.title || !revisionConfidenceOk || !inferenceConfidenceOk) {
           allFieldsMatch = false;
+          fieldMismatches.push(
+            `${payload.candidateId}: type=${revision.type}/${payload.type} title一致=${revision.title === payload.title} ` +
+              `confidence payload=${payload.confidence} revision=${Number(revision.confidence)}(期待${expectedRevisionConfidence}, 根拠${hasValidEvidence ? "あり" : "なし"}) ` +
+              `inference=${Number(inference.confidence)}`,
+          );
         }
         totalExpectedSpans += payload.evidenceSpans.length;
         const anchors = await db.formationSourceAnchor.findMany({ where: { revisionId: revision.id } });
@@ -331,7 +345,11 @@ async function main(): Promise<void> {
           }
         }
       }
-      ok("9. 全候補でtype/title/confidenceが正本(AiInference)と一致", allFieldsMatch);
+      ok(
+        "9. 全候補でtype/titleが正本(AiInference.payload)と一致し、confidenceは正本に根拠capと列精度の丸めを適用した値と一致",
+        allFieldsMatch,
+        fieldMismatches.join(" / "),
+      );
       ok("10. SOURCE_ANCHOR_ATTACHEDイベント数がSourceAnchor実件数と一致", events.filter((e: { eventType: string }) => e.eventType === "SOURCE_ANCHOR_ATTACHED").length === totalActualAnchors, `events=${events.filter((e: { eventType: string }) => e.eventType === "SOURCE_ANCHOR_ATTACHED").length} anchors=${totalActualAnchors}`);
       ok("11. evidenceSpansの範囲内テキストのexcerptHashが正本のsha256と一致", allAnchorsMatch);
     }
@@ -342,6 +360,9 @@ async function main(): Promise<void> {
   } finally {
     console.log("\n[CLEANUP] テストデータを削除します...");
     if (userId) await cleanupTestUser(userId, workspaceId);
+    ok("cleanup. テストデータの削除でエラーが無い", cleanupErrors.length === 0, cleanupErrors.join(" / "));
+    const leftover = await db.user.count({ where: { email: { startsWith: EMAIL_PREFIX, endsWith: "@example.invalid" } } });
+    ok("cleanup. test用Userが残っていない", leftover === 0, `remaining=${leftover}`);
     console.log("[CLEANUP] 完了。");
   }
 

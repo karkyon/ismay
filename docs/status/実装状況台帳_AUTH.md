@@ -5,12 +5,12 @@ DOC-13（Traceability・実装状況台帳）への追補。
 | 項目 | 値 |
 |---|---|
 | 更新 | 2026-09-26（AUTH-EMAIL-01） |
-| 基準HEAD | `8a85e191af8605dd018ff85597935e89da4041c0`に本Gateを適用 |
+| 基準HEAD | `cabd6a12ce14d9f3ddd966940ba4515d1b08380c`（AUTH-EMAIL-01適用後。2026-09-26 AUDIT-BASELINE-01でcommit hashを確定） |
 
 ## 1. Gate履歴
 | Gate | commit | 内容 | 受入 | 状態 |
 |---|---|---|---|---|
-| AUTH-EMAIL-01 | 本commit | メールアドレス確認、確認メール再送、パスワード再設定、SMTP/ログ送信、`auth_email_tokens` | pure 70/70、実DB 77/77、Purge回帰（hardening_02 59、scope_03a 42、ops_03b 44、pattern_purge_01 31） | 完了 |
+| AUTH-EMAIL-01 | `cabd6a1` | メールアドレス確認、確認メール再送、パスワード再設定、SMTP/ログ送信、`auth_email_tokens` | pure 70/70、実DB 77/77、Purge回帰（hardening_02 59、scope_03a 42、ops_03b 44、pattern_purge_01 31） | 完了 |
 
 ## 2. 要求→実装→検証
 | 要求 | 実装 | 検証 |

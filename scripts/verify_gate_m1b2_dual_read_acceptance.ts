@@ -38,6 +38,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { markTestUserEmailVerified } from "./lib/testEmailVerification";
+import { grantPemConsentViaApi } from "./lib/pemConsentFixture";
 
 function loadDotEnv(envPath: string): void {
   let content: string;
@@ -140,53 +141,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function cleanupTestUser(userId: string, workspaceId: string | null): Promise<void> {
-  if (workspaceId) {
-    const captures = await db.capture.findMany({ where: { workspaceId }, select: { id: true } }).catch(() => [] as { id: string }[]);
-    const captureIds = captures.map((c: { id: string }) => c.id);
-    if (captureIds.length > 0) {
-      const sessions = await db.formationSession.findMany({ where: { captureId: { in: captureIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-      const sessionIds = sessions.map((s: { id: string }) => s.id);
-      if (sessionIds.length > 0) {
-        const candidates = await db.formationCandidateIdentity.findMany({ where: { sessionId: { in: sessionIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-        const candidateIds = candidates.map((c: { id: string }) => c.id);
-        if (candidateIds.length > 0) {
-          const revisions = await db.formationCandidateRevision.findMany({ where: { candidateId: { in: candidateIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-          const revisionIds = revisions.map((r: { id: string }) => r.id);
-          if (revisionIds.length > 0) {
-            await db.formationSourceAnchor.deleteMany({ where: { revisionId: { in: revisionIds } } }).catch(() => null);
-            await db.formationCandidateDecisionEvent.deleteMany({ where: { revisionId: { in: revisionIds } } }).catch(() => null);
-          }
-          await db.formationCandidateRevision.deleteMany({ where: { candidateId: { in: candidateIds } } }).catch(() => null);
-          await db.formationCandidateDecisionEvent.deleteMany({ where: { candidateId: { in: candidateIds } } }).catch(() => null);
-        }
-        const questions = await db.formationQuestion.findMany({ where: { sessionId: { in: sessionIds } }, select: { id: true } }).catch(() => [] as { id: string }[]);
-        const questionIds = questions.map((q: { id: string }) => q.id);
-        if (questionIds.length > 0) {
-          await db.formationAnswerEvent.deleteMany({ where: { questionId: { in: questionIds } } }).catch(() => null);
-        }
-        await db.formationQuestion.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationCandidateIdentity.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.materializationReceiptItem.deleteMany({ where: { receipt: { sessionId: { in: sessionIds } } } }).catch(() => null);
-        await db.materializationReceipt.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationSessionEvent.deleteMany({ where: { sessionId: { in: sessionIds } } }).catch(() => null);
-        await db.formationSession.deleteMany({ where: { id: { in: sessionIds } } }).catch(() => null);
-      }
-      await db.responsibility.deleteMany({ where: { workspaceId, originCaptureId: { in: captureIds } } }).catch(() => null);
-      await db.aiInference.deleteMany({ where: { captureId: { in: captureIds } } }).catch(() => null);
-      await db.aiRun.deleteMany({ where: { captureId: { in: captureIds } } }).catch(() => null);
-      await db.eventLog.deleteMany({ where: { aggregateId: { in: captureIds } } }).catch(() => null);
-      await db.outboxEvent.deleteMany({ where: { aggregateId: { in: captureIds } } }).catch(() => null);
-      for (const cid of captureIds) {
-        await db.job.deleteMany({ where: { payload: { path: ["captureId"], equals: cid } } }).catch(() => null);
-      }
-      await db.capture.deleteMany({ where: { id: { in: captureIds } } }).catch(() => null);
-    }
+// [AUDIT-BASELINE-01・2026-09-26是正] 旧版は独自のcleanupで表を手書き列挙し、全削除を
+// `.catch(() => null)`で握り潰していた。後続Gateで追加された表(FormationAtomicityAssessment・
+// FormationShadowCheckpoint・Case Pattern Suggest Job等)が漏れ、実DB(omega-dev2)でFK違反となり
+// テストデータが残存した。アカウントPurge本体でFKグラフごと削除する共通処理へ置き換え、
+// 失敗は握り潰さず最終結果のNGとして報告する(scripts/lib/httpVerifyUserCleanup.ts)。
+const cleanupErrors: string[] = [];
+async function cleanupTestUser(userId: string, _workspaceId: string | null): Promise<void> {
+  const { purgeHttpVerifyUser } = await import("./lib/httpVerifyUserCleanup");
+  try {
+    cleanupErrors.push(...(await purgeHttpVerifyUser(db, userId, EMAIL_PREFIX)));
+  } catch (err) {
+    cleanupErrors.push(`${userId}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  await db.workspaceMember.deleteMany({ where: { userId } }).catch(() => null);
-  if (workspaceId) await db.workspace.deleteMany({ where: { id: workspaceId } }).catch(() => null);
-  await db.userSession.deleteMany({ where: { userId } }).catch(() => null);
-  await db.user.deleteMany({ where: { id: userId } }).catch(() => null);
 }
 
 async function sweepOrphans(): Promise<void> {
@@ -307,6 +274,10 @@ async function main(): Promise<void> {
   try {
     const { jar, userId: uid } = await registerAndLogin(TEST_EMAIL, TEST_PASSWORD);
     userId = uid;
+    // [AUDIT-BASELINE-01] PEM-CONSENT-ENQUEUE-GATE以降、解析要求にはPEM_AI_PROCESSING同意が必須。
+    // 本番の同意API経由で付与する(同意なしで通す本番変更はしない)。
+    await grantPemConsentViaApi(api, jar, "PEM_AI_PROCESSING");
+    ok("前提. PEM_AI_PROCESSING同意を正規API(POST /pem/consent)で付与できる", true);
     const warmup = await api(jar, "GET", "/api/v1/captures");
     if (warmup.status !== 200) throw new Error(`ウォームアップ失敗: status=${warmup.status}`);
     const membership = await db.workspaceMember.findFirst({ where: { userId } });
@@ -342,55 +313,98 @@ async function main(): Promise<void> {
       `A=${projectionBeforeA?.candidates?.length} B=${projectionBeforeB?.candidates?.length}`,
     );
 
-    // ==== 実際にACCEPT/REJECT(既存route、B2で無変更) ====
-    const acceptRes = await api(jar, "POST", `/api/v1/inferences/${acceptTargetSession.inference.id}/decision`, {
-      decision: "ACCEPT",
-      expectedInferenceVersion: acceptTargetSession.inference.version,
-    });
-    ok("5. ACCEPT操作が201/200を返す", acceptRes.status === 201 || acceptRes.status === 200, `status=${acceptRes.status} body=${JSON.stringify(acceptRes.json)}`);
-    const acceptedResponsibilityId: string | null = acceptRes.json?.data?.responsibilityId ?? null;
-    ok("6. ACCEPT操作でresponsibilityIdが返る", typeof acceptedResponsibilityId === "string" && acceptedResponsibilityId.length > 0);
+    // [AUDIT-BASELINE-01・2026-09-26是正] B4.2(2026-08-29)以降、cutover flag
+    // FEATURE_CHG011_SHARED_CORE=true の環境では、FormationSessionが存在するCaptureの候補に対する
+    // 旧採否API(/inferences/[id]/decision)はSTATE_TRANSITION_INVALIDで拒否される(本番の契約、
+    // inferences/[id]/decision/route.ts)。この場合、B2の「旧採否結果をdual-readで読む」経路は
+    // 環境上成立しないため、B4.2の拒否契約と、拒否後も旧採否状態が変わらずdual-readがそれを
+    // 正しく読むこと(PENDING)を検証する。flag OFF(既定)では従来どおりB2の採否反映を検証する。
+    // 本scriptはapp/.envを読み込むため、稼働中のアプリと同じflag値で判定される。
+    const cutoverEnabled = process.env.FEATURE_CHG011_SHARED_CORE === "true";
+    console.log(`FEATURE_CHG011_SHARED_CORE=${cutoverEnabled ? "true(旧採否APIは閉鎖済み)" : "false(旧採否APIが有効)"}`);
+    if (cutoverEnabled) {
+      for (const [label, target, decision] of [
+        ["ACCEPT", acceptTargetSession, "ACCEPT"],
+        ["REJECT", rejectTargetSession, "REJECT"],
+      ] as const) {
+        const res = await api(jar, "POST", `/api/v1/inferences/${target.inference.id}/decision`, {
+          decision,
+          expectedInferenceVersion: target.inference.version,
+        });
+        ok(
+          `5c. [cutover] ${label}: 旧採否APIはSTATE_TRANSITION_INVALID(422)でFormation経路へ誘導する(B4.2契約)`,
+          res.status === 422 && res.json?.error?.code === "STATE_TRANSITION_INVALID" && res.json?.error?.formationSessionId === target.sessionId,
+          `status=${res.status} body=${JSON.stringify(res.json)}`,
+        );
+        const inferenceAfter = await db.aiInference.findUnique({ where: { id: target.inference.id }, select: { decision: true } });
+        ok(`6c. [cutover] ${label}: 拒否後もAiInference.decisionはPENDINGのまま`, inferenceAfter?.decision === "PENDING", `actual=${inferenceAfter?.decision}`);
+      }
+      const acceptedResponsibilities = await db.responsibility.count({ where: { workspaceId: workspaceId!, originCaptureId: acceptTargetSession.captureId } });
+      ok("7c. [cutover] 拒否された旧採否APIからResponsibilityは作られていない", acceptedResponsibilities === 0, `count=${acceptedResponsibilities}`);
+      const dualReadAfterA = await api(jar, "GET", `/api/v1/formation-sessions/${acceptTargetSession.sessionId}/dual-read`);
+      const dualReadAfterB = await api(jar, "GET", `/api/v1/formation-sessions/${rejectTargetSession.sessionId}/dual-read`);
+      ok("8c. [cutover] dual-read APIが200を返す(両Session)", dualReadAfterA.status === 200 && dualReadAfterB.status === 200, `A=${dualReadAfterA.status} B=${dualReadAfterB.status}`);
+      const stillPending =
+        (dualReadAfterA.json?.data?.dualRead?.candidates ?? []).every((c: { real: { decision: string } | null }) => c.real?.decision === "PENDING") &&
+        (dualReadAfterB.json?.data?.dualRead?.candidates ?? []).every((c: { real: { decision: string } | null }) => c.real?.decision === "PENDING");
+      ok("9c. [cutover] dual-readのreal.decisionは拒否後もPENDING(旧採否状態を正しく読む)", stillPending);
+      ok(
+        "10c. [cutover] dual-read.unmatchedInferenceIdsが空(shadow書込みの取りこぼし無し、両Session)",
+        Array.isArray(dualReadAfterA.json?.data?.dualRead?.unmatchedInferenceIds) && dualReadAfterA.json.data.dualRead.unmatchedInferenceIds.length === 0 &&
+          Array.isArray(dualReadAfterB.json?.data?.dualRead?.unmatchedInferenceIds) && dualReadAfterB.json.data.dualRead.unmatchedInferenceIds.length === 0,
+      );
+    } else {
+      // ==== 実際にACCEPT/REJECT(既存route、B2で無変更) ====
+      const acceptRes = await api(jar, "POST", `/api/v1/inferences/${acceptTargetSession.inference.id}/decision`, {
+        decision: "ACCEPT",
+        expectedInferenceVersion: acceptTargetSession.inference.version,
+      });
+      ok("5. ACCEPT操作が201/200を返す", acceptRes.status === 201 || acceptRes.status === 200, `status=${acceptRes.status} body=${JSON.stringify(acceptRes.json)}`);
+      const acceptedResponsibilityId: string | null = acceptRes.json?.data?.responsibilityId ?? null;
+      ok("6. ACCEPT操作でresponsibilityIdが返る", typeof acceptedResponsibilityId === "string" && acceptedResponsibilityId.length > 0);
 
-    const rejectRes = await api(jar, "POST", `/api/v1/inferences/${rejectTargetSession.inference.id}/decision`, {
-      decision: "REJECT",
-      expectedInferenceVersion: rejectTargetSession.inference.version,
-    });
-    ok("7. REJECT操作が200を返す", rejectRes.status === 200, `status=${rejectRes.status} body=${JSON.stringify(rejectRes.json)}`);
+      const rejectRes = await api(jar, "POST", `/api/v1/inferences/${rejectTargetSession.inference.id}/decision`, {
+        decision: "REJECT",
+        expectedInferenceVersion: rejectTargetSession.inference.version,
+      });
+      ok("7. REJECT操作が200を返す", rejectRes.status === 200, `status=${rejectRes.status} body=${JSON.stringify(rejectRes.json)}`);
 
-    // ==== dual-read(採否操作より後) ====
-    const dualReadAfterA = await api(jar, "GET", `/api/v1/formation-sessions/${acceptTargetSession.sessionId}/dual-read`);
-    const dualReadAfterB = await api(jar, "GET", `/api/v1/formation-sessions/${rejectTargetSession.sessionId}/dual-read`);
-    ok("8. dual-read APIが200を返す(採否後、両Session)", dualReadAfterA.status === 200 && dualReadAfterB.status === 200, `A=${dualReadAfterA.status} B=${dualReadAfterB.status}`);
-    const projectionAfterA = dualReadAfterA.json?.data?.dualRead;
-    const projectionAfterB = dualReadAfterB.json?.data?.dualRead;
+      // ==== dual-read(採否操作より後) ====
+      const dualReadAfterA = await api(jar, "GET", `/api/v1/formation-sessions/${acceptTargetSession.sessionId}/dual-read`);
+      const dualReadAfterB = await api(jar, "GET", `/api/v1/formation-sessions/${rejectTargetSession.sessionId}/dual-read`);
+      ok("8. dual-read APIが200を返す(採否後、両Session)", dualReadAfterA.status === 200 && dualReadAfterB.status === 200, `A=${dualReadAfterA.status} B=${dualReadAfterB.status}`);
+      const projectionAfterA = dualReadAfterA.json?.data?.dualRead;
+      const projectionAfterB = dualReadAfterB.json?.data?.dualRead;
 
-    const acceptedCandidateKey = ResponsibilityCandidateIdFromInference(acceptTargetSession.inference);
-    const rejectedCandidateKey = ResponsibilityCandidateIdFromInference(rejectTargetSession.inference);
+      const acceptedCandidateKey = ResponsibilityCandidateIdFromInference(acceptTargetSession.inference);
+      const rejectedCandidateKey = ResponsibilityCandidateIdFromInference(rejectTargetSession.inference);
 
-    const acceptedCandidate = (projectionAfterA?.candidates ?? []).find(
-      (c: { candidateKey: string }) => c.candidateKey === acceptedCandidateKey,
-    );
-    const rejectedCandidate = (projectionAfterB?.candidates ?? []).find(
-      (c: { candidateKey: string }) => c.candidateKey === rejectedCandidateKey,
-    );
+      const acceptedCandidate = (projectionAfterA?.candidates ?? []).find(
+        (c: { candidateKey: string }) => c.candidateKey === acceptedCandidateKey,
+      );
+      const rejectedCandidate = (projectionAfterB?.candidates ?? []).find(
+        (c: { candidateKey: string }) => c.candidateKey === rejectedCandidateKey,
+      );
 
-    ok("9. dual-readでACCEPTした候補のreal.decision=ACCEPTED", acceptedCandidate?.real?.decision === "ACCEPTED", `actual=${acceptedCandidate?.real?.decision}`);
-    ok(
-      "10. dual-readでACCEPTした候補のreal.responsibilityIdが実際に生成されたResponsibility.idと一致",
-      acceptedCandidate?.real?.responsibilityId === acceptedResponsibilityId,
-      `actual=${acceptedCandidate?.real?.responsibilityId} expected=${acceptedResponsibilityId}`,
-    );
-    ok("11. dual-readでACCEPTした候補のshadow情報(type/title)がB1書込み時点のまま読める", !!acceptedCandidate?.shadow?.type && !!acceptedCandidate?.shadow?.title);
+      ok("9. dual-readでACCEPTした候補のreal.decision=ACCEPTED", acceptedCandidate?.real?.decision === "ACCEPTED", `actual=${acceptedCandidate?.real?.decision}`);
+      ok(
+        "10. dual-readでACCEPTした候補のreal.responsibilityIdが実際に生成されたResponsibility.idと一致",
+        acceptedCandidate?.real?.responsibilityId === acceptedResponsibilityId,
+        `actual=${acceptedCandidate?.real?.responsibilityId} expected=${acceptedResponsibilityId}`,
+      );
+      ok("11. dual-readでACCEPTした候補のshadow情報(type/title)がB1書込み時点のまま読める", !!acceptedCandidate?.shadow?.type && !!acceptedCandidate?.shadow?.title);
 
-    ok("12. dual-readでREJECTした候補のreal.decision=REJECTED", rejectedCandidate?.real?.decision === "REJECTED", `actual=${rejectedCandidate?.real?.decision}`);
-    ok("13. dual-readでREJECTした候補のreal.responsibilityId=null", rejectedCandidate?.real?.responsibilityId === null);
+      ok("12. dual-readでREJECTした候補のreal.decision=REJECTED", rejectedCandidate?.real?.decision === "REJECTED", `actual=${rejectedCandidate?.real?.decision}`);
+      ok("13. dual-readでREJECTした候補のreal.responsibilityId=null", rejectedCandidate?.real?.responsibilityId === null);
 
-    ok(
-      "14. dual-read.unmatchedInferenceIdsが空(shadow書込みの取りこぼし無し、両Session)",
-      Array.isArray(projectionAfterA?.unmatchedInferenceIds) && projectionAfterA.unmatchedInferenceIds.length === 0 &&
-      Array.isArray(projectionAfterB?.unmatchedInferenceIds) && projectionAfterB.unmatchedInferenceIds.length === 0,
-      `A=${JSON.stringify(projectionAfterA?.unmatchedInferenceIds)} B=${JSON.stringify(projectionAfterB?.unmatchedInferenceIds)}`,
-    );
+      ok(
+        "14. dual-read.unmatchedInferenceIdsが空(shadow書込みの取りこぼし無し、両Session)",
+        Array.isArray(projectionAfterA?.unmatchedInferenceIds) && projectionAfterA.unmatchedInferenceIds.length === 0 &&
+        Array.isArray(projectionAfterB?.unmatchedInferenceIds) && projectionAfterB.unmatchedInferenceIds.length === 0,
+        `A=${JSON.stringify(projectionAfterA?.unmatchedInferenceIds)} B=${JSON.stringify(projectionAfterB?.unmatchedInferenceIds)}`,
+      );
+
+    }
 
     // ==== dual-read呼び出しが読み取り専用であることの検証(呼び出し前後でDB実測値が不変) ====
     const afterSessionA = await db.formationSession.findUnique({ where: { id: acceptTargetSession.sessionId } });
@@ -438,6 +452,9 @@ async function main(): Promise<void> {
       console.log("\n[CLEANUP] テストデータを削除します...");
       if (userId) await cleanupTestUser(userId, workspaceId);
       if (otherUserId) await cleanupTestUser(otherUserId, otherWorkspaceId);
+      ok("cleanup. テストデータの削除でエラーが無い", cleanupErrors.length === 0, cleanupErrors.join(" / "));
+      const leftover = await db.user.count({ where: { email: { startsWith: EMAIL_PREFIX, endsWith: "@example.invalid" } } });
+      ok("cleanup. test用Userが残っていない", leftover === 0, `remaining=${leftover}`);
       console.log("[CLEANUP] 完了。");
     }
   }

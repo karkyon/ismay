@@ -20,7 +20,7 @@ DOC-13（Traceability・実装状況台帳）への追補。Gateごとに、comm
 | hardening 02 (SCOPE-02F / ELIGIBILITY-02C / AUDIT-02D / REPORT-02E) | `1f636a8` | snapshot方式、transaction内再検証・lock、監査分離、件数分離 | 59/59、31/31 | 完了 |
 | PURGE-SCOPE-03A | `2cb4a9c` | 明示的scope列、DB trigger、audit_logsの墨消し | 42/42、59/59、31/31 | 完了 |
 | PURGE-OPS-03B | `e7f4769` | 台帳3表、Object Storage段（6段順序）、lease・retry・DEAD_LETTER・再開、保持ポリシー登録制 | 44/44（実MinIO）、42/42、59/59、31/31 | 完了 |
-| DOC-SYNC-04 | 本commit | 正本追補、Runbook、本台帳、未決事項台帳、古いコメントの注記 | — | 完了 |
+| DOC-SYNC-04 | `8a85e19` | 正本追補、Runbook、本台帳、未決事項台帳、古いコメントの注記 | — | 完了 |
 
 ## 2. 要求→実装→検証
 | 要求 | 実装 | 検証 |

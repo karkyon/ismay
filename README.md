@@ -133,11 +133,13 @@ find src/lib -path '*/__tests__/*.test.ts' | wc -l   # pure/invariant testファ
 
 ---
 
-## 実装済み機能領域（2026-09-19時点、実コードベース）
+## 実装済み機能領域（2026-09-26時点、基準HEAD `cabd6a1`、実コードベース）
 
 以下は実装が存在する主要領域の一覧であり、各機能の完成度・受入条件はプロジェクトナレッジ側の
 DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参照すること。本READMEは
-「存在する／しない」の見取り図に留め、詳細な受入状況までは追跡しない（DOC-13が本来の役割）。
+「存在する／しない」の見取り図に留め、詳細な受入状況までは追跡しない。リポジトリ内の実装状況の正本は
+[`docs/status/ISMAY_全機能トレーサビリティ_実装状況台帳.md`](docs/status/ISMAY_全機能トレーサビリティ_実装状況台帳.md)
+（領域ごとの状態・主要symbol・route・migration・受入scriptと実行結果）。
 
 - **認証**：OIDC準拠セッション、TOTP MFA、Refresh Tokenローテーション、セッション一覧・個別失効、
   メールアドレス確認(未確認はログイン不可)・確認メール再送・パスワード再設定(Gate AUTH-EMAIL-01)
@@ -201,7 +203,7 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 
 ## 既知の未完了・保留事項
 
-「全機能完成」ではない。以下は2026-09-19時点で明示的に未実装、または意図的に保留されている
+「全機能完成」ではない。以下は2026-09-26時点で明示的に未実装、または意図的に保留されている
 主要項目（詳細な根拠・出典はコード内コメント、および各Gateのcommitメッセージ・
 `scripts/verify_gate_pattern_*.ts`を参照）：
 
@@ -209,7 +211,8 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 |---|---|
 | メールアドレス確認・パスワード再設定 | **実装済み(AUTH-EMAIL-01)**。登録時は未確認で作成し、確認リンク(24時間・1回限り)で確認するまでログイン不可。再送は60秒間隔かつ1時間5回まで、新リンク発行で旧リンク無効。パスワード再設定は確認済みユーザーのみ(リンク60分・1回限り、成功で全セッション失効)。送信はSMTP(nodemailer)または開発用のログ出力(`MAIL_TRANSPORT`、既定はlog)。本番のSMTP事業者・送信ドメインは未決定(`docs/status/未決事項台帳.md` OPEN-AUTH-01)。詳細は`docs/spec-addenda/ADD-2026-09-26-AUTH-EMAIL.md`、受入: `scripts/verify_gate_auth_email_01.ts` |
 | 管理者ロール(RBAC) | **実装済み**(Gate SECURITY-RBAC-01)。統合正本仕様書v5.0 §20.2の正式語彙(`OWNER/ADMIN/MEMBER/VIEWER/SERVICE`)に基づき、管理API5エンドポイント(`/api/v1/admin/ai-providers`GET/PATCH、`/api/v1/admin/ai-providers/credentials`PUT/DELETE、`/api/v1/admin/ai-usage`GET)をOWNER/ADMINへ限定(`lib/auth/roleGuard.ts`)。拒否時はAuditLogへ記録。現状メンバー招待機能が未実装のため、各Workspaceの唯一のmemberは常にOWNERであり、単一利用者運用に挙動変化はない(招待機能実装への先行防御)。`/api/v1/audit-logs`は本人スコープの自己監査ログのため対象外(意図的) |
-| 30日Purge Job | **実装済み(CLI限定)**。アカウント削除は`deletedAt`によるsoft delete後、30日経過で物理削除対象になる(`lib/admin/purgeJob.ts`、94テーブル中の外部キーグラフを実行時に動的発見し削除順序・スコープを算出)。HTTP経路(`/api/v1/admin/purge/dry-run`・`execute`)は2026-09-20の実DB再監査でP0(全テナント横断の情報漏洩・物理削除を通常のWorkspace OWNER/ADMIN権限で実行できてしまう欠陥、正本にプラットフォーム管理者ロールの契約が無いことに起因)が判明したためfail closedにした。運用者は`scripts/run_account_purge.ts`をサーバー上でCLI直接実行すること(詳細は同ファイル冒頭コメント参照)。プラットフォーム管理者ロールの契約が正本で確定次第、HTTP経路の再開を検討する。**2026-09-25 hardening 02**: 削除対象行をtransaction内でPKのsnapshotとして確定してから処理する方式へ変更(旧実装ではFormationを使ったユーザーがCHECK違反でPurge不能、ai_runs/evidencesが残存していた)。実行時にusers行lock・30日再検証(DB時刻基準)・membership再取得を行い、復元済み・30日未満・共有workspace・外部NOT NULL参照・lock競合は副作用0で拒否する。削除結果と監査記録(AuditLog)を分離し、exit codeはbitmask(2=未削除あり、4=監査記録失敗)。件数は削除(表/workspace/user)と更新(循環遮断・参照匿名化)を分けて報告する。受入: `scripts/verify_gate_purge_hardening_02.ts` |
+| メンバー招待(Team共有) | **停止中(BLOCKED_DECISION、OPEN-AUTH-MEMBER-01)**。業務APIはWorkspace単位scopeが中心でEntity Visibilityの横断強制が無く、招待を有効にすると同じWorkspaceの他memberから個人データが見え得るため、Team/Visibility契約(personal/team workspace、Role×Action、PRIVATE/CONTEXT/WORKSPACE/EXPLICIT、退出・移管等)の承認まで実装しない(招待tokenやschemaだけの先行実装もしない)。詳細は`docs/status/未決事項台帳.md` |
+| 30日Purge Job | **実装済み(CLI限定)**。アカウント削除は`deletedAt`によるsoft delete後、30日経過で物理削除対象になる(`lib/admin/purgeJob.ts`、全テーブルの外部キーグラフを実行時に動的発見し削除順序・スコープを算出。初版時点のテーブル数は94、2026-09-26時点のPrisma modelは98)。HTTP経路(`/api/v1/admin/purge/dry-run`・`execute`)は2026-09-20の実DB再監査でP0(全テナント横断の情報漏洩・物理削除を通常のWorkspace OWNER/ADMIN権限で実行できてしまう欠陥、正本にプラットフォーム管理者ロールの契約が無いことに起因)が判明したためfail closedにした。運用者は`scripts/run_account_purge.ts`をサーバー上でCLI直接実行すること(詳細は同ファイル冒頭コメント参照)。プラットフォーム管理者ロールの契約が正本で確定次第、HTTP経路の再開を検討する。**2026-09-25 hardening 02**: 削除対象行をtransaction内でPKのsnapshotとして確定してから処理する方式へ変更(旧実装ではFormationを使ったユーザーがCHECK違反でPurge不能、ai_runs/evidencesが残存していた)。実行時にusers行lock・30日再検証(DB時刻基準)・membership再取得を行い、復元済み・30日未満・共有workspace・外部NOT NULL参照・lock競合は副作用0で拒否する。削除結果と監査記録(AuditLog)を分離し、exit codeはbitmask(2=未削除あり、4=監査記録失敗)。件数は削除(表/workspace/user)と更新(循環遮断・参照匿名化)を分けて報告する。受入: `scripts/verify_gate_purge_hardening_02.ts` |
 | 30日Purge：FKを持たなかった表 | **明示的scope列で削除対象化(PURGE-SCOPE-03A、DEC-PURGE-02B ACCEPTED)**。`event_logs`/`outbox_events`/`jobs`/`consents`へ`workspace_id`(FK)を追加し、`ai_runs.workspace_id`にもFKを張ってFKグラフ経由で削除する。新規行は`workspace_id`必須(DB trigger+`purgeScopeWriteSites.test.ts`)。`audit_logs`は行を保持し、本人関係行の`ip_address`墨消しと`actor_user_id`のNULL化を行う。backfillで解決できない旧行(集約が存在しない孤立行)はNULLのまま残り、CLIに件数を表示する。Object Storage(MinIO)の削除はPURGE-OPS-03Bで実装済み |
 | 30日Purge：運用台帳・Object Storage | **実装済み(PURGE-OPS-03B)**。`purge_runs`/`purge_items`/`purge_item_objects`へ記録し、DEC-PURGE-02B §7.1の順序(台帳snapshot→MinIO削除→不存在確認→DB物理削除→匿名化・監査記録→Run完了)で1ユーザーずつ処理する。工程1〜4はusers行lock中の同一transaction内。batch size・lease・retry(指数backoff)・DEAD_LETTER・`--resume=<runId>`・`--status=<runId>`・planned/actual digestに対応。非scope表は`PURGE_RETENTION_POLICY`への登録が必須(未登録があれば実行拒否)。受入: `scripts/verify_gate_purge_ops_03b.ts`(MinIO接続が必要) |
 | 個別エンティティsoft deleteの30日Purge | **未実装**。Responsibility等の単体soft delete(`deletedAt`)を30日後に物理削除する機能はアカウントPurgeとは別で未着手 |
@@ -248,7 +251,7 @@ docker compose ps   # 全てhealthyになるまで待つ
 | `MAIL_FROM` / `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` | SMTP設定(詳細は`docs/runbooks/MAIL_RUNBOOK.md`) |
 
 `.env.example`は現時点で用意されていない。上記変数がリポジトリの唯一の一次情報である
-(2026-09-03時点)。
+(2026-09-26時点)。
 
 ### アプリのセットアップ・開発サーバー起動
 

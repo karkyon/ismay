@@ -338,6 +338,9 @@ async function cleanupTestUser(params: {
   // 明示的に削除しておく(意図を明確にするため)。
   await db.userSession.deleteMany({ where: { userId } }).catch(() => null);
   await db.user.deleteMany({ where: { id: userId } }).catch(() => null);
+  // [AUDIT-BASELINE-01] AUTH-EMAIL-01以降、登録時の確認メール送信がaudit_logs(target=User)へ記録されるため、
+  // テストユーザー分を削除する(実ユーザーの監査記録には触れない)。
+  await db.auditLog.deleteMany({ where: { targetType: "User", targetId: userId } }).catch(() => null);
 }
 
 /**
@@ -603,6 +606,37 @@ async function main(): Promise<void> {
       createdResponsibilityIds.push(a.responsibilityId, b.responsibilityId);
       const bReceiptId = b.undo.snapshot[0].receiptId;
 
+      // [AUDIT-BASELINE-01・2026-09-26是正] 旧版はBのSTATUS_CHANGED EventLog/OutboxEventが
+      // 「0件」であることを期待していたが、Bの一括完了(createTaskAndComplete)自体が
+      // STATUS_CHANGED EventLogとResponsibilityTransitioned.v1 Outboxを正しく記録する
+      // (bulkOperations.tsの完了処理)ため、Undo要求の前から1件ずつ存在する。
+      // この試験が証明すべき契約は「拒否されたバッチUndoがBについて何も書き残さない」
+      // ことなので、Undo要求直前の件数をbaselineとして取り、(a)件数がbaselineから
+      // 増えていない、(b)Undo固有の記録(afterJson.bulkUndo=true / payload.action=
+      // UNDO_COMPLETE)が1件も無い、を検証する。さらに後始末の正当なUndo後に同じ
+      // 検索でUndo固有の記録が1件だけ見つかることを確認し、検索条件が空振りして
+      // いない(拒否時の0件が偽陰性でない)ことを保証する。
+      const countBStatusChanged = () =>
+        db.eventLog.count({ where: { aggregateId: b.responsibilityId, eventType: "STATUS_CHANGED" } });
+      const countBTransitionOutbox = () =>
+        db.outboxEvent.count({ where: { aggregateId: b.responsibilityId, eventName: "ResponsibilityTransitioned.v1" } });
+      const countBUndoEventLogs = () =>
+        db.eventLog.count({
+          where: { aggregateId: b.responsibilityId, eventType: "STATUS_CHANGED", afterJson: { path: ["bulkUndo"], equals: true } },
+        });
+      const countBUndoOutbox = () =>
+        db.outboxEvent.count({
+          where: { aggregateId: b.responsibilityId, eventName: "ResponsibilityTransitioned.v1", payload: { path: ["action"], equals: "UNDO_COMPLETE" } },
+        });
+      const baselineStatusChanged = await countBStatusChanged();
+      const baselineTransitionOutbox = await countBTransitionOutbox();
+      const baselineLifecycle = await db.responsibilityLifecycleEvent.count({ where: { responsibilityId: b.responsibilityId } });
+      ok(
+        "9. 前提: Bの一括完了がSTATUS_CHANGED EventLog/Outboxを記録済み(baseline>=1、Undo前から存在する)",
+        baselineStatusChanged >= 1 && baselineTransitionOutbox >= 1,
+        `eventLog=${baselineStatusChanged} outbox=${baselineTransitionOutbox}`,
+      );
+
       const mixedUndo = {
         action: "COMPLETE",
         snapshot: [
@@ -626,20 +660,28 @@ async function main(): Promise<void> {
       );
       const bConsumption = await db.bulkCompleteUndoConsumption.findUnique({ where: { receiptId: bReceiptId } });
       ok("9. 混在バッチ拒否後: Bの冪等記録も残っていない", bConsumption === null);
-      const bLifecycleEvents = await db.responsibilityLifecycleEvent.findMany({
-        where: { responsibilityId: b.responsibilityId },
-      });
-      ok("9. 混在バッチ拒否後: BのLifecycle Eventも残っていない", bLifecycleEvents.length === 0);
-      const bEventLogs = await db.eventLog.findMany({
-        where: { aggregateId: b.responsibilityId, eventType: "STATUS_CHANGED" },
-      });
-      ok("9. 混在バッチ拒否後: BのSTATUS_CHANGED EventLogも残っていない", bEventLogs.length === 0);
-      const bOutboxEvents = await db.outboxEvent.findMany({
-        where: { aggregateId: b.responsibilityId, eventName: "ResponsibilityTransitioned.v1" },
-      });
-      ok("9. 混在バッチ拒否後: BのOutboxEventも残っていない", bOutboxEvents.length === 0);
-      // 後始末: Bを正しくUndoしておく。
-      await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", b.undo);
+      const bLifecycleAfter = await db.responsibilityLifecycleEvent.count({ where: { responsibilityId: b.responsibilityId } });
+      ok("9. 混在バッチ拒否後: BのLifecycle Eventが増えていない", bLifecycleAfter === baselineLifecycle, `baseline=${baselineLifecycle} after=${bLifecycleAfter}`);
+      const statusChangedAfter = await countBStatusChanged();
+      ok(
+        "9. 混在バッチ拒否後: BのSTATUS_CHANGED EventLogがUndo要求前(baseline)から増えていない",
+        statusChangedAfter === baselineStatusChanged,
+        `baseline=${baselineStatusChanged} after=${statusChangedAfter}`,
+      );
+      const transitionOutboxAfter = await countBTransitionOutbox();
+      ok(
+        "9. 混在バッチ拒否後: BのResponsibilityTransitioned OutboxがUndo要求前(baseline)から増えていない",
+        transitionOutboxAfter === baselineTransitionOutbox,
+        `baseline=${baselineTransitionOutbox} after=${transitionOutboxAfter}`,
+      );
+      ok("9. 混在バッチ拒否後: BのUndo固有EventLog(afterJson.bulkUndo=true)が0件", (await countBUndoEventLogs()) === 0);
+      ok("9. 混在バッチ拒否後: BのUndo固有Outbox(payload.action=UNDO_COMPLETE)が0件", (await countBUndoOutbox()) === 0);
+      // 後始末: Bを正しくUndoしておく。あわせて、上の検索条件が正当なUndoの記録を
+      // 実際に捕捉できること(拒否時の0件が空振りでないこと)を確認する。
+      const cleanupUndo = await api(jar, "POST", "/api/v1/responsibilities/bulk/undo", b.undo);
+      ok("9. 後始末: Bの正当なUndoはrestored===1", cleanupUndo.status === 200 && cleanupUndo.json?.data?.restored === 1, `status=${cleanupUndo.status}`);
+      ok("9. 検出力: 正当なUndo後はBのUndo固有EventLogが1件(同じ検索条件で捕捉できる)", (await countBUndoEventLogs()) === 1);
+      ok("9. 検出力: 正当なUndo後はBのUndo固有Outboxが1件(同じ検索条件で捕捉できる)", (await countBUndoOutbox()) === 1);
     }
 
     // =====================================================================
