@@ -4,13 +4,13 @@
 |---|---|
 | project | **ISMAY** |
 | repository | `karkyon/ismay` |
-| baseline HEAD | `d3844e475159e733b048a5f8c16bc1da81f30f7b`（SECURITY-ENCRYPTION-01A）。本台帳はGate AUDIT-BASELINE-01（`137c5e3`、当時の基準`cabd6a1`）で作成し、Gate DOC-SYNC-05でomega-dev2の実行結果と最新HEADへ同期 |
+| baseline HEAD | `8c0922f`（SECURITY-RATE-02A）＋Gate SECURITY-RATE-02B（本台帳を更新したcommit）。本台帳はGate AUDIT-BASELINE-01（`137c5e3`、当時の基準`cabd6a1`）で作成し、Gate DOC-SYNC-05（`12c3174`）でomega-dev2の実行結果と`d3844e4`へ同期 |
 | observed_at | 2026-09-26 |
 | Prisma model | 98（`grep -c '^model ' app/prisma/schema.prisma`） |
 | migration | 69（`app/prisma/migrations`直下のディレクトリ数） |
 | API route | 94（`find app/src/app/api -name route.ts`） |
 | page | 20（`find app/src/app -name page.tsx`） |
-| pure/invariant test file | 32（`find app/src/lib -path '*/__tests__/*.test.ts'`） |
+| pure/invariant test file | 33（`find app/src/lib -path '*/__tests__/*.test.ts'`。SECURITY-RATE-02Bで`security/__tests__/securityRate.test.ts`を追加） |
 
 > 本台帳はISMAY（`karkyon/ismay`）専用である。別プロジェクト（例：TravelCanvas `karkyon/travelcanvas`）の台帳・要求ID（FR-001〜058等）を証拠として引用・転記しない。プロジェクトナレッジにある`10_全機能仕様_トレーサビリティ_実装状況台帳_v5.1.md`は、本文がTravelCanvasの台帳であることが確認されたため、ISMAYの証拠として扱わない。
 
@@ -48,6 +48,7 @@
 | `verify_gate_purge_ops_03b.ts` | 44 / 0 | 44 / 0（実MinIO） | 環境Aはs3rver使用 |
 | `verify_gate_pattern_purge_01.ts` | 31 / 0 | 31 / 0 | cleanupで既にPurge済みの行を`delete`する際の「対象なし」エラーは無害（`.catch`で握る設計） |
 | `verify_gate_pattern_closedloop_e2e_02.ts` | 15 / 0 | 15 / 0 | AI network遮断下の非課金E2E |
+| `verify_gate_security_rate_02.ts`（SECURITY-RATE-02B） | 67 / 0（`npm run start`＋信頼proxy instance）、62 / 0・SKIP 2（`next start`構成：peer不明のためIP上限・信頼proxy試験はSKIP） | **未実行** | 実Redis（Redis 7）。[R7]の`ECONNREFUSED 127.0.0.1:1`・`DEGRADED`のerror logは接続不能時policyの意図的な試験 |
 
 ### 2.3 AUDIT-BASELINE-01・DOC-SYNC-05で実行していないもの
 - 上記以外の`verify_gate_*.ts`（約60本）の全量再実行。個別Gate時点の受入記録はcommit履歴を参照（本台帳では「当該Gate時点で受入済み」と「今回再実行した」を区別する）。
@@ -69,8 +70,8 @@
 ### 4.1 Auth
 | 機能 | 状態 | 主要symbol / route | migration | 検証 | 既知残件 |
 |---|---|---|---|---|---|
-| 登録・ログイン・JWT・Refreshローテーション | INTEGRATED | `lib/auth/session.ts` `createSession` `rotateSession`、`auth/login` `auth/refresh` `auth/logout` | `init_core_schema_v2` | HTTP受入script 5本がregister→loginを通る（2_1_live 65/0） | ログイン失敗ロックがプロセス内メモリ（OPEN-AUTH-02） |
-| TOTP MFA・復旧コード | INTEGRATED | `lib/auth/totp.ts`、`auth/mfa/*` | 同上 | 実DB受入scriptなし（静的確認） | 秘密鍵暗号化の正式契約（OPEN-SECURITY-ENCRYPTION-01）、MFA verifyの試行回数制限なし（OPEN-AUTH-02） |
+| 登録・ログイン・JWT・Refreshローテーション | INTEGRATED | `lib/auth/session.ts` `createSession` `rotateSession`、`auth/login` `auth/refresh` `auth/logout` | `init_core_schema_v2` | HTTP受入script 5本がregister→loginを通る（2_1_live 65/0）。SECURITY-RATE-02B後の環境Aで2_1_live 65/0・m1a EV-C-001〜004 PASS・m1a2 28/0 | 回転済みrefresh tokenの再利用で系列失効しない（OPEN-AUTH-07） |
+| TOTP MFA・復旧コード | INTEGRATED | `lib/auth/totp.ts`、`auth/mfa/*` | 同上 | 実DB受入scriptなし（静的確認） | 秘密鍵暗号化の正式契約（OPEN-SECURITY-ENCRYPTION-01）。MFA verifyの試行制限はSECURITY-RATE-02Bで追加（[H4]） |
 | セッション一覧・個別失効 | INTEGRATED | `auth/sessions`、`listActiveSessions` | 同上 | — | — |
 | メール確認・再送・パスワード再設定 | VERIFIED | `lib/auth/emailToken.ts` `emailTokenCore.ts`、`lib/mail/`、`auth/email/*` `auth/password/forgot|reset` | `20260926010000_auth_email_01` | pure 70/70、実DB 77/77（環境A・B） | 本番SMTP（OPEN-AUTH-01）、メール変更（OPEN-AUTH-03）、未確認放置（OPEN-AUTH-04）、既定値承認（OPEN-AUTH-05） |
 | アカウント削除（soft delete） | INTEGRATED | `auth/account/delete` | — | Purge受入のfixtureとして使用 | — |
@@ -147,22 +148,22 @@
 | 通知（アプリ内） | INTEGRATED | `lib/notifications/notificationPlanner.ts`、`notifications/*` | 外部channel（Web Push・Email）未着手 |
 | 監査ログ | INTEGRATED | `audit_logs`、`audit-logs` | 保持期間（OPEN-PURGE-03） |
 | 機微データ暗号化 | PARTIAL（DECISION_REQUIRED） | 実装はTOTP秘密鍵・AI credentialのみAES-256-GCM（key version・AAD・rotationなし）。Gate SECURITY-ENCRYPTION-01A（`d3844e4`）で対象列棚卸し・脅威モデル・移行案・Gate分割（01B〜01E）を契約案として作成したのみで、暗号化の実装・schema変更は無い | OPEN-SECURITY-ENCRYPTION-01（[DEC-SECURITY-ENCRYPTION-01](../decisions/DEC-SECURITY-ENCRYPTION-01.md) PROPOSED、利用者決定待ち。決定前に01B以降へ着手しない） |
-| 永続rate limit・proxy信頼境界 | PARTIAL | メール発行はDB履歴で制限、ログインはメモリ | OPEN-AUTH-02 |
+| 永続rate limit・proxy信頼境界 | INTEGRATED | `lib/security/clientIp.ts` `ipAddress.ts` `rateLimiter.ts` `rateLimitPolicies.ts`、`app/server.mjs`（`npm run start`）、login・MFA verify・email resend・password forgot（[DEC-SECURITY-RATE-02](../decisions/DEC-SECURITY-RATE-02.md)）。環境A：pure 138/0、実Redis＋HTTP 67/0（§2.2） | 環境B（omega-dev2）の受入未実行、新規閾値の承認（OPEN-AUTH-06）、register・AI・検索・export等は対象外 |
 | backup/restore実地試験・監視・alert | NOT_STARTED | — | DEC-006 |
 
 ## 5. 状態集計（§4の行数）
 | 状態 | 件数 |
 |---|---:|
 | VERIFIED | 6 |
-| INTEGRATED | 19 |
+| INTEGRATED | 20 |
 | IMPLEMENTED | 5 |
-| PARTIAL | 5 |
+| PARTIAL | 4 |
 | SPECIFIED | 2 |
 | NOT_STARTED | 4 |
 | BLOCKED_DECISION | 3 |
 | 合計 | 44 |
 
-`PARTIAL（DECISION_REQUIRED）`はPARTIALとして数える。DOC-SYNC-05での変化：Formation B1/B2をINTEGRATED→VERIFIED（環境B実AIの全件PASS）。
+`PARTIAL（DECISION_REQUIRED）`はPARTIALとして数える。DOC-SYNC-05での変化：Formation B1/B2をINTEGRATED→VERIFIED（環境B実AIの全件PASS）。SECURITY-RATE-02Bでの変化：永続rate limit・proxy信頼境界をPARTIAL→INTEGRATED（環境Aのみ。環境Bの受入後にVERIFIEDを判断）。
 
 ## 6. 更新規則
 - Gateを追加・変更したら、該当行の状態・根拠・検証を更新し、冒頭のbaseline HEAD・observed_at・実測値を更新する。

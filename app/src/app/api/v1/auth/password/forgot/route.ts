@@ -4,6 +4,8 @@ import { debugServer } from "@/lib/debugServer";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { clientIp } from "@/lib/auth/guard";
 import { deliverEmailToken, issueEmailToken } from "@/lib/auth/emailToken";
+import { consumeRateLimit } from "@/lib/security/rateLimiter";
+import { RATE_LIMIT_POLICIES } from "@/lib/security/rateLimitPolicies";
 import { EMAIL_TOKEN_POLICY, describeTtl } from "@/lib/auth/emailTokenCore";
 
 /**
@@ -27,6 +29,13 @@ export async function POST(req: NextRequest) {
     });
   }
   const requestIp = clientIp(req);
+  // [SECURITY-RATE-02B新設・2026-09-26] IP単位の要求回数制限(Redis)。DB側の発行上限(user・IP)は多層防御として維持する。
+  // 上限到達・Redis障害(fail closed)のいずれも応答は変えず、発行・送信だけを行わない(アドレスの列挙対策)。
+  const limit = await consumeRateLimit("POST /auth/password/forgot", [{ policy: RATE_LIMIT_POLICIES.PASSWORD_FORGOT_IP, value: requestIp }]);
+  if (!limit.allowed) {
+    debugServer.event("POST /auth/password/forgot", "再設定メール未発行(rate limit)", { reason: limit.reason, policies: limit.deniedPolicyIds });
+    return apiOk({ accepted: true, message: ACCEPTED_MESSAGE });
+  }
   const issued = await issueEmailToken({ purpose: "PASSWORD_RESET", email: parsed.data.email, requestIp });
   if (issued.status === "ISSUED") {
     after(async () => {

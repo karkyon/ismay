@@ -8,39 +8,21 @@ import { createSession } from "@/lib/auth/session";
 import { setAuthCookies } from "@/lib/auth/cookies";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { clientIp } from "@/lib/auth/guard";
+import { consumeRateLimit, settleRateLimitSuccess } from "@/lib/security/rateLimiter";
+import { RATE_LIMIT_POLICIES } from "@/lib/security/rateLimitPolicies";
+import { withRetryAfter } from "@/lib/security/rateLimitHttp";
 
 const LoginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
 
-// FR-AUTH-02受入基準の一部: 連続失敗時のロック。[推論・簡易実装]
-const MAX_ATTEMPTS = 10;
-const LOCK_WINDOW_MS = 15 * 60 * 1000;
-const failureLog = new Map<string, { count: number; firstAt: number }>();
-
-function isLocked(email: string): boolean {
-  const entry = failureLog.get(email);
-  if (!entry) return false;
-  if (Date.now() - entry.firstAt > LOCK_WINDOW_MS) {
-    failureLog.delete(email);
-    return false;
-  }
-  return entry.count >= MAX_ATTEMPTS;
-}
-
-function recordFailure(email: string): void {
-  const entry = failureLog.get(email);
-  if (!entry || Date.now() - entry.firstAt > LOCK_WINDOW_MS) {
-    failureLog.set(email, { count: 1, firstAt: Date.now() });
-  } else {
-    entry.count += 1;
-  }
-}
-
-function clearFailures(email: string): void {
-  failureLog.delete(email);
-}
+// FR-AUTH-02受入基準の一部: 連続失敗時のロック。
+// [SECURITY-RATE-02B是正・2026-09-26] 旧実装はprocess内Map(再起動で消え、複数processで共有されず、
+// 判定と記録が別処理のため同時要求で上限を超え得た)。Redis token bucket(lib/security/rateLimiter.ts)へ
+// 置き換えた。試行の前に1回分を原子的に消費し、正しいパスワードだった場合だけ戻す
+// (account: 満杯へ戻す=旧clearFailuresと同じ、IP: 今回の1回分だけ戻す)。
+// 値はlib/security/rateLimitPolicies.ts(同一emailで15分10回は旧実装の値を継承)。
 
 export async function POST(req: NextRequest) {
   const json = await req.json().catch(() => null);
@@ -52,17 +34,34 @@ export async function POST(req: NextRequest) {
   const email = parsed.data.email.toLowerCase();
   const { password } = parsed.data;
 
-  if (isLocked(email)) {
-    return apiError("ACCOUNT_LOCKED", "試行回数の上限に達しました。しばらく時間を置いてから再度お試しください");
+  const requestIp = clientIp(req);
+  // 登録の有無に関わらず同じ規則で消費する(応答からアドレスの登録有無を判別させない)
+  const limit = await consumeRateLimit(
+    "POST /auth/login",
+    [
+      { policy: RATE_LIMIT_POLICIES.LOGIN_ACCOUNT, value: email },
+      { policy: RATE_LIMIT_POLICIES.LOGIN_IP, value: requestIp },
+    ],
+  );
+  if (!limit.allowed) {
+    if (limit.deniedPolicyIds.includes(RATE_LIMIT_POLICIES.LOGIN_ACCOUNT.id)) {
+      return withRetryAfter(
+        apiError("ACCOUNT_LOCKED", "試行回数の上限に達しました。しばらく時間を置いてから再度お試しください"),
+        limit.retryAfterMs,
+      );
+    }
+    return withRetryAfter(
+      apiError("RATE_LIMITED", "短時間に多くのログインが試行されました。しばらく時間を置いてから再度お試しください", { retryable: true }),
+      limit.retryAfterMs,
+    );
   }
 
   const user = await db.user.findUnique({ where: { email } });
   if (!user || user.deletedAt || !(await verifyPassword(password, user.passwordHash))) {
-    recordFailure(email);
     // 列挙攻撃対策: メール未登録とパスワード不一致を区別しないメッセージにする
     return apiError("CREDENTIALS_INVALID", "メールアドレスまたはパスワードが正しくありません");
   }
-  clearFailures(email);
+  await settleRateLimitSuccess(limit);
 
   // [AUTH-EMAIL-01・2026-09-26] メール未確認のユーザーはログイン不可(利用者決定)。
   // パスワードが正しい場合にだけ返すため、登録有無の列挙には使えない。
@@ -83,7 +82,7 @@ export async function POST(req: NextRequest) {
 
   const tokens = await createSession(user.id, user.email, {
     userAgent: req.headers.get("user-agent"),
-    ipAddress: clientIp(req),
+    ipAddress: requestIp,
   });
 
   const res = apiOk({

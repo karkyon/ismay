@@ -8,6 +8,9 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // [SECURITY-RATE-02B・2026-09-26] rate limit backend・client IP解決の構成を起動時に表示する
+    const { logSecurityRateStartupSummary } = await import("@/lib/security/startupCheck");
+    logSecurityRateStartupSummary();
     const { startBackgroundWorker } = await import("@/lib/worker");
     startBackgroundWorker();
   }

@@ -4,13 +4,15 @@ DOC-13（Traceability・実装状況台帳）への追補。
 
 | 項目 | 値 |
 |---|---|
-| 更新 | 2026-09-26（AUTH-EMAIL-01） |
+| 更新 | 2026-09-26（SECURITY-RATE-02B） |
 | 基準HEAD | `cabd6a12ce14d9f3ddd966940ba4515d1b08380c`（AUTH-EMAIL-01適用後。2026-09-26 AUDIT-BASELINE-01でcommit hashを確定） |
 
 ## 1. Gate履歴
 | Gate | commit | 内容 | 受入 | 状態 |
 |---|---|---|---|---|
 | AUTH-EMAIL-01 | `cabd6a1` | メールアドレス確認、確認メール再送、パスワード再設定、SMTP/ログ送信、`auth_email_tokens` | pure 70/70、実DB 77/77、Purge回帰（hardening_02 59、scope_03a 42、ops_03b 44、pattern_purge_01 31） | 完了 |
+| SECURITY-RATE-02A | `8c0922f` | proxy信頼境界・client IP・永続rate limitの契約（[DEC-SECURITY-RATE-02](../decisions/DEC-SECURITY-RATE-02.md)） | — | 完了 |
+| SECURITY-RATE-02B | 本台帳を更新したcommit | client IP解決の一本化（custom serverでpeer取得、`TRUSTED_PROXY_CIDRS`）、Redis token bucket（login・MFA verify・email resend・password forgot）、縮退・fail closed、監査 | 環境A：pure 138/0、実Redis＋HTTP 67/0、回帰（auth_email_01 77/0、2_1_live 65/0、m1a EV-C-001〜004 PASS、m1a2 28/0）。環境B未実行、M1B1/M1B2（実AI）未実行 | 環境B受入待ち |
 
 ## 2. 要求→実装→検証
 | 要求 | 実装 | 検証 |
@@ -26,4 +28,4 @@ DOC-13（Traceability・実装状況台帳）への追補。
 | アカウントPurgeで削除 | usersへのCASCADE FK（user scope） | [A12] |
 
 ## 3. 実装済みでないもの
-[未決事項台帳](./未決事項台帳.md)のOPEN-AUTH-01〜05を参照。
+[未決事項台帳](./未決事項台帳.md)のOPEN-AUTH-01〜07を参照。

@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { verifyAccessToken, type VerifiedAccessToken } from "@/lib/auth/tokens";
 import { getAccessTokenCookieName, getCsrfCookieName, verifyCsrf } from "@/lib/auth/cookies";
+import { resolveRequestClientIpText } from "@/lib/security/clientIp";
 
 export type AuthResult =
   | { authenticated: true; user: VerifiedAccessToken }
@@ -26,8 +27,12 @@ export function requireCsrf(req: NextRequest): boolean {
   return verifyCsrf(cookieValue, headerValue);
 }
 
+/**
+ * client IP(正規化済み文字列)。不明ならnull。
+ * [SECURITY-RATE-02B是正・2026-09-26] 旧実装は`X-Forwarded-For`の先頭要素・`X-Real-IP`
+ * (攻撃者が自由に書ける値)を採用していた。解決規則は lib/security/clientIp.ts に一本化した
+ * (信頼proxy未設定時はforwarded系headerを使わない)。
+ */
 export function clientIp(req: NextRequest): string | null {
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0]?.trim() ?? null;
-  return req.headers.get("x-real-ip");
+  return resolveRequestClientIpText(req);
 }

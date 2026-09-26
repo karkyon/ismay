@@ -142,7 +142,8 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 （領域ごとの状態・主要symbol・route・migration・受入scriptと実行結果）。
 
 - **認証**：OIDC準拠セッション、TOTP MFA、Refresh Tokenローテーション、セッション一覧・個別失効、
-  メールアドレス確認(未確認はログイン不可)・確認メール再送・パスワード再設定(Gate AUTH-EMAIL-01)
+  メールアドレス確認(未確認はログイン不可)・確認メール再送・パスワード再設定(Gate AUTH-EMAIL-01)、
+  client IPの信頼境界とRedis永続rate limit(login・MFA verify・確認メール再送・再設定メール要求、Gate SECURITY-RATE-02)
 - **Capture→AI候補→本人決定**：テキスト/音声/画像入力、AI抽出、Responsibility化
 - **Formation Session**：候補分析→質問→本人回答→確定のドメイン(`lib/formation/`)。
   Atomicity Assessment、PII分類、Source Anchor、Question Policy等を含む
@@ -222,6 +223,7 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 | Activity Evidence Ledger | **未実装**。概念レベルの記述のみで具体的なデータ契約・API契約が正本に未確定 |
 | Context Playbook | **未実装**。同上の理由で非推奨(想像でデータ契約を埋めない方針) |
 | Planning/Reality Mode | **未着手**(既存Relation/Constraint/PERTの接続のみ部分実装) |
+| 永続rate limit・client IP(SEC-RATE) | **実装済み(SECURITY-RATE-02B)**。client IPは直近の接続元を基準とし(`npm run start`=`app/server.mjs`のcustom serverが接続元を渡す。`next start`では不明扱い)、`X-Forwarded-For`は`TRUSTED_PROXY_CIDRS`で明示した信頼proxyからだけ右から解釈する。login(email単位15分10回・IP単位15分30回)、MFA verify(user単位15分5回・IP単位15分30回)、確認メール再送・再設定メール要求(IP単位1時間20回、DBの発行上限も維持)をRedis token bucketで制限(keyはHMACで仮名化)。Redis障害時はlogin/MFAがprocess内へ縮退、メール系はfail closed。新規の閾値は承認待ち(OPEN-AUTH-06)。詳細は`docs/decisions/DEC-SECURITY-RATE-02.md`、運用は`docs/runbooks/SECURITY_RATE_RUNBOOK.md`、受入: `scripts/verify_gate_security_rate_02.ts` |
 | TBD-17(機微データのカラムレベル暗号化方式) | **決定待ち(OPEN-SECURITY-ENCRYPTION-01)**。現状はTOTP秘密鍵(`MFA_ENCRYPTION_KEY`)とAI provider APIキー(`AI_CREDENTIAL_ENCRYPTION_KEY`)のみアプリ層AES-256-GCMで暗号化(key version・rotationなし)。対象列の棚卸し・脅威モデル・推奨案は`docs/decisions/DEC-SECURITY-ENCRYPTION-01.md`(PROPOSED) |
 
 ---
@@ -249,6 +251,12 @@ docker compose ps   # 全てhealthyになるまで待つ
 | `MAIL_TRANSPORT` | `smtp`または`log`(未設定時は`log`=送信せず本文をサーバーログへ出力。一般公開環境では使わない) |
 | `APP_BASE_URL` | メール内リンクの基点(例: `https://ismay.example.com`)。smtp時は必須。log時の既定は`http://localhost:13000` |
 | `MAIL_FROM` / `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` | SMTP設定(詳細は`docs/runbooks/MAIL_RUNBOOK.md`) |
+| `REDIS_URL` | rate limit用Redis(例: `redis://127.0.0.1:16379`)。production必須(未設定時はlogin/MFAが縮退、メール系はfail closed) |
+| `RATE_LIMIT_HMAC_KEY` | rate limit keyの仮名化用(base64、32byte以上)。`openssl rand -base64 32`。production必須 |
+| `TRUSTED_PROXY_CIDRS` | 任意。reverse proxyを置く場合だけproxyのaddressをCIDRで指定(例: `127.0.0.1/32,::1`)。未設定時は`X-Forwarded-For`等を使わない |
+| `ISMAY_LISTEN_HOST` | 任意。`npm run start`のlisten address(未設定時は全interface) |
+
+詳細は`docs/runbooks/SECURITY_RATE_RUNBOOK.md`。
 
 `.env.example`は現時点で用意されていない。上記変数がリポジトリの唯一の一次情報である
 (2026-09-26時点)。
@@ -266,6 +274,10 @@ npm run dev                  # next dev -p 13000
 
 AI Workerは別プロセスではなく、Next.jsサーバー起動時に`instrumentation.ts`経由で
 インプロセス起動する(`npm run dev`/`npm run start`のいずれでも自動的に動く)。
+
+本番起動の`npm run start`は`node server.mjs`(Next.js custom server、Gate SECURITY-RATE-02B)。
+接続元addressをroute handlerへ渡す以外は`next start -p 13000`と同じで、`npm run start:next`で従来の起動に戻せる
+(その場合client IPは不明として扱われる)。起動時に`[SECURITY-RATE] backend=… peer=…`の1行が出る。
 
 ### ビルド・型チェック・Lint
 

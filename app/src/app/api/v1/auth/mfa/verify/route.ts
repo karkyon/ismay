@@ -8,6 +8,9 @@ import { createSession } from "@/lib/auth/session";
 import { setAuthCookies } from "@/lib/auth/cookies";
 import { apiOk, apiError } from "@/lib/auth/response";
 import { clientIp } from "@/lib/auth/guard";
+import { consumeRateLimit, settleRateLimitSuccess } from "@/lib/security/rateLimiter";
+import { RATE_LIMIT_POLICIES } from "@/lib/security/rateLimitPolicies";
+import { withRetryAfter } from "@/lib/security/rateLimitHttp";
 
 const VerifySchema = z.object({
   challengeToken: z.string().min(1),
@@ -26,6 +29,24 @@ export async function POST(req: NextRequest) {
   const userId = await verifyMfaChallengeToken(challengeToken);
   if (!userId) {
     return apiError("AUTH_REQUIRED", "認証セッションの有効期限が切れました。ログインをやり直してください");
+  }
+
+  // [SECURITY-RATE-02B新設・2026-09-26] 旧実装は試行回数の制限が無く、challenge token(2分)の間に
+  // 6桁コードを何度でも試せた。user単位で数えるため、challenge tokenを取り直しても回数は戻らない。
+  // 正しいコードだった場合だけ戻す(user: 満杯へ、IP: 今回の1回分)。
+  const requestIp = clientIp(req);
+  const limit = await consumeRateLimit(
+    "POST /auth/mfa/verify",
+    [
+      { policy: RATE_LIMIT_POLICIES.MFA_USER, value: userId },
+      { policy: RATE_LIMIT_POLICIES.MFA_IP, value: requestIp },
+    ],
+  );
+  if (!limit.allowed) {
+    return withRetryAfter(
+      apiError("RATE_LIMITED", "確認コードの試行回数の上限に達しました。しばらく時間を置いてから再度お試しください", { retryable: true }),
+      limit.retryAfterMs,
+    );
   }
 
   const [user, totp] = await Promise.all([
@@ -66,10 +87,11 @@ export async function POST(req: NextRequest) {
   if (!valid) {
     return apiError("MFA_INVALID", "コードが正しくありません");
   }
+  await settleRateLimitSuccess(limit);
 
   const tokens = await createSession(user.id, user.email, {
     userAgent: req.headers.get("user-agent"),
-    ipAddress: clientIp(req),
+    ipAddress: requestIp,
   });
 
   const res = apiOk({
