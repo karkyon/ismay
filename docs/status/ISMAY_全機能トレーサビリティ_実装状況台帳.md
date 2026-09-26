@@ -4,7 +4,7 @@
 |---|---|
 | project | **ISMAY** |
 | repository | `karkyon/ismay` |
-| baseline HEAD | `cabd6a12ce14d9f3ddd966940ba4515d1b08380c`（AUTH-EMAIL-01）。本台帳はGate AUDIT-BASELINE-01で作成 |
+| baseline HEAD | `d3844e475159e733b048a5f8c16bc1da81f30f7b`（SECURITY-ENCRYPTION-01A）。本台帳はGate AUDIT-BASELINE-01（`137c5e3`、当時の基準`cabd6a1`）で作成し、Gate DOC-SYNC-05でomega-dev2の実行結果と最新HEADへ同期 |
 | observed_at | 2026-09-26 |
 | Prisma model | 98（`grep -c '^model ' app/prisma/schema.prisma`） |
 | migration | 69（`app/prisma/migrations`直下のディレクトリ数） |
@@ -22,10 +22,10 @@
 | 二次証拠 | リポジトリ内の追補・Decision Record・Runbook（`docs/`）。READMEは見取り図であり単独では証拠にしない |
 | 対象外 | プロジェクトナレッジの正本v5.0（2026-08-27固定）は要求の出典として参照するが、実装状況の証拠にはしない |
 | 実行環境A（sandbox） | PostgreSQL 16 + pgvector（全69 migration適用、DB timezone Asia/Tokyo）、MinIO互換のs3rver、`next start`（Google Fontsのみstub）。**実AI providerなし**。M1B1/M1B2はAnthropic Messages APIの応答をプロセス内で模擬して実行した（模擬はリポジトリに含めない） |
-| 実行環境B（omega-dev2） | 実DB・実MinIO・実AI provider。AUDIT-BASELINE-01のパッチ適用時に同じscriptを実行し、その結果をcommitの適用ログで確認する |
+| 実行環境B（omega-dev2） | 実DB・実MinIO・実AI provider。AUDIT-BASELINE-01（`137c5e3`）の適用後に同じscriptを実行し、利用者が報告した結果を§2.2の「環境B」列に記録（DOC-SYNC-05） |
 | 未検証 | 本番SMTP配送、backup/restore実地試験、負荷試験、実機mobile、systemd再起動後の常駐挙動 |
 
-## 2. 実行したGate・実行していないGate（AUDIT-BASELINE-01時点）
+## 2. 実行したGate・実行していないGate（AUDIT-BASELINE-01時点、環境B結果はDOC-SYNC-05で追記）
 
 ### 2.1 静的・pure
 | command | 環境A結果 |
@@ -37,21 +37,21 @@
 | `npm run build`（CI同等のダミー`DATABASE_URL`） | 成功 |
 
 ### 2.2 実DB受入
-| script | 環境A | 備考（ログ中の意図的なエラー） |
-|---|---|---|
-| `verify_gate_2_1_live.ts` | 65 / 0 | HTTP。本Gateで試験9を是正 |
-| `verify_gate_m1b1_shadow_acceptance.ts` | 17 / 0（模擬AI、質問あり→CLARIFYING・質問なし→REVIEW_READYの両経路）。APIキーなしでは失敗経路の契約のみPASSし、B1未到達をNGとして報告 | 環境B（実AI）の1回目の適用で「状態REVIEW_READY期待→実際CLARIFYING」とcleanupのFK違反（テストデータ残存）、2回目の適用で試験9のconfidence比較の誤り（AiInferenceはDecimal(4,3)・revisionはDecimal(5,4)で丸めが異なる、根拠の無い候補はrevisionで0.49にcapされる）を検出し、本Gateで是正。模擬AIでは小数4桁・根拠なし候補の両方で確認。**環境Bでの再実行で確認する** |
-| `verify_gate_m1b2_dual_read_acceptance.ts` | 21 / 0（模擬AI、cutover flag OFF）、19 / 0（同、`FEATURE_CHG011_SHARED_CORE=true`） | 実AI必須。**環境Bでの再実行で確認する** |
-| `verify_gate_auth_email_01.ts` | 77 / 0 | [A9] 送信失敗の注入（`SEND_FAILED`ログ）、[A13] CHECK違反23514・一意制約違反は意図的 |
-| `verify_gate_purge_hardening_02.ts` | 59 / 0 | lock競合試験の`55P03 lock timeout`は意図的 |
-| `verify_gate_purge_scope_03a.ts` | 42 / 0 | [S3] DB triggerによる`23502 ... workspace_id is required`（5表）は意図的 |
-| `verify_gate_purge_ops_03b.ts` | 44 / 0 | s3rver使用。環境Bでは実MinIO |
-| `verify_gate_pattern_purge_01.ts` | 31 / 0 | cleanupで既にPurge済みの行を`delete`する際の「対象なし」エラーは無害（`.catch`で握る設計） |
-| `verify_gate_pattern_closedloop_e2e_02.ts` | 15 / 0 | AI network遮断下の非課金E2E |
+| script | 環境A | 環境B（omega-dev2、`137c5e3`適用後） | 備考（ログ中の意図的なエラー） |
+|---|---|---|---|
+| `verify_gate_2_1_live.ts` | 65 / 0 | 65 / 0 | HTTP。AUDIT-BASELINE-01で試験9を是正 |
+| `verify_gate_m1b1_shadow_acceptance.ts` | 17 / 0（模擬AI、質問あり→CLARIFYING・質問なし→REVIEW_READYの両経路）。APIキーなしでは失敗経路の契約のみPASSし、B1未到達をNGとして報告 | **17 / 0（実AI）** | 環境B（実AI）の1回目の適用で「状態REVIEW_READY期待→実際CLARIFYING」とcleanupのFK違反（テストデータ残存）、2回目の適用で試験9のconfidence比較の誤り（AiInferenceはDecimal(4,3)・revisionはDecimal(5,4)で丸めが異なる、根拠の無い候補はrevisionで0.49にcapされる）を検出し、AUDIT-BASELINE-01で是正。模擬AIでは小数4桁・根拠なし候補の両方で確認。是正後の環境B再実行で17 / 0 |
+| `verify_gate_m1b2_dual_read_acceptance.ts` | 21 / 0（模擬AI、cutover flag OFF）、19 / 0（同、`FEATURE_CHG011_SHARED_CORE=true`） | **19 / 0（実AI、cutover flag ON側）** | 実AI必須。環境Bのcutover flag OFF側は未報告（flag OFFの経路は環境Aの模擬AIでのみ確認） |
+| `verify_gate_auth_email_01.ts` | 77 / 0 | 77 / 0 | [A9] 送信失敗の注入（`SEND_FAILED`ログ）、[A13] CHECK違反23514・一意制約違反は意図的 |
+| `verify_gate_purge_hardening_02.ts` | 59 / 0 | 59 / 0 | lock競合試験の`55P03 lock timeout`は意図的 |
+| `verify_gate_purge_scope_03a.ts` | 42 / 0 | 42 / 0 | [S3] DB triggerによる`23502 ... workspace_id is required`（5表）は意図的 |
+| `verify_gate_purge_ops_03b.ts` | 44 / 0 | 44 / 0（実MinIO） | 環境Aはs3rver使用 |
+| `verify_gate_pattern_purge_01.ts` | 31 / 0 | 31 / 0 | cleanupで既にPurge済みの行を`delete`する際の「対象なし」エラーは無害（`.catch`で握る設計） |
+| `verify_gate_pattern_closedloop_e2e_02.ts` | 15 / 0 | 15 / 0 | AI network遮断下の非課金E2E |
 
-### 2.3 本Gateで実行していないもの
+### 2.3 AUDIT-BASELINE-01・DOC-SYNC-05で実行していないもの
 - 上記以外の`verify_gate_*.ts`（約60本）の全量再実行。個別Gate時点の受入記録はcommit履歴を参照（本台帳では「当該Gate時点で受入済み」と「今回再実行した」を区別する）。
-- 実AI呼び出しを伴うscriptの成功経路（環境Bで実施）。
+- 実AI呼び出しを伴うscriptの成功経路は環境Bで実施済み（M1B1 17/0、M1B2 flag ON 19/0）。M1B2のflag OFF側は環境Bで未報告。
 
 ## 3. 状態の定義
 | 状態 | 意味 |
@@ -61,7 +61,7 @@
 | PARTIAL | 一部のみ実装、または既知の欠落がある |
 | IMPLEMENTED | 実装済み。pure testまたは静的確認のみ |
 | INTEGRATED | API/UI/Worker/DBまで接続済みで、実DB受入scriptが存在する（今回は再実行していない） |
-| VERIFIED | 実DB受入scriptを本Gate（AUDIT-BASELINE-01）の環境A、または直近の環境B適用ログで全件PASS |
+| VERIFIED | 実DB受入scriptをAUDIT-BASELINE-01の環境A、または直近の環境B実行（§2.2）で全件PASS |
 | BLOCKED_DECISION | 契約の決定待ちで、意図的に停止している |
 
 ## 4. 領域別台帳
@@ -70,7 +70,7 @@
 | 機能 | 状態 | 主要symbol / route | migration | 検証 | 既知残件 |
 |---|---|---|---|---|---|
 | 登録・ログイン・JWT・Refreshローテーション | INTEGRATED | `lib/auth/session.ts` `createSession` `rotateSession`、`auth/login` `auth/refresh` `auth/logout` | `init_core_schema_v2` | HTTP受入script 5本がregister→loginを通る（2_1_live 65/0） | ログイン失敗ロックがプロセス内メモリ（OPEN-AUTH-02） |
-| TOTP MFA・復旧コード | INTEGRATED | `lib/auth/totp.ts`、`auth/mfa/*` | 同上 | 実DB受入scriptなし（静的確認） | 秘密鍵暗号化の正式契約（OPEN-SECURITY-ENCRYPTION-01） |
+| TOTP MFA・復旧コード | INTEGRATED | `lib/auth/totp.ts`、`auth/mfa/*` | 同上 | 実DB受入scriptなし（静的確認） | 秘密鍵暗号化の正式契約（OPEN-SECURITY-ENCRYPTION-01）、MFA verifyの試行回数制限なし（OPEN-AUTH-02） |
 | セッション一覧・個別失効 | INTEGRATED | `auth/sessions`、`listActiveSessions` | 同上 | — | — |
 | メール確認・再送・パスワード再設定 | VERIFIED | `lib/auth/emailToken.ts` `emailTokenCore.ts`、`lib/mail/`、`auth/email/*` `auth/password/forgot|reset` | `20260926010000_auth_email_01` | pure 70/70、実DB 77/77（環境A・B） | 本番SMTP（OPEN-AUTH-01）、メール変更（OPEN-AUTH-03）、未確認放置（OPEN-AUTH-04）、既定値承認（OPEN-AUTH-05） |
 | アカウント削除（soft delete） | INTEGRATED | `auth/account/delete` | — | Purge受入のfixtureとして使用 | — |
@@ -94,7 +94,7 @@
 ### 4.4 Formation
 | 機能 | 状態 | 根拠 | 既知残件 |
 |---|---|---|---|
-| shadow Session生成（B1）・dual-read（B2） | INTEGRATED | `lib/formation/shadowWrite.ts` `shadowCheckpoint.ts` `dualRead.ts` | M1B1/M1B2の成功経路は環境B（実AI）で確認する（§2.2） |
+| shadow Session生成（B1）・dual-read（B2） | VERIFIED | `lib/formation/shadowWrite.ts` `shadowCheckpoint.ts` `dualRead.ts`（環境B実AI：M1B1 17/0、M1B2 cutover flag ON 19/0。§2.2） | M1B2のcutover flag OFF側は環境Aの模擬AIでのみ確認（21/0） |
 | 質問・回答・確定・Materialize | INTEGRATED | `formation-sessions/[id]/*`、`answerService.ts` `materialize.ts` | — |
 | split / merge / correction / atomicity | INTEGRATED | `splitCorrection.ts` `mergeCorrection.ts` `responsibilityCorrection.ts` `atomicityAssessment.ts` | — |
 | Source Anchor・PII分類 | IMPLEMENTED | `sourceAnchorAdapter.ts` `piiClassifier.ts`（pure test） | provider側がspeaker/pageを返さない場合はUNAVAILABLE |
@@ -146,15 +146,15 @@
 | CI | IMPLEMENTED | `.github/workflows/ci.yml`（validate/generate/tsc/eslint/test:all/build） | 実DB受入はCI対象外 |
 | 通知（アプリ内） | INTEGRATED | `lib/notifications/notificationPlanner.ts`、`notifications/*` | 外部channel（Web Push・Email）未着手 |
 | 監査ログ | INTEGRATED | `audit_logs`、`audit-logs` | 保持期間（OPEN-PURGE-03） |
-| 機微データ暗号化 | PARTIAL | TOTP秘密鍵・AI credentialのみAES-256-GCM | OPEN-SECURITY-ENCRYPTION-01（DECISION_REQUIRED、[DEC-SECURITY-ENCRYPTION-01](../decisions/DEC-SECURITY-ENCRYPTION-01.md) PROPOSED） |
+| 機微データ暗号化 | PARTIAL（DECISION_REQUIRED） | 実装はTOTP秘密鍵・AI credentialのみAES-256-GCM（key version・AAD・rotationなし）。Gate SECURITY-ENCRYPTION-01A（`d3844e4`）で対象列棚卸し・脅威モデル・移行案・Gate分割（01B〜01E）を契約案として作成したのみで、暗号化の実装・schema変更は無い | OPEN-SECURITY-ENCRYPTION-01（[DEC-SECURITY-ENCRYPTION-01](../decisions/DEC-SECURITY-ENCRYPTION-01.md) PROPOSED、利用者決定待ち。決定前に01B以降へ着手しない） |
 | 永続rate limit・proxy信頼境界 | PARTIAL | メール発行はDB履歴で制限、ログインはメモリ | OPEN-AUTH-02 |
 | backup/restore実地試験・監視・alert | NOT_STARTED | — | DEC-006 |
 
 ## 5. 状態集計（§4の行数）
 | 状態 | 件数 |
 |---|---:|
-| VERIFIED | 5 |
-| INTEGRATED | 20 |
+| VERIFIED | 6 |
+| INTEGRATED | 19 |
 | IMPLEMENTED | 5 |
 | PARTIAL | 5 |
 | SPECIFIED | 2 |
@@ -162,7 +162,10 @@
 | BLOCKED_DECISION | 3 |
 | 合計 | 44 |
 
+`PARTIAL（DECISION_REQUIRED）`はPARTIALとして数える。DOC-SYNC-05での変化：Formation B1/B2をINTEGRATED→VERIFIED（環境B実AIの全件PASS）。
+
 ## 6. 更新規則
 - Gateを追加・変更したら、該当行の状態・根拠・検証を更新し、冒頭のbaseline HEAD・observed_at・実測値を更新する。
 - 状態をVERIFIEDにするのは、実DB受入scriptを実行して全件PASSした場合だけとし、実行環境（A/B）を§2に記録する。
 - READMEや過去の報告だけを根拠に状態を上げない。
+- 集計（§5）は§4の表の状態列から機械的に数える（手で数えない）。

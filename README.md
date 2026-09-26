@@ -133,7 +133,7 @@ find src/lib -path '*/__tests__/*.test.ts' | wc -l   # pure/invariant testファ
 
 ---
 
-## 実装済み機能領域（2026-09-26時点、基準HEAD `cabd6a1`、実コードベース）
+## 実装済み機能領域（2026-09-26時点、基準HEAD `d3844e4`、実コードベース）
 
 以下は実装が存在する主要領域の一覧であり、各機能の完成度・受入条件はプロジェクトナレッジ側の
 DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参照すること。本READMEは
