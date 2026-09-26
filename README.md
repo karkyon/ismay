@@ -222,7 +222,7 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 | Activity Evidence Ledger | **未実装**。概念レベルの記述のみで具体的なデータ契約・API契約が正本に未確定 |
 | Context Playbook | **未実装**。同上の理由で非推奨(想像でデータ契約を埋めない方針) |
 | Planning/Reality Mode | **未着手**(既存Relation/Constraint/PERTの接続のみ部分実装) |
-| TBD-17(機微データのカラムレベル暗号化方式) | 未決事項台帳で正式決定待ち。現状TOTP秘密鍵のみアプリ層AES-256-GCMで暗号化(`MFA_ENCRYPTION_KEY`使用) |
+| TBD-17(機微データのカラムレベル暗号化方式) | **決定待ち(OPEN-SECURITY-ENCRYPTION-01)**。現状はTOTP秘密鍵(`MFA_ENCRYPTION_KEY`)とAI provider APIキー(`AI_CREDENTIAL_ENCRYPTION_KEY`)のみアプリ層AES-256-GCMで暗号化(key version・rotationなし)。対象列の棚卸し・脅威モデル・推奨案は`docs/decisions/DEC-SECURITY-ENCRYPTION-01.md`(PROPOSED) |
 
 ---
 

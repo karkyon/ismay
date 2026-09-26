@@ -5,6 +5,7 @@
 | 種別 | 文書 | 内容 |
 |---|---|---|
 | 決定記録 | [decisions/DEC-PURGE-02B.md](decisions/DEC-PURGE-02B.md) | FKを持たない表の扱い、Object Storageの削除順序（ACCEPTED） |
+| 決定記録 | [decisions/DEC-SECURITY-ENCRYPTION-01.md](decisions/DEC-SECURITY-ENCRYPTION-01.md) | 機微データ暗号化の契約・移行案（PROPOSED、利用者承認待ち） |
 | 正本追補 | [spec-addenda/ADD-2026-09-25-PURGE.md](spec-addenda/ADD-2026-09-25-PURGE.md) | アカウント30日Purge（統合正本・DOC-09/10/11/12/13への追補） |
 | 正本追補 | [spec-addenda/ADD-2026-09-26-AUTH-EMAIL.md](spec-addenda/ADD-2026-09-26-AUTH-EMAIL.md) | メールアドレス確認・パスワード再設定（統合正本・DOC-10/11/12への追補） |
 | 運用手順 | [runbooks/PURGE_RUNBOOK.md](runbooks/PURGE_RUNBOOK.md) | Purge CLIの実行・再開・障害対応 |

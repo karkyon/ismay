@@ -146,7 +146,7 @@
 | CI | IMPLEMENTED | `.github/workflows/ci.yml`（validate/generate/tsc/eslint/test:all/build） | 実DB受入はCI対象外 |
 | 通知（アプリ内） | INTEGRATED | `lib/notifications/notificationPlanner.ts`、`notifications/*` | 外部channel（Web Push・Email）未着手 |
 | 監査ログ | INTEGRATED | `audit_logs`、`audit-logs` | 保持期間（OPEN-PURGE-03） |
-| 機微データ暗号化 | PARTIAL | TOTP秘密鍵・AI credentialのみAES-256-GCM | OPEN-SECURITY-ENCRYPTION-01 |
+| 機微データ暗号化 | PARTIAL | TOTP秘密鍵・AI credentialのみAES-256-GCM | OPEN-SECURITY-ENCRYPTION-01（DECISION_REQUIRED、[DEC-SECURITY-ENCRYPTION-01](../decisions/DEC-SECURITY-ENCRYPTION-01.md) PROPOSED） |
 | 永続rate limit・proxy信頼境界 | PARTIAL | メール発行はDB履歴で制限、ログインはメモリ | OPEN-AUTH-02 |
 | backup/restore実地試験・監視・alert | NOT_STARTED | — | DEC-006 |
 
