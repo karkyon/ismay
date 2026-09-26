@@ -35,11 +35,17 @@ export async function purgeHttpVerifyUser(db: Db, userId: string, emailPrefix: s
 
   const activeMemberships = await db.workspaceMember.count({ where: { userId, leftAt: null } });
   if (activeMemberships === 0) {
-    const ownedWorkspaces = await db.capture.findMany({
-      where: { createdById: userId },
-      select: { workspaceId: true },
-      distinct: ["workspaceId"],
-    });
+    // [SECURITY-RATE-02C是正・2026-09-27] 旧cleanup(M1-A/M1-A2)はProjectContext Linkが積んだ
+    // case_pattern_detect_jobs(workspace_id・owner_subject_user_idともRESTRICT)を消さず、membership・
+    // Responsibility・Contextだけを消してworkspace/userの削除に失敗していた(omega-dev2実測)。
+    // Captureを作らないscriptの孤立ユーザーもworkspaceを特定できるよう、本人が作成・所有する行からも辿る。
+    const [byCapture, byResponsibility, byContext, byDetectJob] = await Promise.all([
+      db.capture.findMany({ where: { createdById: userId }, select: { workspaceId: true }, distinct: ["workspaceId"] }),
+      db.responsibility.findMany({ where: { createdById: userId }, select: { workspaceId: true }, distinct: ["workspaceId"] }),
+      db.projectContext.findMany({ where: { OR: [{ createdById: userId }, { ownerSubjectUserId: userId }] }, select: { workspaceId: true }, distinct: ["workspaceId"] }),
+      db.casePatternDetectJob.findMany({ where: { ownerSubjectUserId: userId }, select: { workspaceId: true }, distinct: ["workspaceId"] }),
+    ]);
+    const ownedWorkspaces = [...new Set([...byCapture, ...byResponsibility, ...byContext, ...byDetectJob].map((w) => w.workspaceId))].map((workspaceId) => ({ workspaceId }));
     for (const { workspaceId } of ownedWorkspaces) {
       const otherMembers = await db.workspaceMember.count({ where: { workspaceId, userId: { not: userId }, leftAt: null } });
       if (otherMembers > 0) {

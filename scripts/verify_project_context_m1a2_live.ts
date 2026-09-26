@@ -46,6 +46,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { markTestUserEmailVerified } from "./lib/testEmailVerification";
+import { purgeHttpVerifyUser } from "./lib/httpVerifyUserCleanup";
 
 function loadDotEnv(envPath: string): void {
   let content: string;
@@ -180,45 +181,14 @@ async function createResponsibility(jar: CookieJar, title: string): Promise<stri
 }
 
 /**
- * 指定ユーザー・Workspaceが所有するM1-A2関連データ+Responsibility+Workspace+Userを
- * FK依存順に削除する。ProjectContextLink/ProjectContextLinkEvent/
- * ExternalContextReferenceはResponsibility/Workspaceの両方へ複合FK(RESTRICT)を
- * 持つため、Responsibility・Workspaceを削除するより前に必ず削除する
- * (migration.sqlのON DELETE RESTRICTを実地確認済みのうえでの順序)。
+ * [SECURITY-RATE-02C是正・2026-09-27] 旧cleanupは表を手書きで列挙し例外を`.catch(() => null)`で握り潰していたため、
+ * ProjectContext Linkが積むcase_pattern_detect_jobs(workspace_id・owner_subject_user_idともRESTRICT)を消せず、
+ * workspace・userの削除失敗が表面化しなかった(omega-dev2実測: Aユーザーが残存)。M1-B1/M1-B2と同じく
+ * アカウントPurge本体(scripts/lib/httpVerifyUserCleanup.ts)に委ね、エラーは収集して結果をFAILにする。
  */
-async function cleanupTestUser(params: { userId: string; workspaceId: string | null }): Promise<void> {
-  const { userId, workspaceId } = params;
-
-  if (workspaceId) {
-    const contexts = await db.projectContext.findMany({ where: { workspaceId }, select: { id: true } }).catch(() => [] as { id: string }[]);
-    const contextIds = contexts.map((c: { id: string }) => c.id);
-    if (contextIds.length > 0) {
-      await db.projectContextLinkEvent.deleteMany({ where: { contextId: { in: contextIds } } }).catch(() => null);
-      await db.projectContextLink.deleteMany({ where: { contextId: { in: contextIds } } }).catch(() => null);
-      await db.externalContextReference.deleteMany({ where: { contextId: { in: contextIds } } }).catch(() => null);
-      await db.projectContextEmbedding.deleteMany({ where: { contextId: { in: contextIds } } }).catch(() => null);
-      await db.eventLog.deleteMany({ where: { aggregateId: { in: contextIds } } }).catch(() => null);
-      await db.outboxEvent.deleteMany({ where: { aggregateId: { in: contextIds } } }).catch(() => null);
-      await db.projectContext.deleteMany({ where: { id: { in: contextIds } } }).catch(() => null);
-    }
-
-    const responsibilities = await db.responsibility.findMany({ where: { workspaceId }, select: { id: true } }).catch(() => [] as { id: string }[]);
-    const responsibilityIds = responsibilities.map((r: { id: string }) => r.id);
-    if (responsibilityIds.length > 0) {
-      await db.eventLog.deleteMany({ where: { aggregateId: { in: responsibilityIds } } }).catch(() => null);
-      await db.outboxEvent.deleteMany({ where: { aggregateId: { in: responsibilityIds } } }).catch(() => null);
-      await db.responsibility.deleteMany({ where: { id: { in: responsibilityIds } } }).catch(() => null);
-    }
-  }
-
-  await db.pemConsentEvent.deleteMany({ where: { userId } }).catch(() => null);
-  await db.pemMetricConsentEvent.deleteMany({ where: { userId } }).catch(() => null);
-  await db.workspaceMember.deleteMany({ where: { userId } }).catch(() => null);
-  if (workspaceId) {
-    await db.workspace.deleteMany({ where: { id: workspaceId } }).catch(() => null);
-  }
-  await db.userSession.deleteMany({ where: { userId } }).catch(() => null);
-  await db.user.deleteMany({ where: { id: userId } }).catch(() => null);
+const cleanupErrors: string[] = [];
+async function cleanupTestUser({ userId }: { userId: string; workspaceId: string | null }): Promise<void> {
+  cleanupErrors.push(...(await purgeHttpVerifyUser(db, userId, EMAIL_PREFIX)));
 }
 
 async function sweepOrphanedTestUsers(): Promise<void> {
@@ -479,6 +449,9 @@ async function main(): Promise<void> {
       await cleanupTestUser({ userId: userIdB, workspaceId: workspaceIdB });
     }
     console.log("[CLEANUP] 完了。");
+    const leftoverUsers = await db.user.count({ where: { email: { startsWith: EMAIL_PREFIX, endsWith: "@example.invalid" } } });
+    ok("[cleanup] cleanup中のエラー0件", cleanupErrors.length === 0, cleanupErrors.join("; "));
+    ok("[cleanup] test用Userの残存0件", leftoverUsers === 0, `remaining=${leftoverUsers}`);
   }
 
   console.log(`\n合計: ${passed}件成功 / ${failed}件失敗`);
