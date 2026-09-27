@@ -12,8 +12,8 @@
 | 正本追補 | [spec-addenda/ADD-2026-09-26-SECURITY-RATE.md](spec-addenda/ADD-2026-09-26-SECURITY-RATE.md) | proxy信頼境界・永続rate limit（統合正本§23.3・DOC-10/11/12への追補） |
 | 運用手順 | [runbooks/PURGE_RUNBOOK.md](runbooks/PURGE_RUNBOOK.md) | Purge CLIの実行・再開・障害対応 |
 | 運用手順 | [runbooks/MAIL_RUNBOOK.md](runbooks/MAIL_RUNBOOK.md) | メール送信の設定（SMTP/ログ）・確認・問い合わせ対応 |
-| 運用手順 | [runbooks/SECURITY_RATE_RUNBOOK.md](runbooks/SECURITY_RATE_RUNBOOK.md) | Redis・HMAC key・起動方法（custom server）の設定、監視、ロック解除、reverse proxy、rollback |
+| 運用手順 | [runbooks/SECURITY_RATE_RUNBOOK.md](runbooks/SECURITY_RATE_RUNBOOK.md) | Redis・HMAC key・起動方法（custom server）の設定、omega-dev2の現行構成（開発モード）、監視、ロック解除、reverse proxy、rollback |
 | 実装状況（全体） | [status/ISMAY_全機能トレーサビリティ_実装状況台帳.md](status/ISMAY_全機能トレーサビリティ_実装状況台帳.md) | ISMAY全領域の状態・証拠・受入結果（リポジトリ内の実装状況の正本） |
 | 実装状況 | [status/実装状況台帳_PURGE.md](status/実装状況台帳_PURGE.md) | Gate・commit・受入結果 |
 | 実装状況 | [status/実装状況台帳_AUTH.md](status/実装状況台帳_AUTH.md) | 認証（メール確認・パスワード再設定）のGate・受入結果 |
-| 未決事項 | [status/未決事項台帳.md](status/未決事項台帳.md) | 推測で実装しない項目、未着手の項目 |
+| 未決事項 | [status/未決事項台帳.md](status/未決事項台帳.md) | 推測で実装しない項目、未着手の項目、運用上の指摘（OPEN-OPS） |

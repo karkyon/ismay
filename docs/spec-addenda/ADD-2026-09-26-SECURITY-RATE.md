@@ -3,7 +3,7 @@
 | 項目 | 値 |
 |---|---|
 | 状態 | 有効（正本v5.0への追補。矛盾する場合は本追補を優先） |
-| 作成 | 2026-09-26（Gate SECURITY-RATE-02A：契約、SECURITY-RATE-02B：実装） |
+| 作成 | 2026-09-26（Gate SECURITY-RATE-02A：契約、SECURITY-RATE-02B：実装）。2026-09-27 SECURITY-RATE-02C（omega-dev2配備・環境B受入）を反映 |
 | 決定記録 | [DEC-SECURITY-RATE-02](../decisions/DEC-SECURITY-RATE-02.md) |
 | 運用手順 | [SECURITY_RATE_RUNBOOK](../runbooks/SECURITY_RATE_RUNBOOK.md) |
 | 出典 | 全機能仕様一覧 SEC-RATE、統合正本v5.0 §23.3、DOC-11 §7、AUTH-RESET |
@@ -45,7 +45,13 @@ Prisma migrationは追加しない。Redis（`docker-compose.yml`の`redis`）�
 | 項目 | 変更前 | 変更後 |
 |---|---|---|
 | `npm run start` | `next start -p 13000` | `node server.mjs`（Next.js custom server。接続元を内部header `x-ismay-peer-address`へnonce付きで渡す以外は`next start`と同じ） |
-| rollback | — | `npm run start:next`（`next start -p 13000`。client IPは不明になり、IP単位の制限は判定されない） |
+| rollback | — | `npm run start:next`（`next start -p 13000`）。client IPは不明になり、IP単位の制限はlogin・MFA・メール要求のすべてで判定されず無効になる（Redis障害時のfail closedとは別の状態。DEC §7.1） |
+
+- `next dev`で直接起動した場合も同じくpeer不明になる。custom serverは`NODE_ENV`に従い`next({ dev })`を起動し、`NODE_ENV=development`でもpeerを取得する。
+- omega-dev2（SECURITY-RATE-02C）：`ismay-app.service`を`npx next dev`から`node server.mjs`＋`NODE_ENV=development`（開発モード維持、利用者判断）へ変更。HMRは無効で、コード変更後はservice再起動が必要。production化はHTTPS・Secure Cookie・reverse proxy・`TRUSTED_PROXY_CIDRS`とセットの別Gate。
+
+### 4.0 Redisの公開範囲
+`docker-compose.yml`の`redis`はhost側を`127.0.0.1:16379`だけに公開する（SECURITY-RATE-02C `7ec4d7f`。変更前は`16379`を全interfaceへ公開、Redisは認証なし）。認証・TLSは未導入（SECURITY-RATE-02D）。
 
 ### 4.1 環境変数（`app/.env`）
 | 変数 | 必須 | 内容 |
@@ -57,7 +63,7 @@ Prisma migrationは追加しない。Redis（`docker-compose.yml`の`redis`）�
 | `PORT` | 任意 | 既定13000 |
 
 ## 5. DOC-12 EVAL・受入テストへの追補
-Gate SECURITY-RATE-02Bで作成・実行（件数は環境Aの結果。環境Bの結果は実装状況台帳へ記録する）。
+Gate SECURITY-RATE-02Bで作成・実行（件数は環境Aの結果）。環境B（omega-dev2、SECURITY-RATE-02C、2026-09-27、HEAD `2b00550`）：`verify_gate_security_rate_02.ts` 64/0・SKIP 1（[H7]信頼proxy instanceを起動しないため）、再起動をまたいだbucket継続を確認。回帰を含む全件は全機能トレーサビリティ台帳 §2.2。
 
 | 受入script / test | 件数 | 主な検証 |
 |---|---:|---|

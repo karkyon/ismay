@@ -223,7 +223,7 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 | Activity Evidence Ledger | **未実装**。概念レベルの記述のみで具体的なデータ契約・API契約が正本に未確定 |
 | Context Playbook | **未実装**。同上の理由で非推奨(想像でデータ契約を埋めない方針) |
 | Planning/Reality Mode | **未着手**(既存Relation/Constraint/PERTの接続のみ部分実装) |
-| 永続rate limit・client IP(SEC-RATE) | **実装済み(SECURITY-RATE-02B)**。client IPは直近の接続元を基準とし(`npm run start`=`app/server.mjs`のcustom serverが接続元を渡す。`next start`では不明扱い)、`X-Forwarded-For`は`TRUSTED_PROXY_CIDRS`で明示した信頼proxyからだけ右から解釈する。login(email単位15分10回・IP単位15分30回)、MFA verify(user単位15分5回・IP単位15分30回)、確認メール再送・再設定メール要求(IP単位1時間20回、DBの発行上限も維持)をRedis token bucketで制限(keyはHMACで仮名化)。Redis障害時はlogin/MFAがprocess内へ縮退、メール系はfail closed。新規の閾値は承認待ち(OPEN-AUTH-06)。詳細は`docs/decisions/DEC-SECURITY-RATE-02.md`、運用は`docs/runbooks/SECURITY_RATE_RUNBOOK.md`、受入: `scripts/verify_gate_security_rate_02.ts` |
+| 永続rate limit・client IP(SEC-RATE) | **実装済み(SECURITY-RATE-02B)・omega-dev2受入済み(SECURITY-RATE-02C)**。client IPは直近の接続元を基準とし(`npm run start`=`app/server.mjs`のcustom serverが接続元を渡す。`next start`・`next dev`の直起動では不明扱いとなり、IP単位の上限はメール系を含めて判定されない)、`X-Forwarded-For`は`TRUSTED_PROXY_CIDRS`で明示した信頼proxyからだけ右から解釈する。login(email単位15分10回・IP単位15分30回)、MFA verify(user単位15分5回・IP単位15分30回)、確認メール再送・再設定メール要求(IP単位1時間20回、DBの発行上限も維持)をRedis token bucketで制限(keyはHMACで仮名化)。Redis障害時はlogin/MFAがprocess内へ縮退、メール系はfail closed。新規の閾値は承認待ち(OPEN-AUTH-06)。詳細は`docs/decisions/DEC-SECURITY-RATE-02.md`、運用は`docs/runbooks/SECURITY_RATE_RUNBOOK.md`、受入: `scripts/verify_gate_security_rate_02.ts` |
 | TBD-17(機微データのカラムレベル暗号化方式) | **決定待ち(OPEN-SECURITY-ENCRYPTION-01)**。現状はTOTP秘密鍵(`MFA_ENCRYPTION_KEY`)とAI provider APIキー(`AI_CREDENTIAL_ENCRYPTION_KEY`)のみアプリ層AES-256-GCMで暗号化(key version・rotationなし)。対象列の棚卸し・脅威モデル・推奨案は`docs/decisions/DEC-SECURITY-ENCRYPTION-01.md`(PROPOSED) |
 
 ---
@@ -277,7 +277,8 @@ AI Workerは別プロセスではなく、Next.jsサーバー起動時に`instru
 
 本番起動の`npm run start`は`node server.mjs`(Next.js custom server、Gate SECURITY-RATE-02B)。
 接続元addressをroute handlerへ渡す以外は`next start -p 13000`と同じで、`npm run start:next`で従来の起動に戻せる
-(その場合client IPは不明として扱われる)。起動時に`[SECURITY-RATE] backend=… peer=…`の1行が出る。
+(その場合client IPは不明として扱われ、IP単位の上限はlogin・MFA・メール要求のすべてで判定されない)。起動時に`[SECURITY-RATE] backend=… peer=…`の1行が出る。
+custom serverは`NODE_ENV`に従って起動し(未設定時はproduction)、`NODE_ENV=development`では開発モードで動く。
 
 ### ビルド・型チェック・Lint
 
@@ -319,7 +320,15 @@ npm run test:pattern-math
 
 ```bash
 sudo systemctl status ismay-app.service
+journalctl -u ismay-app.service -n 50 --no-pager | grep -E 'SECURITY-RATE|listening'
 ```
+
+omega-dev2の現行構成（2026-09-27 SECURITY-RATE-02C）：`ExecStart`は`node …/app/server.mjs`、
+**`NODE_ENV=development`（開発モード）で運用中**（利用者判断。本番化はHTTPS・Secure Cookie・reverse proxyとセットの別Gate）。
+
+- HMRは無効。**コード変更後は`sudo systemctl restart ismay-app.service`で反映する**。
+- 起動logに`backend=redis … peer=custom-server`が出ることを確認する（`peer=unavailable`ならIP単位のrate limitが無効）。
+- 詳細・rollbackは`docs/runbooks/SECURITY_RATE_RUNBOOK.md` §1.5・§6。
 
 ### アクセスURL
 
