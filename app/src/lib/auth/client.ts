@@ -34,6 +34,12 @@ async function refreshAccessToken(): Promise<boolean> {
         debugLog.event("auth", res.ok ? "silent refresh succeeded" : "silent refresh failed", {
           status: res.status,
         });
+        if (res.status === 409) {
+          // [AUTH-REFRESH-07] 別tab等の要求が同じRefresh Tokenで先に回転した(SUPERSEDED)。
+          // 先行要求の新しいcookieが届くのを少し待ってから元の要求を再送する(cookieはserver側で消していない)
+          await new Promise((r) => setTimeout(r, 300));
+          return true;
+        }
         return res.ok;
       } catch (err) {
         debugLog.error("auth", "silent refresh threw", err);

@@ -581,11 +581,11 @@ async function main(): Promise<void> {
       const refreshed = await http(BASE_URL, "/api/v1/auth/refresh", { jar });
       ok("[H8] refreshで回転する", refreshed.status === 200 && jar.ismay_rt !== oldRt);
       const reuse = await http(BASE_URL, "/api/v1/auth/refresh", { jar: { ismay_rt: oldRt } });
-      ok("[H8] 旧refresh tokenの再利用は拒否", reuse.status === 401);
-      // 現行契約(rotateSessionは同じsession行のhashを更新する): 旧tokenは見つからず拒否されるだけで、
-      // 系列の失効は失効済みsessionのtokenが提示された場合に限られる(DEC-SECURITY-RATE-02 §2の棚卸し参照)。
+      // [AUTH-REFRESH-07] 回転直後(猶予時間内)の旧token再提示は同時要求の競合として409で拒否し、cookieも系列も維持する。
+      // 猶予を過ぎた再提示の系列失効は scripts/verify_gate_auth_refresh_07.ts [F3] で検証する。
+      ok("[H8] 回転直後の旧refresh token再提示は409で拒否(猶予内)", reuse.status === 409, `status=${reuse.status}`);
       const next = await http(BASE_URL, "/api/v1/auth/refresh", { jar });
-      ok("[H8] 回転後の新tokenは引き続き有効(現行契約)", next.status === 200);
+      ok("[H8] 回転後の新tokenは引き続き有効(猶予内の再提示は系列を失効させない)", next.status === 200);
       const jar2: Jar = {};
       await login(BASE_URL, userA.email, PASSWORD, {}, jar2);
       const noCsrf = await http(BASE_URL, "/api/v1/auth/logout", { jar: jar2 });

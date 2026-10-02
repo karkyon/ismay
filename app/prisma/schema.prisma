@@ -128,10 +128,29 @@ model UserSession {
   expiresAt          DateTime  @map("expires_at")
   revokedAt          DateTime? @map("revoked_at")
   revokedReason      String?   @map("revoked_reason")
+  /// [AUTH-REFRESH-07] 回転で失効したRefresh Tokenのhash(再利用検知用)
+  retiredRefreshTokens UserSessionRetiredRefreshToken[]
 
   @@index([userId, revokedAt])
   @@index([refreshTokenFamily])
+  @@index([refreshTokenHash])
   @@map("user_sessions")
+}
+
+/// [AUTH-REFRESH-07新設・2026-10-02] 回転済み(失効済み)Refresh Tokenのhash。OPEN-AUTH-07の是正。
+/// 旧tokenが回転後に提示された場合、猶予時間(同時要求の競合)を過ぎていれば盗難後の再利用とみなし、
+/// そのsession(=token系列)を失効させる。hashのみ保存し平文は保持しない。
+/// user_sessionsへのNOT NULL FK(CASCADE)によりsession削除・アカウントPurge(user scope)で削除される。
+/// 回転時に、Refresh Tokenの有効期間(30日)より古い行をそのsessionについて削除する。
+model UserSessionRetiredRefreshToken {
+  id        String      @id @default(uuid())
+  sessionId String      @map("session_id")
+  session   UserSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tokenHash String      @unique @map("token_hash")
+  retiredAt DateTime    @default(now()) @map("retired_at")
+
+  @@index([sessionId, retiredAt])
+  @@map("user_session_retired_refresh_tokens")
 }
 
 /// FR-AUTH-03対応: TOTP MFA秘密鍵と復旧コード。[新設・推論]
