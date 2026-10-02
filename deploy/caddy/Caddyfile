@@ -1,0 +1,33 @@
+# [PROD-DEPLOY-01新設・2026-10-02] ISMAYのHTTPS入口(reverse proxy)。docker-compose.ymlのcaddy(network_mode: host)が読む。
+# 運用: docs/runbooks/PRODUCTION_RUNBOOK.md
+#
+# - 証明書はCaddyの内部CA(tls internal)で発行する。root証明書(./docker-data/caddy/data/caddy/pki/authorities/local/root.crt)を
+#   各端末へ一度だけ信頼登録する。中間・server証明書はCaddyが自動更新する。
+# - 待受けは10443/tcp(ポート規約 10000+443)のみ。80番(HTTP→HTTPS転送)・HTTP/3(UDP)は使わない
+#   (同居する他projectのportと衝突させない)。
+# - appへは[::1]:13000で接続する(ISMAY_UPSTREAMで変更可)。appはTRUSTED_PROXY_CIDRS=::1/128で、このproxyからの接続だけ
+#   X-Forwarded-Forを信頼する(同一hostの他processが127.0.0.1:13000へ直接送ったX-Forwarded-Forは信頼されない)。
+#   Caddyは信頼していない接続元から届いたX-Forwarded-Forを捨て、接続元addressだけを渡す(trusted_proxies未設定)。
+# - ISMAY_PUBLIC_HOSTS: 利用者がアクセスするURL(カンマ区切り)。例: https://192.168.1.11:10443, https://localhost:10443
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$ISMAY_PUBLIC_HOSTS} {
+	tls internal
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+	reverse_proxy {$ISMAY_UPSTREAM:[::1]:13000} {
+		header_up -X-Ismay-Peer-Address
+	}
+}

@@ -70,6 +70,21 @@ services:
     networks:
       - ismay-net
 
+  # [PROD-DEPLOY-01] HTTPS入口(reverse proxy、Caddy内部CA)。appへは[::1]:13000で接続するためhost networkで動かす
+  # (待受けは10443/tcpだけ。Caddyfile参照)。ISMAY_PUBLIC_HOSTSはrepository直下の.envで指定する
+  caddy:
+    image: caddy:2-alpine
+    container_name: ismay-caddy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      ISMAY_PUBLIC_HOSTS: ${ISMAY_PUBLIC_HOSTS:?ISMAY_PUBLIC_HOSTS is required in the repository root .env (docs/runbooks/PRODUCTION_RUNBOOK.md)}
+      ISMAY_UPSTREAM: ${ISMAY_UPSTREAM:-[::1]:13000}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./docker-data/caddy/data:/data
+      - ./docker-data/caddy/config:/config
+
 networks:
   ismay-net:
     name: ismay-net
