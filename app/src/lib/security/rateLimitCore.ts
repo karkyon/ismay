@@ -246,6 +246,21 @@ redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]))
 return 1
 `;
 
+/**
+ * [SECURITY-RATE-02D] HMAC keyのrotation中に、旧keyのbucketを新keyへ移す(残量・拒否flag・TTLを引き継ぐ)。
+ * KEYS: (新key, 旧key)の組を並べる。新keyが無く旧keyがある組だけRENAMEする。戻り値: 移した件数。
+ */
+export const MIGRATE_BUCKETS_LUA = `
+local moved = 0
+for i = 1, #KEYS, 2 do
+  if redis.call('EXISTS', KEYS[i]) == 0 and redis.call('EXISTS', KEYS[i + 1]) == 1 then
+    redis.call('RENAME', KEYS[i + 1], KEYS[i])
+    moved = moved + 1
+  end
+end
+return moved
+`;
+
 /** Lua戻り値の解釈。 */
 export function parseTakeBucketsReply(reply: unknown, bucketCount: number): {
   allowed: boolean;

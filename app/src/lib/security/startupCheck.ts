@@ -13,7 +13,8 @@ export function logSecurityRateStartupSummary(): void {
   const peer = isPeerAddressStampingActive() ? "peer=custom-server" : "peer=unavailable(client IPは不明として扱う)";
   const proxyText = proxy.ok ? `trustedProxies=${proxy.cidrs.length}` : `trustedProxies=INVALID(${proxy.error})`;
   const line = `[SECURITY-RATE] ${describeRateLimitBackendMode(mode)} ${peer} ${proxyText}`;
-  const isError = !proxy.ok || mode.kind === "UNCONFIGURED" || (mode.kind === "LOCAL_DEV" && isProductionRuntime());
-  if (isError) console.error(`${line} — 設定を確認してください(docs/runbooks/SECURITY_RATE_RUNBOOK.md)`);
+  const rotationError = mode.kind === "REDIS" ? mode.previousKeyError : null;
+  const isError = !proxy.ok || mode.kind === "UNCONFIGURED" || (mode.kind === "LOCAL_DEV" && isProductionRuntime()) || rotationError !== null;
+  if (isError) console.error(`${line}${rotationError ? ` (${rotationError})` : ""} — 設定を確認してください(docs/runbooks/SECURITY_RATE_RUNBOOK.md)`);
   else console.log(line);
 }

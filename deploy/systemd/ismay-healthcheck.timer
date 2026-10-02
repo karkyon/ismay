@@ -1,0 +1,14 @@
+# [SECURITY-RATE-02D] ISMAYのhealth checkを毎分実行する。
+# 有効化: sudo systemctl enable --now ismay-healthcheck.timer
+# 異常の確認: journalctl -t ismay-health -p err --since "1 hour ago"
+[Unit]
+Description=ISMAY health check (every minute)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=ismay-healthcheck.service
+
+[Install]
+WantedBy=timers.target

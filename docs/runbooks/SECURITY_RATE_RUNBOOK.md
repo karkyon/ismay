@@ -10,9 +10,10 @@
 
 ### 1.1 `app/.env`へ追加
 ```dotenv
-REDIS_URL=redis://127.0.0.1:16379
+REDIS_URL=redis://:<REDIS_PASSWORD>@localhost:16379
 RATE_LIMIT_HMAC_KEY=<openssl rand -base64 32 の出力>
 ```
+- [SECURITY-RATE-02D] Redisは認証必須。`REDIS_PASSWORD`はrepository直下の`.env`（docker compose用、gitignore対象、mode 600）に置き、同じ値を`REDIS_URL`へ入れる（URLで使えない文字はencode）。未設定だと`docker compose`がエラーで止まる。
 - Redisは`docker-compose.yml`の`ismay-redis`（`docker compose ps`でhealthyを確認）。host側は`127.0.0.1:16379`だけに公開する（SECURITY-RATE-02C `7ec4d7f`。Redisは認証なしのため、全interfaceへ公開しない。Dockerが公開したportはufw等の規則を迂回する）。`REDIS_URL`は`redis://localhost:16379`等のloopback表記でもよい。確認：`ss -ltnp | grep 16379`が`127.0.0.1:16379`だけを示すこと
 - `RATE_LIMIT_HMAC_KEY`はrepositoryへ入れない。変更すると全bucketが満杯に戻る（ロック中の利用者も解除される）だけで、データへの影響は無い。
 - **設定しないままproductionで起動すると**、login・MFAはprocess内の縮退limiterで動き、確認メール再送・再設定メール要求は（client IPが分かる場合）発行されなくなる（fail closed）。
@@ -69,6 +70,20 @@ EXPECT_PEER_RESOLVED=1 npx tsx ../scripts/verify_gate_security_rate_02.ts
 - 開発モードのdebug出力がrequest body（email等）をjournalへ出す（limiter自身の行には出ない）。対処はSECURITY-RATE-02D（未決事項台帳 §3.1）。
 
 ## 2. 監視
+### 2.1 health（SECURITY-RATE-02D）
+- `GET /api/v1/health`（認証不要）：200 `{status:"ok"}` / 503 `{status:"degraded"}`。同一host（loopback）からの要求にだけ`checks`（runtime・DB・rate limit backend・peer・信頼proxy）と`problems`を返す。
+- `ok`の条件：DB（`SELECT 1`、2秒）とrate limit backend（Redis PING）が正常、HMAC rotation設定が正しい、productionではpeer取得（custom server経由）、`TRUSTED_PROXY_CIDRS`が正しい。
+- 定期確認：`deploy/systemd/ismay-healthcheck.{service,timer}`（毎分、`scripts/ops/ismay_healthcheck.sh`）。異常・応答なし・service停止をjournalへerrorで出す。正常へ戻ったときだけinfoを出す。
+```bash
+sed "s#__ISMAY_REPO__#$HOME/projects/ismay#" deploy/systemd/ismay-healthcheck.service | sudo tee /etc/systemd/system/ismay-healthcheck.service >/dev/null
+sudo install -m 644 deploy/systemd/ismay-healthcheck.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ismay-healthcheck.timer
+journalctl -t ismay-health -p err --since "1 hour ago" --no-pager   # 異常の確認
+```
+- 外部への通知（メール・チャット）は送り先が未決のため未設定。journalのerrorを既存の監視へつなぐ。
+
+### 2.2 log・監査
+- 開発モードのdebug出力はemailを`<email:sha256先頭10文字>`に置き換えて出す（同じアドレスは同じ値になり追跡できる。SECURITY-RATE-02D）。productionではdebug出力自体が無い。
 ```bash
 # 縮退(60秒に1回)
 journalctl -u ismay-app.service --since "1 hour ago" --no-pager | grep 'SECURITY-RATE] DEGRADED'
@@ -110,6 +125,16 @@ npx tsx ../scripts/rate_limit_unlock.ts MFA_USER <userId> --delete
 policy名は`LOGIN_ACCOUNT` / `LOGIN_IP` / `MFA_USER` / `MFA_IP` / `EMAIL_RESEND_IP` / `PASSWORD_FORGOT_IP`。
 
 ## 5. 値・規則の変更
+### 5.1 `RATE_LIMIT_HMAC_KEY`のrotation（SECURITY-RATE-02D）
+keyを変えるとbucketのkeyが変わる。旧keyを`RATE_LIMIT_HMAC_KEY_PREVIOUS`に置いた期間は、判定の直前に旧keyのbucketを新keyへ移す（残量・拒否状態・TTLを引き継ぐ。ロック中の利用者は解除されない）。
+1. 新しいkeyを作る：`openssl rand -base64 32`
+2. `app/.env`：`RATE_LIMIT_HMAC_KEY_PREVIOUS=<現在のkey>`、`RATE_LIMIT_HMAC_KEY=<新しいkey>`
+3. `sudo systemctl restart ismay-app.service`。起動logに`hmacRotation=previous-key-active`が出ることを確認（不正なら`hmacRotation=INVALID`のerror、判定は新keyだけで続く）
+4. 最長のwindow＋余裕（1時間＋60秒）を過ぎたら`RATE_LIMIT_HMAC_KEY_PREVIOUS`を削除して再起動（旧keyのbucketはTTLで消えている）
+- 漏えいが疑われる場合は手順2で`PREVIOUS`を置かずに変更してよい（全bucketが満杯に戻る）。
+- `scripts/rate_limit_unlock.ts`は現在のkeyだけを計算する。rotation中に旧keyのbucketを消す必要がある場合は、移行後（1回判定された後）に実行する。
+
+### 5.2 policyの値
 - 値は`app/src/lib/security/rateLimitPolicies.ts`の1箇所。容量・windowを変えるときは`version`を1上げる（旧versionのkeyは参照されずTTLで消える）。
 - 変更したらDEC-SECURITY-RATE-02 §5・ADD §2・未決事項台帳OPEN-AUTH-06を更新する。
 

@@ -3,6 +3,7 @@ import Redis from "ioredis";
 import { db } from "@/lib/db";
 import { debugServer } from "@/lib/debugServer";
 import {
+  MIGRATE_BUCKETS_LUA,
   REFUND_BUCKET_LUA,
   TAKE_BUCKETS_LUA,
   bucketTtlMs,
@@ -79,7 +80,12 @@ declare global {
 }
 
 function envSignature(): string {
-  return JSON.stringify([process.env.NODE_ENV ?? "", process.env.REDIS_URL ?? "", process.env.RATE_LIMIT_HMAC_KEY ?? ""]);
+  return JSON.stringify([
+    process.env.NODE_ENV ?? "",
+    process.env.REDIS_URL ?? "",
+    process.env.RATE_LIMIT_HMAC_KEY ?? "",
+    process.env.RATE_LIMIT_HMAC_KEY_PREVIOUS ?? "",
+  ]);
 }
 
 function getState(): LimiterState {
@@ -247,6 +253,13 @@ export async function consumeRateLimit(scope: string, checks: RateLimitCheck[]):
     const keyed = active.map((c) => ({ policy: c.policy, key: limiterKey(hmacKey, c.policy, c.value), digest: limiterDigest(hmacKey, c.policy, c.value) }));
     if (client && !isRedisKnownDown(client)) {
       try {
+        const previousKey = state.mode.previousHmacKey;
+        if (previousKey) {
+          // [SECURITY-RATE-02D] HMAC key rotation中: 旧keyのbucketを新keyへ移してから判定する
+          const pairs: string[] = [];
+          for (const k of active) pairs.push(limiterKey(hmacKey, k.policy, k.value), limiterKey(previousKey, k.policy, k.value));
+          await client.eval(MIGRATE_BUCKETS_LUA, pairs.length, ...pairs);
+        }
         const args: (string | number)[] = [];
         for (const k of keyed) args.push(k.policy.capacity, k.policy.windowMs, 1, bucketTtlMs(k.policy));
         const reply = await client.eval(TAKE_BUCKETS_LUA, keyed.length, ...keyed.map((k) => k.key), ...args);
@@ -359,6 +372,31 @@ export async function settleRateLimitSuccess(decision: RateLimitDecision): Promi
     } catch (err) {
       debugServer.error("security/rateLimiter", "成功時のbucket更新に失敗しました(次回判定は消費済みのまま)", err instanceof Error ? err.message : String(err));
     }
+  }
+}
+
+export type RateLimitBackendHealth =
+  | { kind: "REDIS"; ok: boolean; status: string; latencyMs: number | null; hmacRotation: "none" | "active" | "invalid" }
+  | { kind: "UNCONFIGURED"; ok: false; error: string }
+  | { kind: "LOCAL_DEV"; ok: boolean };
+
+/**
+ * [SECURITY-RATE-02D] health用: rate limit backendの状態(Redisへは短時間のPINGだけ行う)。例外は投げない。
+ * LOCAL_DEVはproduction以外でだけ正常とみなす。
+ */
+export async function getRateLimitBackendHealth(): Promise<RateLimitBackendHealth> {
+  const state = getState();
+  if (state.mode.kind === "UNCONFIGURED") return { kind: "UNCONFIGURED", ok: false, error: state.mode.error };
+  if (state.mode.kind === "LOCAL_DEV") return { kind: "LOCAL_DEV", ok: process.env.NODE_ENV !== "production" };
+  const hmacRotation = state.mode.previousHmacKey ? "active" : state.mode.previousKeyError ? "invalid" : "none";
+  const client = getRedis(state);
+  if (!client) return { kind: "REDIS", ok: false, status: "none", latencyMs: null, hmacRotation };
+  const started = Date.now();
+  try {
+    const pong = await client.ping();
+    return { kind: "REDIS", ok: pong === "PONG" && hmacRotation !== "invalid", status: client.status, latencyMs: Date.now() - started, hmacRotation };
+  } catch {
+    return { kind: "REDIS", ok: false, status: client.status, latencyMs: null, hmacRotation };
   }
 }
 

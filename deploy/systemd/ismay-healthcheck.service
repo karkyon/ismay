@@ -1,0 +1,16 @@
+# [SECURITY-RATE-02D] ISMAYの定期health check(1回実行)。timer: ismay-healthcheck.timer
+# 配置: sudo install -m 644 deploy/systemd/ismay-healthcheck.{service,timer} /etc/systemd/system/
+# ExecStartのpathは配備時にrepositoryの実path(既定 /home/karkyon/projects/ismay)へ置き換える。
+[Unit]
+Description=ISMAY health check
+After=ismay-app.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash __ISMAY_REPO__/scripts/ops/ismay_healthcheck.sh
+RuntimeDirectory=ismay-healthcheck
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
