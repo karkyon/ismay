@@ -23,8 +23,15 @@ import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import nextEnv from "@next/env";
 
 if (!process.env.NODE_ENV) process.env.NODE_ENV = "production";
+const dev = process.env.NODE_ENV !== "production";
+const dir = dirname(fileURLToPath(import.meta.url));
+// [PROD-DEPLOY-01是正・2026-10-02] PORT・ISMAY_LISTEN_HOSTをapp/.envから読めるよう、Next.jsと同じ規則(@next/env)で
+// .envを先に読み込む。従来はnext()の初期化時に読まれるため、listen先の決定に間に合わず、.envのISMAY_LISTEN_HOSTが
+// 無視されて全interfaceでlistenしていた(omega-dev2の配備受入S3で検出)。既に設定済みの環境変数は上書きされない。
+nextEnv.loadEnvConfig(dir, dev);
 
 const PEER_ADDRESS_HEADER = "x-ismay-peer-address";
 const PEER_STAMP_SYMBOL = Symbol.for("ismay.peerAddressStamp.v1");
@@ -50,10 +57,8 @@ if (new Set(listenHosts).size !== listenHosts.length) {
   process.exit(1);
 }
 const hostname = listenHosts[0];
-const dev = process.env.NODE_ENV !== "production";
 
 const { default: next } = await import("next");
-const dir = dirname(fileURLToPath(import.meta.url));
 const app = next({ dev, dir, port, hostname: hostname ?? "localhost" });
 const handle = app.getRequestHandler();
 await app.prepare();

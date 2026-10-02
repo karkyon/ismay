@@ -110,6 +110,18 @@ console.log("[O4] docker-composeの公開範囲・Redis認証");
   ok("Redisのhealthcheckはenvで認証(passwordをcommand lineに書かない)", compose.includes("REDISCLI_AUTH: ${REDIS_PASSWORD:?"));
 }
 
+console.log("[O5] custom serverは.envを読んでからlisten先を決める");
+{
+  const server = readFileSync(resolve(__dirname, "../../../../server.mjs"), "utf-8");
+  const loadAt = server.indexOf("nextEnv.loadEnvConfig(dir, dev)");
+  const readAt = server.indexOf("process.env.ISMAY_LISTEN_HOST ??");
+  const portAt = server.indexOf("process.env.PORT ??");
+  ok("@next/envで.envを読み込む", loadAt > 0, `load=${loadAt}`);
+  ok("ISMAY_LISTEN_HOST・PORTの参照より前に読み込む", loadAt > 0 && loadAt < readAt && loadAt < portAt, `load=${loadAt} host=${readAt} port=${portAt}`);
+  const pkg = JSON.parse(readFileSync(resolve(__dirname, "../../../../package.json"), "utf-8")) as { dependencies?: Record<string, string> };
+  ok("@next/envを依存関係に明記", typeof pkg.dependencies?.["@next/env"] === "string");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {
   console.log("FAILURES:\n" + failures.map((f) => `  - ${f}`).join("\n"));
