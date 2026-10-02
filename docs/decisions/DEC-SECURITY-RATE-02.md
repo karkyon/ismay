@@ -2,7 +2,7 @@
 
 | 項目 | 値 |
 |---|---|
-| 状態 | **採用**（Gate SECURITY-RATE-02A）。方式・信頼境界・障害時policyは本記録で確定。新規の閾値（§5の「実装上の既定値」）は値の承認待ち（OPEN-AUTH-06）。実装はSECURITY-RATE-02B（`9b8e866`）、omega-dev2への配備・環境B受入はSECURITY-RATE-02C（2026-09-27、HEAD `2b00550`で全PASS） |
+| 状態 | **採用**（Gate SECURITY-RATE-02A）。方式・信頼境界・障害時policyは本記録で確定。新規の閾値（§5の「実装上の既定値」）は値の承認待ち（OPEN-AUTH-06）。実装はSECURITY-RATE-02B（`9b8e866`）、omega-dev2への配備・環境B受入はSECURITY-RATE-02C（2026-09-27、HEAD `2b00550`で全PASS）。運用hardening（Redis認証・HMAC key rotation・health）はSECURITY-RATE-02D、信頼proxy（Caddy、`::1/128`）を置いた本番構成はPROD-DEPLOY-01（2026-10-02、HEAD `4356ab6`で全PASS） |
 | 作成 | 2026-09-26（Gate SECURITY-RATE-02A：棚卸し・契約。実装はGate SECURITY-RATE-02B） |
 | 基準コード | `12c3174`（DOC-SYNC-05。コードは`d3844e4`と同一） |
 | 出典 | 全機能仕様一覧 SEC-RATE「Login、AI、検索、export等の濫用を制限。Redis token bucket、device/IP signal、lockout監査を予定」（β前必須）、統合正本v5.0 §23.3「rate limit…を必須とする」、DOC-11 §7「AI/refresh/materialize/bulkにはuser/workspace rate limit」、AUTH-RESET「token、期限、rate limit…」 |
@@ -61,7 +61,8 @@
 - `app/server.mjs`（`npm run start`）がrequestごとに受信した`x-ismay-peer-address`を**削除してから**`<nonce> <socket.remoteAddress>`で上書きし、Next.jsの標準handlerへ渡す。
 - nonceは起動ごとの32byte乱数で、同じprocessの`globalThis[Symbol.for("ismay.peerAddressStamp.v1")]`（書換え不可）にだけ置く。`lib/security/clientIp.ts`がnonceを定数時間比較し、一致した場合だけpeerとして採用する。clientは値を知り得ない。
 - `next start`・`next dev`で起動した場合はnonceが存在しないため、同名headerは無視され、**peer不明＝client IP不明**になる。偽装値を接続元として採用しない点では安全だが、**IP次元のpolicy（`auth.login.ip`・`auth.mfa.ip`・`auth.email_resend.ip`・`auth.password_forgot.ip`）は判定されず無効になる**（§5・§7.1）。起動時logに`peer=unavailable`と出る。
-- custom serverは`NODE_ENV`に従い`next({ dev })`を起動する（`NODE_ENV`未設定時はproduction）。`NODE_ENV=development`でもpeerの取得は同じく有効（omega-dev2の現行運用。Runbook §1.5）。
+- custom serverは`NODE_ENV`に従い`next({ dev })`を起動する（`NODE_ENV`未設定時はproduction）。`NODE_ENV=development`でもpeerの取得は同じく有効。
+- [PROD-DEPLOY-01] `ISMAY_LISTEN_HOST`はカンマ区切りで複数指定できる。omega-dev2は`127.0.0.1,::1`でlistenし、reverse proxy（Caddy）は`[::1]`から接続する。`TRUSTED_PROXY_CIDRS=::1/128`とすることで、同一hostの他processが`127.0.0.1`へ直接送った`X-Forwarded-For`は信頼されない（接続元addressで信頼proxyと直接接続を区別する）。
 
 ### 3.2 client IPの決定
 | 条件 | client IP |
@@ -161,6 +162,7 @@ Redis backendの障害（上表）と、client IPが解決できない状態は*
 
 ## 11. 残る論点
 - OPEN-AUTH-06：§5の「実装上の既定値」の承認。
-- OPEN-AUTH-07：回転済みrefresh tokenの再利用検知（§2.3）。
-- 本Gateの対象外：register・AI・検索・export・materialize・bulkのrate limit（DOC-11 §7のuser/workspace単位）、health endpoint（現状はlogと監査のみ）、Redisの認証・TLS（docker-composeのRedisは認証なし。host側の公開はSECURITY-RATE-02C（`7ec4d7f`）で`127.0.0.1:16379`へ限定済み）、`RATE_LIMIT_HMAC_KEY`のrotation手順（→SECURITY-RATE-02D）。
+- OPEN-AUTH-07：回転済みrefresh tokenの再利用検知（§2.3）→ AUTH-REFRESH-07で実装（[DEC-AUTH-REFRESH-07](DEC-AUTH-REFRESH-07.md)）。猶予時間の承認が残件。
+- 本Gateの対象外：register・AI・検索・export・materialize・bulkのrate limit（DOC-11 §7のuser/workspace単位）、RedisのTLS。
+- SECURITY-RATE-02Dで対処済み：Redis認証（requirepass）、`RATE_LIMIT_HMAC_KEY`のrotation（`RATE_LIMIT_HMAC_KEY_PREVIOUS`で旧bucketを新keyへ移す。Runbook §5.1）、health endpoint（`GET /api/v1/health`、Runbook §2.1）。
 - SECURITY-RATE-02Cで判明した運用上の指摘（PostgreSQL・MinIOの全interface公開、開発モードのrequest body出力、本番化）は[未決事項台帳](../status/未決事項台帳.md) §3.1に記録。

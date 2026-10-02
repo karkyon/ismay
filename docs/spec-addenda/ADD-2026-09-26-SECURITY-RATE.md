@@ -48,18 +48,20 @@ Prisma migrationは追加しない。Redis（`docker-compose.yml`の`redis`）�
 | rollback | — | `npm run start:next`（`next start -p 13000`）。client IPは不明になり、IP単位の制限はlogin・MFA・メール要求のすべてで判定されず無効になる（Redis障害時のfail closedとは別の状態。DEC §7.1） |
 
 - `next dev`で直接起動した場合も同じくpeer不明になる。custom serverは`NODE_ENV`に従い`next({ dev })`を起動し、`NODE_ENV=development`でもpeerを取得する。
-- omega-dev2（SECURITY-RATE-02C）：`ismay-app.service`を`npx next dev`から`node server.mjs`＋`NODE_ENV=development`（開発モード維持、利用者判断）へ変更。HMRは無効で、コード変更後はservice再起動が必要。production化はHTTPS・Secure Cookie・reverse proxy・`TRUSTED_PROXY_CIDRS`とセットの別Gate。
+- omega-dev2：SECURITY-RATE-02C（2026-09-27）で`npx next dev`から`node server.mjs`＋`NODE_ENV=development`へ変更し、PROD-DEPLOY-01（2026-10-02）で`NODE_ENV=production`・`ISMAY_LISTEN_HOST=127.0.0.1,::1`・`TRUSTED_PROXY_CIDRS=::1/128`・Caddy（内部CA、`https://192.168.1.11:10443`）の本番構成へ移行（[PRODUCTION_RUNBOOK](../runbooks/PRODUCTION_RUNBOOK.md)）。
+- `ISMAY_LISTEN_HOST`はカンマ区切りで複数指定できる。`PORT`・`ISMAY_LISTEN_HOST`は`app/.env`に書いてよい（custom serverが`@next/env`で先に読み込む）。
 
 ### 4.0 Redisの公開範囲
-`docker-compose.yml`の`redis`はhost側を`127.0.0.1:16379`だけに公開する（SECURITY-RATE-02C `7ec4d7f`。変更前は`16379`を全interfaceへ公開、Redisは認証なし）。認証・TLSは未導入（SECURITY-RATE-02D）。
+`docker-compose.yml`の`redis`はhost側を`127.0.0.1:16379`だけに公開する（SECURITY-RATE-02C `7ec4d7f`）。SECURITY-RATE-02Dでrequirepassを必須にした（`REDIS_PASSWORD`はrepository直下`.env`、`REDIS_URL=redis://:<password>@localhost:16379`）。TLSは未導入（loopback内の通信のみ）。PostgreSQL・MinIOも`127.0.0.1`だけに公開する。
 
 ### 4.1 環境変数（`app/.env`）
 | 変数 | 必須 | 内容 |
 |---|---|---|
 | `REDIS_URL` | production必須 | 例：`redis://127.0.0.1:16379`（`redis://`または`rediss://`） |
 | `RATE_LIMIT_HMAC_KEY` | production必須 | base64（decode後32byte以上）。`openssl rand -base64 32` |
+| `RATE_LIMIT_HMAC_KEY_PREVIOUS` | 任意 | HMAC key rotation中だけ旧keyを指定（旧bucketを新keyへ移す。SECURITY-RATE-02D） |
 | `TRUSTED_PROXY_CIDRS` | 任意 | reverse proxyを置く場合だけ、そのaddressをカンマ区切りのCIDRで指定（例：`127.0.0.1/32,::1`）。未設定時はforwarded系headerを使わない |
-| `ISMAY_LISTEN_HOST` | 任意 | listenするaddress（未設定時は全interface、`next start -p 13000`と同じ）。reverse proxy配下では`127.0.0.1`を推奨 |
+| `ISMAY_LISTEN_HOST` | 任意 | listenするaddress（カンマ区切りで複数可。未設定時は全interface、`next start -p 13000`と同じ）。reverse proxy配下ではloopbackのみ（omega-dev2は`127.0.0.1,::1`） |
 | `PORT` | 任意 | 既定13000 |
 
 ## 5. DOC-12 EVAL・受入テストへの追補

@@ -3,7 +3,7 @@
 | 項目 | 値 |
 |---|---|
 | 対象 | `app/server.mjs`（custom server）、`app/src/lib/security/`（client IP解決・rate limit） |
-| omega-dev2の現行構成 | 2026-09-27 SECURITY-RATE-02C（HEAD `2b00550`）で配備・受入済み：`ismay-app.service`は`node server.mjs`＋**`NODE_ENV=development`（開発モード）**、Redisは`127.0.0.1:16379`のみ、`backend=redis`・`peer=custom-server`・`trustedProxies=0`（§1.5） |
+| omega-dev2の現行構成 | 2026-10-02 PROD-DEPLOY-01（HEAD `4356ab6`）で本番化：`ismay-app.service`は`node server.mjs`＋`NODE_ENV=production`、appは`127.0.0.1`・`::1`でlisten、入口はCaddy（`https://192.168.1.11:10443`）、`TRUSTED_PROXY_CIDRS=::1/128`、Redisは`127.0.0.1:16379`・認証あり。起動log `backend=redis … peer=custom-server trustedProxies=1`（§1.5、[PRODUCTION_RUNBOOK](PRODUCTION_RUNBOOK.md)） |
 | 関連 | [DEC-SECURITY-RATE-02](../decisions/DEC-SECURITY-RATE-02.md)、[ADD-2026-09-26-SECURITY-RATE](../spec-addenda/ADD-2026-09-26-SECURITY-RATE.md) |
 
 ## 1. 初回設定（omega-dev2）
@@ -39,9 +39,11 @@ journalctl -u ismay-app.service -n 50 --no-pager | grep -E 'SECURITY-RATE|listen
 ```
 期待する出力:
 ```
-[SECURITY-RATE] backend=redis redis://127.0.0.1:16379 peer=custom-server trustedProxies=0
-> ISMAY server listening on *:13000 (production, peer address stamping enabled)
+[SECURITY-RATE] backend=redis redis://localhost:16379 peer=custom-server trustedProxies=1
+> ISMAY server listening on 127.0.0.1:13000 (production, peer address stamping enabled)
+> ISMAY server listening on [::1]:13000 (production, peer address stamping enabled)
 ```
+（omega-dev2の本番構成。reverse proxyを置かない構成では`trustedProxies=0`・`*:13000`。`ISMAY_LISTEN_HOST`・`PORT`は`app/.env`に書いてよい：custom serverが`@next/env`で先に読み込む）
 | 出力 | 意味・対応 |
 |---|---|
 | `backend=UNCONFIGURED(…)`（error） | `REDIS_URL`・`RATE_LIMIT_HMAC_KEY`の未設定・不正。§1.1 |
@@ -55,19 +57,19 @@ EXPECT_PEER_RESOLVED=1 npx tsx ../scripts/verify_gate_security_rate_02.ts
 ```
 - テストユーザー（`gate-security-rate-02-…@example.invalid`）・作成したRedis key・監査記録は終了時に削除する。
 - 信頼proxy試験（[H7]）は、`TRUSTED_PROXY_CIDRS`にloopbackを含む別instanceを指定した場合だけ行う（`TRUSTED_PROXY_BASE_URL=…`）。指定しなければSKIPと表示される（成功扱いにしない）。
-- omega-dev2の環境B受入（SECURITY-RATE-02C、2026-09-27）：64/0・SKIP 1（[H7]）。回帰12本の結果は全機能トレーサビリティ台帳 §2.2。
+- omega-dev2の環境B受入：SECURITY-RATE-02C（2026-09-27、開発モード）64/0・SKIP 1、2026-10-02（production・Caddy信頼proxy）64/0・SKIP 1（[H7]）。回帰の結果は全機能トレーサビリティ台帳 §2.2。
 
-### 1.5 omega-dev2の現行構成（開発モード運用）
+### 1.5 omega-dev2の現行構成（2026-10-02〜 production）
 | 項目 | 値 |
 |---|---|
-| unit | `ExecStart=/home/karkyon/.nvm/versions/node/v22.23.2/bin/node /home/karkyon/projects/ismay/app/server.mjs`、`Environment=NODE_ENV=development`（旧unitは`npx next dev -p 13000 -H 0.0.0.0`。backupは`/etc/systemd/system/ismay-app.service.bak_02c_*`） |
-| 起動log | `[SECURITY-RATE] backend=redis redis://localhost:16379 peer=custom-server trustedProxies=0`、`> ISMAY server listening on *:13000 (development, peer address stamping enabled)` |
-| `app/.env` | mode 600。`REDIS_URL`・`RATE_LIMIT_HMAC_KEY`設定済み |
-| 利用者判断 | 開発モードのまま運用する（production化はHTTPS reverse proxy・Secure Cookie・`TRUSTED_PROXY_CIDRS`とセットの別Gate。HTTPのままproductionにするとcookieがSecureになりloginできない） |
+| unit | `ExecStart=/home/karkyon/.nvm/versions/node/v22.23.2/bin/node /home/karkyon/projects/ismay/app/server.mjs`、`Environment=NODE_ENV=production`（開発モード時のunitは`/etc/systemd/system/ismay-app.service.bak_prod01_*`） |
+| `app/.env` | mode 600。`REDIS_URL`（password付き）・`RATE_LIMIT_HMAC_KEY`・`ISMAY_LISTEN_HOST=127.0.0.1,::1`・`TRUSTED_PROXY_CIDRS=::1/128`・`APP_BASE_URL=https://192.168.1.11:10443` |
+| repository直下`.env` | mode 600。`REDIS_PASSWORD`・`ISMAY_PUBLIC_HOSTS` |
+| 入口 | Caddy（`ismay-caddy`、内部CA）`https://192.168.1.11:10443`。詳細は[PRODUCTION_RUNBOOK](PRODUCTION_RUNBOOK.md) |
+| 監視 | `ismay-healthcheck.timer`（毎分、§2.1） |
 
-- `NODE_ENV=development`のcustom serverは`next({ dev: true })`で動き、ページ・APIは要求時にcompileされる。**HMR（ブラウザの自動再読込）は無効**。コード変更後は`sudo systemctl restart ismay-app.service`で反映する。
-- 開発モードでは`npm run build`の成果物（`.next`の本番build）は使われない（buildは品質Gateとしてのみ実行する）。
-- 開発モードのdebug出力がrequest body（email等）をjournalへ出す（limiter自身の行には出ない）。対処はSECURITY-RATE-02D（未決事項台帳 §3.1）。
+- production起動は`npm run build`の成果物を使う。**コード更新後はbuildしてから`sudo systemctl restart ismay-app.service`**（PRODUCTION_RUNBOOK §2.3）。
+- 2026-09-27〜10-02は開発モード（`NODE_ENV=development`、HMR無効）で運用していた。
 
 ## 2. 監視
 ### 2.1 health（SECURITY-RATE-02D）

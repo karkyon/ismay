@@ -223,7 +223,9 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 | Activity Evidence Ledger | **未実装**。概念レベルの記述のみで具体的なデータ契約・API契約が正本に未確定 |
 | Context Playbook | **未実装**。同上の理由で非推奨(想像でデータ契約を埋めない方針) |
 | Planning/Reality Mode | **未着手**(既存Relation/Constraint/PERTの接続のみ部分実装) |
-| 永続rate limit・client IP(SEC-RATE) | **実装済み(SECURITY-RATE-02B)・omega-dev2受入済み(SECURITY-RATE-02C)**。client IPは直近の接続元を基準とし(`npm run start`=`app/server.mjs`のcustom serverが接続元を渡す。`next start`・`next dev`の直起動では不明扱いとなり、IP単位の上限はメール系を含めて判定されない)、`X-Forwarded-For`は`TRUSTED_PROXY_CIDRS`で明示した信頼proxyからだけ右から解釈する。login(email単位15分10回・IP単位15分30回)、MFA verify(user単位15分5回・IP単位15分30回)、確認メール再送・再設定メール要求(IP単位1時間20回、DBの発行上限も維持)をRedis token bucketで制限(keyはHMACで仮名化)。Redis障害時はlogin/MFAがprocess内へ縮退、メール系はfail closed。新規の閾値は承認待ち(OPEN-AUTH-06)。詳細は`docs/decisions/DEC-SECURITY-RATE-02.md`、運用は`docs/runbooks/SECURITY_RATE_RUNBOOK.md`、受入: `scripts/verify_gate_security_rate_02.ts` |
+| 永続rate limit・client IP(SEC-RATE) | **実装済み(SECURITY-RATE-02B)・omega-dev2受入済み(SECURITY-RATE-02C、2026-10-02に本番構成で再受入)**。client IPは直近の接続元を基準とし(`npm run start`=`app/server.mjs`のcustom serverが接続元を渡す。`next start`・`next dev`の直起動では不明扱いとなり、IP単位の上限はメール系を含めて判定されない)、`X-Forwarded-For`は`TRUSTED_PROXY_CIDRS`で明示した信頼proxyからだけ右から解釈する。login(email単位15分10回・IP単位15分30回)、MFA verify(user単位15分5回・IP単位15分30回)、確認メール再送・再設定メール要求(IP単位1時間20回、DBの発行上限も維持)をRedis token bucketで制限(keyはHMACで仮名化)。Redis障害時はlogin/MFAがprocess内へ縮退、メール系はfail closed。新規の閾値は承認待ち(OPEN-AUTH-06)。詳細は`docs/decisions/DEC-SECURITY-RATE-02.md`、運用は`docs/runbooks/SECURITY_RATE_RUNBOOK.md`、受入: `scripts/verify_gate_security_rate_02.ts` |
+| Refresh Token再利用検知 | **実装済み(AUTH-REFRESH-07)**。回転で失効したtokenのhashを保持し、同時要求は1件だけ成功(他は409、cookie維持)、猶予10秒を過ぎた再提示はsession(系列)を失効させ監査`AUTH_REFRESH_REUSE_DETECTED`。`docs/decisions/DEC-AUTH-REFRESH-07.md` |
+| 本番構成・運用hardening | **実装済み(PROD-DEPLOY-01・SECURITY-RATE-02D)**。入口はCaddy(内部CA)の`https://192.168.1.11:10443`、appは`NODE_ENV=production`で`127.0.0.1`・`::1`のみ、PostgreSQL・MinIO・Redisは`127.0.0.1`のみ(Redisは認証あり)、`GET /api/v1/health`と毎分のhealth check timer、debug出力のemail仮名化。`docs/runbooks/PRODUCTION_RUNBOOK.md` |
 | TBD-17(機微データのカラムレベル暗号化方式) | **決定待ち(OPEN-SECURITY-ENCRYPTION-01)**。現状はTOTP秘密鍵(`MFA_ENCRYPTION_KEY`)とAI provider APIキー(`AI_CREDENTIAL_ENCRYPTION_KEY`)のみアプリ層AES-256-GCMで暗号化(key version・rotationなし)。対象列の棚卸し・脅威モデル・推奨案は`docs/decisions/DEC-SECURITY-ENCRYPTION-01.md`(PROPOSED) |
 
 ---
@@ -233,7 +235,9 @@ DOC-12（EVAL受入テスト仕様書）・DOC-13（Traceability台帳）を参�
 ### 前提
 
 ```bash
-# インフラ(PostgreSQL/Redis/MinIO)起動
+# インフラ(PostgreSQL/Redis/MinIO/Caddy)起動
+# repository直下の.env(gitignore対象、mode 600)に REDIS_PASSWORD と ISMAY_PUBLIC_HOSTS が必要
+# (未設定だとcomposeがエラーで止まる。docs/runbooks/PRODUCTION_RUNBOOK.md §2.1)
 cd ~/projects/ismay
 docker compose up -d
 docker compose ps   # 全てhealthyになるまで待つ
@@ -243,7 +247,7 @@ docker compose ps   # 全てhealthyになるまで待つ
 
 | 変数 | 内容 |
 |---|---|
-| `DATABASE_URL` | `postgresql://ismay:ismay_dev_password@localhost:15432/ismay_dev` |
+| `DATABASE_URL` | `postgresql://ismay:ismay_dev_password@127.0.0.1:15432/ismay_dev`(PostgreSQLは127.0.0.1だけで待ち受ける) |
 | `AUTH_JWT_SECRET` | Access/MFAチャレンジ/TOTP登録トークン署名鍵（base64, 48byte）。`openssl rand -base64 48` |
 | `MFA_ENCRYPTION_KEY` | TOTP秘密鍵暗号化用(base64, 32byte)。`openssl rand -base64 32` |
 | `ANTHROPIC_API_KEY` | AI抽出/OCR/セグメンテーション/PEM対話・助言のフォールバック用(Workspace単位のBYOK未登録時) |
@@ -251,10 +255,11 @@ docker compose ps   # 全てhealthyになるまで待つ
 | `MAIL_TRANSPORT` | `smtp`または`log`(未設定時は`log`=送信せず本文をサーバーログへ出力。一般公開環境では使わない) |
 | `APP_BASE_URL` | メール内リンクの基点(例: `https://ismay.example.com`)。smtp時は必須。log時の既定は`http://localhost:13000` |
 | `MAIL_FROM` / `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` | SMTP設定(詳細は`docs/runbooks/MAIL_RUNBOOK.md`) |
-| `REDIS_URL` | rate limit用Redis(例: `redis://127.0.0.1:16379`)。production必須(未設定時はlogin/MFAが縮退、メール系はfail closed) |
+| `REDIS_URL` | rate limit用Redis(`redis://:<REDIS_PASSWORD>@localhost:16379`、認証必須)。production必須(未設定時はlogin/MFAが縮退、メール系はfail closed) |
 | `RATE_LIMIT_HMAC_KEY` | rate limit keyの仮名化用(base64、32byte以上)。`openssl rand -base64 32`。production必須 |
-| `TRUSTED_PROXY_CIDRS` | 任意。reverse proxyを置く場合だけproxyのaddressをCIDRで指定(例: `127.0.0.1/32,::1`)。未設定時は`X-Forwarded-For`等を使わない |
-| `ISMAY_LISTEN_HOST` | 任意。`npm run start`のlisten address(未設定時は全interface) |
+| `RATE_LIMIT_HMAC_KEY_PREVIOUS` | 任意。HMAC key rotation中だけ旧keyを指定(`docs/runbooks/SECURITY_RATE_RUNBOOK.md` §5.1) |
+| `TRUSTED_PROXY_CIDRS` | 任意。reverse proxyのaddressをCIDRで指定。omega-dev2は`::1/128`(Caddyが`[::1]`から接続)。未設定時は`X-Forwarded-For`等を使わない |
+| `ISMAY_LISTEN_HOST` | 任意。`npm run start`のlisten address(カンマ区切りで複数可、未設定時は全interface)。omega-dev2は`127.0.0.1,::1` |
 
 詳細は`docs/runbooks/SECURITY_RATE_RUNBOOK.md`。
 
@@ -323,25 +328,29 @@ sudo systemctl status ismay-app.service
 journalctl -u ismay-app.service -n 50 --no-pager | grep -E 'SECURITY-RATE|listening'
 ```
 
-omega-dev2の現行構成（2026-09-27 SECURITY-RATE-02C）：`ExecStart`は`node …/app/server.mjs`、
-**`NODE_ENV=development`（開発モード）で運用中**（利用者判断。本番化はHTTPS・Secure Cookie・reverse proxyとセットの別Gate）。
+omega-dev2の現行構成（2026-10-02 PROD-DEPLOY-01）：`ExecStart`は`node …/app/server.mjs`、**`NODE_ENV=production`**。
+appは`127.0.0.1`・`::1`だけで待ち受け、入口はCaddy(内部CA)の`https://192.168.1.11:10443`。
 
-- HMRは無効。**コード変更後は`sudo systemctl restart ismay-app.service`で反映する**。
-- 起動logに`backend=redis … peer=custom-server`が出ることを確認する（`peer=unavailable`ならIP単位のrate limitが無効）。
-- 詳細・rollbackは`docs/runbooks/SECURITY_RATE_RUNBOOK.md` §1.5・§6。
+- コード更新時は`npm ci && npx prisma migrate deploy && npx prisma generate && npm run build`の後に`sudo systemctl restart ismay-app.service`。
+- 起動logに`backend=redis … peer=custom-server trustedProxies=1`と、`127.0.0.1:13000`・`[::1]:13000`のlisten行が出ることを確認する。
+- 健康状態：`curl -s http://127.0.0.1:13000/api/v1/health`、異常は`journalctl -t ismay-health -p err`(毎分のtimer)。
+- 詳細・rollbackは`docs/runbooks/PRODUCTION_RUNBOOK.md`。
 
 ### アクセスURL
 
 | 用途 | URL |
 |---|---|
-| アプリ本体（新規登録） | `http://192.168.1.11:13000/register` |
-| ログイン | `http://192.168.1.11:13000/login` |
-| ダッシュボード | `http://192.168.1.11:13000/dashboard` |
-| Prisma Studio(DB確認用、別途起動要) | `http://192.168.1.11:15555`（`npx prisma studio --port 15555`） |
-| MinIOコンソール | `http://192.168.1.11:19001` |
+| アプリ本体（新規登録） | `https://192.168.1.11:10443/register` |
+| ログイン | `https://192.168.1.11:10443/login` |
+| ダッシュボード | `https://192.168.1.11:10443/dashboard` |
+| Prisma Studio(DB確認用、別途起動要) | SSHトンネル経由 `http://localhost:15555`（`ssh -L 15555:127.0.0.1:15555`、`npx prisma studio --port 15555`） |
+| MinIOコンソール | SSHトンネル経由 `http://localhost:19001`（`ssh -L 19001:127.0.0.1:19001`） |
+
+各端末にCaddy内部CAのroot証明書（`~/ismay-caddy-root.crt`）を一度だけ信頼登録する（`docs/runbooks/PRODUCTION_RUNBOOK.md` §3）。
+`http://192.168.1.11:13000`は使えない（appはloopbackだけで待ち受ける）。PostgreSQL・MinIO・Redisへも、LANからはSSHトンネル経由でだけ接続する。
 
 サーバー外（同一LAN外）からアクセスする場合はVPN接続、またはSSHポートフォワーディング
-（例：`ssh -L 13000:localhost:13000 karkyon@192.168.1.11`）を利用する。
+（例：`ssh -L 10443:127.0.0.1:10443 karkyon@192.168.1.11` で `https://localhost:10443`）を利用する。
 
 ---
 
